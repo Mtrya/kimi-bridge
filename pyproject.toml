@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kimi-bridge"
+version = "0.0.0"
+description = "Bridge kimi-code (via the local kimi server REST/WS API) to Feishu and Telegram"
+readme = "README.md"
+requires-python = ">=3.11"
+# The server client stays small. Platform SDKs remain opt-in extras.
+dependencies = [
+    "httpx",
+    "websockets",
+]
+
+[project.optional-dependencies]
+feishu = ["lark-oapi>=1.7.1,<2"]
+telegram = ["aiogram"]
+
+[project.scripts]
+kimi-bridge = "kimi_bridge.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kimi_bridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
