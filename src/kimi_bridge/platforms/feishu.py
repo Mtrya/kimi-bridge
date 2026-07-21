@@ -173,6 +173,13 @@ class _LarkWebSocketRunner:
         finally:
             self._initialized.set()
             if not sdk_loop.is_closed():
+                pending = asyncio.all_tasks(sdk_loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    sdk_loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
                 if self._client is not None:
                     try:
                         sdk_loop.run_until_complete(
@@ -184,13 +191,6 @@ class _LarkWebSocketRunner:
                         LOGGER.warning(
                             "Feishu WebSocket disconnect did not complete cleanly"
                         )
-                pending = asyncio.all_tasks(sdk_loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    sdk_loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
                 sdk_loop.close()
             if ws_module.loop is sdk_loop:
                 ws_module.loop = previous_sdk_loop

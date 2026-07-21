@@ -323,6 +323,7 @@ class ChatRouter:
             return
 
         await self._stop_active_stream()
+        await self._client.resume_session(session_id)
         active = _ActiveStream(
             conversation_key=conversation_key,
             session_id=session_id,

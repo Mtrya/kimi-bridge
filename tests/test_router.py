@@ -6,7 +6,7 @@ from typing import Any
 
 from kimi_bridge.platforms.base import InboundMessage
 from kimi_bridge.router import ChatRouter
-from kimi_bridge.state import StateStore
+from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
 
 class FakeKimiClient:
@@ -17,7 +17,9 @@ class FakeKimiClient:
         self.abort_result = True
         self.sessions: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
+        self.resumed: list[str] = []
         self.subscriptions: list[str] = []
+        self.stream_actions: list[tuple[str, str]] = []
         self.snapshots: dict[str, dict[str, Any]] = {}
         self._events: dict[str, asyncio.Queue[dict[str, Any]]] = {}
         self._ready: dict[str, asyncio.Event] = {}
@@ -60,6 +62,10 @@ class FakeKimiClient:
     async def get_session(self, session_id: str) -> dict[str, Any]:
         return next(session for session in self.sessions if session["id"] == session_id)
 
+    async def resume_session(self, session_id: str) -> None:
+        self.resumed.append(session_id)
+        self.stream_actions.append(("resume", session_id))
+
     async def abort_prompt(self, session_id: str) -> bool:
         self.aborted.append(session_id)
         return self.abort_result
@@ -78,6 +84,7 @@ class FakeKimiClient:
 
     async def subscribe_events(self, session_id: str):
         self.subscriptions.append(session_id)
+        self.stream_actions.append(("subscribe", session_id))
         queue = self._events.setdefault(session_id, asyncio.Queue())
         self._ready.setdefault(session_id, asyncio.Event()).set()
         while True:
@@ -157,6 +164,46 @@ async def test_first_message_creates_auto_session_and_persists_binding(
     assert binding.session_id == "session-1"
     assert binding.workspace == str(workspace.resolve())
     assert binding.permission_mode == "auto"
+
+
+async def test_persisted_binding_is_resumed_before_websocket_subscription(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-restored",
+                    workspace=str(tmp_path),
+                )
+            }
+        )
+    )
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("after restart"))
+    finally:
+        await router.close()
+
+    assert client.stream_actions == [
+        ("resume", "session-restored"),
+        ("subscribe", "session-restored"),
+    ]
+    assert client.prompts == [
+        (
+            "session-restored",
+            "after restart",
+            {"model": "kimi-code/k3", "permission_mode": "auto"},
+        )
+    ]
 
 
 async def test_bridge_commands_are_intercepted_and_rebind_sessions(

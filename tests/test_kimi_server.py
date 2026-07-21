@@ -295,6 +295,26 @@ async def test_rest_envelope_error_is_raised() -> None:
     assert caught.value.code == 40401
 
 
+async def test_resume_session_uses_advertised_lifecycle_service() -> None:
+    http = FakeHttpClient([_envelope({"id": "session-1"})])
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    await client.resume_session("session-1")
+
+    assert http.requests == [
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v2/sessionLifecycleService/resume",
+            {
+                "headers": {"Authorization": "Bearer token-1"},
+                "json": "session-1",
+            },
+        )
+    ]
+
+
 async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
     first = FakeWebSocket(
         subscribe_payload={
@@ -463,3 +483,4 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
         "43123",
         "--keep-alive",
     )
+    assert factory.calls[0][1]["start_new_session"] is True

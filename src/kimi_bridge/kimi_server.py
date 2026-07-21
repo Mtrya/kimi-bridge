@@ -280,6 +280,7 @@ class KimiServerSupervisor:
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             raise KimiServerStartupError(
@@ -506,6 +507,22 @@ class KimiServerClient:
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/sessions/{session_id}")
+
+    async def resume_session(self, session_id: str) -> None:
+        """Materialize a stored session in the daemon runtime.
+
+        kimi 0.27.0 advertises ``sessionLifecycleService.resume`` through its
+        ``/api/v2/channels`` catalog. Stored sessions remain visible through
+        the v1 REST API after a daemon restart, but WebSocket subscriptions are
+        rejected until this lifecycle action loads the session.
+        """
+
+        await self._request(
+            "POST",
+            "/sessionLifecycleService/resume",
+            json_body=session_id,
+            api_prefix="/api/v2",
+        )
 
     async def list_sessions(
         self,
@@ -769,6 +786,7 @@ class KimiServerClient:
         *,
         json_body: Any = None,
         params: dict[str, Any] | None = None,
+        api_prefix: str = "/api/v1",
     ) -> Any:
         connection = await self._connection_info()
         kwargs: dict[str, Any] = {
@@ -779,7 +797,7 @@ class KimiServerClient:
         if params is not None:
             kwargs["params"] = params
         response = await self._http.request(
-            method, f"{connection.base_url}/api/v1{path}", **kwargs
+            method, f"{connection.base_url}{api_prefix}{path}", **kwargs
         )
         response.raise_for_status()
         envelope = response.json()
