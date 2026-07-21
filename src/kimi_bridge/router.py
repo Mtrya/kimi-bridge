@@ -29,6 +29,8 @@ from .interactions import (
     SkippedAnswer,
 )
 from .kimi_server import (
+    GoalControl,
+    GoalInfo,
     KimiServerAPIError,
     KimiServerClient,
     KimiServerError,
@@ -89,13 +91,16 @@ HELP_TEXT = """Commands:
 /plan [on|off] — show or explicitly set plan mode
 /status — show bound session and runtime state
 /title [text] — show or rename the session
-/usage — show session token, context, turn, and cost usage
+/usage — show live session token totals and context usage
 /tasks [running|completed|failed|cancelled] — list tasks
 /tasks show <id> — inspect a task with an 8 KiB output tail
 /tasks cancel <id> — cancel a task
 /skills — list skills available to the session
 /skills run <name> [args] — activate an exact skill
 /mcp — list session-derived MCP tools
+/compact — compact session context and report event metrics
+/undo [count] — undo one or more history steps
+/goal [status|pause|resume|cancel|-- <objective>|<objective>] — inspect or control a goal
 /stop — abort the active prompt
 /help — show this help"""
 
@@ -136,6 +141,20 @@ class _PendingInteraction:
     message: MessageRef
     request: ApprovalRequest | QuestionRequest
     timeout_task: asyncio.Task[None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _CompactionOutcome:
+    state: Literal["completed", "blocked", "cancelled"]
+    compacted_count: int | None = None
+    tokens_before: int | None = None
+    tokens_after: int | None = None
+
+
+@dataclass(slots=True)
+class _CompactionWaiter:
+    future: asyncio.Future[_CompactionOutcome]
+    active_trigger: Literal["manual", "auto"] | None = None
 
 
 class ChatRouter:
@@ -181,9 +200,13 @@ class ChatRouter:
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
         self._active: _ActiveStream | None = None
         self._pending: dict[str, _PendingInteraction] = {}
+        self._compaction_waiters: dict[str, _CompactionWaiter] = {}
         self._interaction_lock = asyncio.Lock()
 
     async def close(self) -> None:
+        self._fail_all_compaction_waiters(
+            KimiServerError("kimi event stream stopped")
+        )
         await self._stop_active_stream()
         for pending in tuple(self._pending.values()):
             if pending.timeout_task is not None:
@@ -332,6 +355,10 @@ class ChatRouter:
         if not isinstance(payload, dict):
             return
         event_type = payload.get("type") or event.get("type")
+
+        if isinstance(event_type, str) and event_type.startswith("compaction."):
+            self._dispatch_compaction_event(active.session_id, event_type, payload)
+            return
 
         if event_type == "resync_required":
             snapshot = event.get("snapshot")
@@ -491,6 +518,29 @@ class ChatRouter:
                 return
             await self._handle_mcp(conversation_key, adapter, conversation)
             return
+        if command == "/compact":
+            await self._handle_compact(
+                conversation_key,
+                adapter,
+                conversation,
+                actor,
+                argument,
+            )
+            return
+        if command == "/undo":
+            await self._handle_undo(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/goal":
+            await self._handle_goal(
+                conversation_key,
+                adapter,
+                conversation,
+                actor,
+                argument,
+            )
+            return
         if command == "/mode":
             if argument not in PERMISSION_MODES:
                 await self._send_chunked(
@@ -526,26 +576,16 @@ class ChatRouter:
             )
             if binding is None:
                 return
-            async with self._interaction_lock:
-                pending = self._pending.get(conversation_key)
-                session_ids: list[str] = []
-                if pending is not None:
-                    session_ids.append(pending.session_id)
-                if binding.session_id not in session_ids:
-                    session_ids.append(binding.session_id)
-                aborted = False
-                for session_id in session_ids:
-                    aborted = await self._client.abort_prompt(session_id) or aborted
-                if pending is not None:
-                    await self._clear_pending(pending)
-                    await pending.adapter.finish_interaction(
-                        pending.message,
-                        InteractionOutcome(
-                            state="cancelled",
-                            detail="Cancelled by /stop.",
-                        ),
-                    )
-            result = "Stopped." if aborted or pending is not None else "No active prompt."
+            aborted, cancelled_interaction = await self._cancel_active_work(
+                conversation_key,
+                binding.session_id,
+                detail="Cancelled by /stop.",
+            )
+            result = (
+                "Stopped."
+                if aborted or cancelled_interaction
+                else "No active prompt."
+            )
             await self._send_chunked(adapter, conversation, result)
             return
 
@@ -907,6 +947,261 @@ class ChatRouter:
             adapter, conversation, _format_mcp_tools(tools)
         )
 
+    async def _handle_compact(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
+        argument: str,
+    ) -> None:
+        if argument:
+            await self._send_chunked(adapter, conversation, "Usage: /compact")
+            return
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        status = await self._require_idle(
+            binding, adapter, conversation, "Compaction"
+        )
+        if status is None:
+            return
+
+        progress = await adapter.send_text(conversation, "Compacting...")
+        if binding.session_id in self._compaction_waiters:
+            await adapter.edit_text(
+                progress,
+                "Compaction failed: another compaction is already being tracked.",
+            )
+            return
+        future = asyncio.get_running_loop().create_future()
+        waiter = _CompactionWaiter(future=future)
+        self._compaction_waiters[binding.session_id] = waiter
+        try:
+            await self._ensure_active_stream(
+                conversation_key,
+                binding.session_id,
+                adapter,
+                conversation,
+                actor,
+            )
+            await self._client.compact_session(binding.session_id)
+            outcome = await future
+            if outcome.state == "completed":
+                assert outcome.compacted_count is not None
+                assert outcome.tokens_before is not None
+                assert outcome.tokens_after is not None
+                text = (
+                    f"Compaction complete: {outcome.compacted_count} prompts compacted; "
+                    f"tokens {outcome.tokens_before} -> {outcome.tokens_after}."
+                )
+            elif outcome.state == "blocked":
+                text = "Compaction failed: Kimi blocked the compaction."
+            else:
+                text = "Compaction failed: Kimi cancelled the compaction."
+        except Exception as exc:
+            text = f"Compaction failed: {exc}"
+        finally:
+            if self._compaction_waiters.get(binding.session_id) is waiter:
+                self._compaction_waiters.pop(binding.session_id)
+            if future.done() and not future.cancelled():
+                future.exception()
+        await adapter.edit_text(progress, text)
+
+    async def _handle_undo(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        parts = argument.split()
+        if not parts:
+            count = 1
+        elif len(parts) == 1 and parts[0].isascii() and parts[0].isdecimal():
+            count = int(parts[0])
+            if count == 0:
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /undo [positive-count]"
+                )
+                return
+        else:
+            await self._send_chunked(
+                adapter, conversation, "Usage: /undo [positive-count]"
+            )
+            return
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        status = await self._require_idle(
+            binding, adapter, conversation, "Undo"
+        )
+        if status is None:
+            return
+        await self._client.undo_session(binding.session_id, count=count)
+        await self._send_chunked(
+            adapter,
+            conversation,
+            f"Undid {count} history {'step' if count == 1 else 'steps'}.",
+        )
+
+    async def _handle_goal(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+
+        if not argument or argument == "status":
+            goal = await self._client.get_goal(binding.session_id)
+            await self._send_chunked(
+                adapter, conversation, _format_goal(goal)
+            )
+            return
+
+        first, separator, remainder = argument.partition(" ")
+        if first in {"status", "pause", "resume", "cancel"} and separator:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                "Objectives beginning with status, pause, resume, or cancel must use /goal -- <objective>.",
+            )
+            return
+
+        if argument in {"pause", "cancel"}:
+            goal = await self._client.get_goal(binding.session_id)
+            if goal is None:
+                await self._send_chunked(
+                    adapter, conversation, "No active goal."
+                )
+                return
+            await self._cancel_active_work(
+                conversation_key,
+                binding.session_id,
+                detail=f"Cancelled by /goal {argument}.",
+            )
+            await self._client.update_profile(
+                binding.session_id, goal_control=cast(GoalControl, argument)
+            )
+            await self._send_chunked(
+                adapter,
+                conversation,
+                "Goal paused." if argument == "pause" else "Goal cancelled.",
+            )
+            return
+
+        if argument == "resume":
+            goal = await self._client.get_goal(binding.session_id)
+            if goal is None:
+                await self._send_chunked(
+                    adapter, conversation, "No active goal."
+                )
+                return
+            status = await self._require_idle(
+                binding, adapter, conversation, "Goal resume"
+            )
+            if status is None:
+                return
+            await self._ensure_active_stream(
+                conversation_key,
+                binding.session_id,
+                adapter,
+                conversation,
+                actor,
+            )
+            await self._client.update_profile(
+                binding.session_id, goal_control="resume"
+            )
+            await self._send_chunked(adapter, conversation, "Goal resumed.")
+            return
+
+        if first == "--":
+            objective = remainder.strip()
+            if not objective:
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /goal -- <objective>"
+                )
+                return
+        else:
+            objective = argument
+
+        goal = await self._client.get_goal(binding.session_id)
+        if goal is not None:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                "A goal already exists. Pause, resume, or cancel it explicitly.",
+            )
+            return
+        status = await self._require_idle(
+            binding, adapter, conversation, "Goal creation"
+        )
+        if status is None:
+            return
+        await self._ensure_active_stream(
+            conversation_key,
+            binding.session_id,
+            adapter,
+            conversation,
+            actor,
+        )
+        await self._client.update_profile(
+            binding.session_id, goal_objective=objective
+        )
+        result = await self._client.submit_prompt(
+            binding.session_id,
+            objective,
+            permission_mode=binding.permission_mode,
+        )
+        if result.get("status") in {"queued", "blocked"}:
+            prompt_id = str(result["prompt_id"])
+            try:
+                await self._client.steer_prompts(
+                    binding.session_id, [prompt_id]
+                )
+            except KimiServerAPIError as exc:
+                if exc.code != 40001:
+                    raise
+
+    async def _cancel_active_work(
+        self,
+        conversation_key: str,
+        session_id: str,
+        *,
+        detail: str,
+    ) -> tuple[bool, bool]:
+        async with self._interaction_lock:
+            pending = self._pending.get(conversation_key)
+            session_ids: list[str] = []
+            if pending is not None:
+                session_ids.append(pending.session_id)
+            if session_id not in session_ids:
+                session_ids.append(session_id)
+            aborted = False
+            for target_session_id in session_ids:
+                aborted = (
+                    await self._client.abort_prompt(target_session_id)
+                    or aborted
+                )
+            if pending is not None:
+                await self._clear_pending(pending)
+                await pending.adapter.finish_interaction(
+                    pending.message,
+                    InteractionOutcome(state="cancelled", detail=detail),
+                )
+            return aborted, pending is not None
+
     async def _require_binding(
         self,
         conversation_key: str,
@@ -1089,10 +1384,90 @@ class ChatRouter:
             await asyncio.gather(stream_task, return_exceptions=True)
 
     async def _consume_events(self, active: _ActiveStream) -> None:
-        async for event in self._client.subscribe_events(active.session_id):
-            if self._active is not active:
+        failure: KimiServerError | None = None
+        try:
+            async for event in self._client.subscribe_events(active.session_id):
+                if self._active is not active:
+                    return
+                await self.dispatch_event(active.conversation_key, event)
+        except asyncio.CancelledError:
+            failure = KimiServerError("kimi event stream stopped")
+            raise
+        except Exception as exc:
+            failure = KimiServerError(f"kimi event stream failed: {exc}")
+            raise
+        else:
+            failure = KimiServerError("kimi event stream ended")
+        finally:
+            if failure is None:
+                failure = KimiServerError("kimi event stream stopped")
+            self._fail_compaction_waiter(active.session_id, failure)
+
+    def _dispatch_compaction_event(
+        self,
+        session_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        waiter = self._compaction_waiters.get(session_id)
+        if waiter is None or waiter.future.done():
+            return
+        if event_type == "compaction.started":
+            trigger = payload.get("trigger")
+            if trigger in {"manual", "auto"}:
+                waiter.active_trigger = cast(Literal["manual", "auto"], trigger)
+            return
+        if event_type not in {
+            "compaction.completed",
+            "compaction.blocked",
+            "compaction.cancelled",
+        }:
+            return
+        if waiter.active_trigger == "auto":
+            waiter.active_trigger = None
+            return
+        if waiter.active_trigger != "manual":
+            return
+
+        if event_type == "compaction.completed":
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                waiter.future.set_exception(
+                    KimiServerProtocolError(
+                        "compaction.completed event has no result"
+                    )
+                )
                 return
-            await self.dispatch_event(active.conversation_key, event)
+            try:
+                outcome = _CompactionOutcome(
+                    state="completed",
+                    compacted_count=int(result["compactedCount"]),
+                    tokens_before=int(result["tokensBefore"]),
+                    tokens_after=int(result["tokensAfter"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                waiter.future.set_exception(
+                    KimiServerProtocolError(
+                        "compaction.completed event has invalid metrics"
+                    )
+                )
+                return
+        elif event_type == "compaction.blocked":
+            outcome = _CompactionOutcome(state="blocked")
+        else:
+            outcome = _CompactionOutcome(state="cancelled")
+        waiter.future.set_result(outcome)
+
+    def _fail_compaction_waiter(
+        self, session_id: str, error: KimiServerError
+    ) -> None:
+        waiter = self._compaction_waiters.get(session_id)
+        if waiter is not None and not waiter.future.done():
+            waiter.future.set_exception(error)
+
+    def _fail_all_compaction_waiters(self, error: KimiServerError) -> None:
+        for session_id in tuple(self._compaction_waiters):
+            self._fail_compaction_waiter(session_id, error)
 
     def _stream_done(self, task: asyncio.Task[None]) -> None:
         active = self._active
@@ -1564,6 +1939,81 @@ def _format_task_detail(task: TaskInfo) -> str:
     else:
         lines.append("Output tail: unavailable")
     return "\n".join(lines)
+
+
+def _format_goal(goal: GoalInfo | None) -> str:
+    if goal is None:
+        return "No active goal."
+    budget = goal.budget
+    lines = [
+        f"Goal: {goal.objective}",
+        f"Status: {goal.status}",
+    ]
+    if goal.completion_criterion is not None:
+        lines.append(f"Completion criterion: {goal.completion_criterion}")
+    lines.extend(
+        (
+            f"Used: {goal.turns_used} turns; {goal.tokens_used} tokens; {_format_milliseconds(goal.wall_clock_ms)}",
+            "Budgets:",
+            _format_goal_budget_line(
+                "Tokens",
+                budget.token_budget,
+                budget.remaining_tokens,
+                budget.token_budget_reached,
+            ),
+            _format_goal_budget_line(
+                "Turns",
+                budget.turn_budget,
+                budget.remaining_turns,
+                budget.turn_budget_reached,
+            ),
+            _format_goal_budget_line(
+                "Time",
+                budget.wall_clock_budget_ms,
+                budget.remaining_wall_clock_ms,
+                budget.wall_clock_budget_reached,
+                milliseconds=True,
+            ),
+            f"Over budget: {'yes' if budget.over_budget else 'no'}",
+        )
+    )
+    if goal.terminal_reason is not None:
+        lines.append(f"Terminal reason: {goal.terminal_reason}")
+    return "\n".join(lines)
+
+
+def _format_goal_budget_line(
+    label: str,
+    limit: int | None,
+    remaining: int | None,
+    reached: bool,
+    *,
+    milliseconds: bool = False,
+) -> str:
+    if milliseconds:
+        limit_text = _format_milliseconds(limit) if limit is not None else "not set"
+        remaining_text = (
+            _format_milliseconds(remaining) if remaining is not None else "not set"
+        )
+    else:
+        limit_text = str(limit) if limit is not None else "not set"
+        remaining_text = str(remaining) if remaining is not None else "not set"
+    return (
+        f"- {label}: limit {limit_text}; remaining {remaining_text}; "
+        f"reached {'yes' if reached else 'no'}"
+    )
+
+
+def _format_milliseconds(value: int) -> str:
+    if value < 1000:
+        return f"{value} ms"
+    seconds = value / 1000
+    if seconds < 60:
+        return f"{seconds:g} s"
+    minutes, remaining_seconds = divmod(seconds, 60)
+    if remaining_seconds:
+        return f"{int(minutes)} min {remaining_seconds:g} s"
+    return f"{int(minutes)} min"
 
 
 def _format_skills(skills: list[SkillInfo]) -> str:

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from kimi_bridge.interactions import (
     ApprovalPrompt,
@@ -24,6 +27,9 @@ from kimi_bridge.interactions import (
     SkippedAnswer,
 )
 from kimi_bridge.kimi_server import (
+    GoalBudget,
+    GoalInfo,
+    GoalStatus,
     KimiServerAPIError,
     ModelInfo,
     SessionProfile,
@@ -56,6 +62,12 @@ class FakeKimiClient:
         self.steered: list[tuple[str, list[str]]] = []
         self.steer_error: KimiServerAPIError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
+        self.compact_calls: list[str] = []
+        self.compact_error: KimiServerAPIError | None = None
+        self.undo_calls: list[tuple[str, int]] = []
+        self.undo_error: KimiServerAPIError | None = None
+        self.goals: dict[str, GoalInfo] = {}
+        self.goal_subscription_ready: list[bool] = []
         self.models = [
             ModelInfo(
                 alias="kimi-code/k3",
@@ -183,6 +195,19 @@ class FakeKimiClient:
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
 
+    async def compact_session(self, session_id: str) -> None:
+        self.compact_calls.append(session_id)
+        if self.compact_error is not None:
+            raise self.compact_error
+
+    async def undo_session(self, session_id: str, *, count: int = 1) -> None:
+        self.undo_calls.append((session_id, count))
+        if self.undo_error is not None:
+            raise self.undo_error
+
+    async def get_goal(self, session_id: str) -> GoalInfo | None:
+        return self.goals.get(session_id)
+
     async def update_profile(
         self,
         session_id: str,
@@ -192,6 +217,8 @@ class FakeKimiClient:
         thinking: str | None = None,
         permission_mode: str | None = None,
         plan_mode: bool | None = None,
+        goal_objective: str | None = None,
+        goal_control: str | None = None,
     ) -> SessionProfile:
         changes = {
             key: value
@@ -201,6 +228,8 @@ class FakeKimiClient:
                 "thinking": thinking,
                 "permission_mode": permission_mode,
                 "plan_mode": plan_mode,
+                "goal_objective": goal_objective,
+                "goal_control": goal_control,
             }.items()
             if value is not None
         }
@@ -216,6 +245,30 @@ class FakeKimiClient:
                 if key != "title"
             }
         )
+        if goal_objective is not None:
+            ready = self._ready.get(session_id)
+            self.goal_subscription_ready.append(
+                ready is not None and ready.is_set()
+            )
+            self.call_order.append("goal:create")
+            self.goals[session_id] = _goal(objective=goal_objective)
+        if goal_control is not None:
+            if goal_control == "resume":
+                ready = self._ready.get(session_id)
+                self.goal_subscription_ready.append(
+                    ready is not None and ready.is_set()
+                )
+            self.call_order.append(f"goal:{goal_control}")
+            goal = self.goals.get(session_id)
+            if goal_control == "cancel":
+                self.goals.pop(session_id, None)
+            elif goal is not None:
+                next_status = "paused" if goal_control == "pause" else "active"
+                self.goals[session_id] = replace(goal, status=next_status)
+            if goal_control in {"pause", "cancel"}:
+                session["busy"] = False
+            elif goal_control == "resume":
+                session["busy"] = True
         return await self.get_session_profile(session_id)
 
     async def list_tasks(
@@ -264,7 +317,13 @@ class FakeKimiClient:
         return next(session for session in self.sessions if session["id"] == session_id)
 
     async def abort_prompt(self, session_id: str) -> bool:
+        self.call_order.append(f"abort:{session_id}")
         self.aborted.append(session_id)
+        session = next(
+            (item for item in self.sessions if item["id"] == session_id), None
+        )
+        if session is not None:
+            session["busy"] = False
         return self.abort_result
 
     async def get_snapshot(self, session_id: str) -> dict[str, Any]:
@@ -484,6 +543,37 @@ def _control_session(
     }
 
 
+def _goal(
+    *,
+    objective: str = "Ship the bridge",
+    status: GoalStatus = "active",
+    completion_criterion: str | None = None,
+    terminal_reason: str | None = None,
+) -> GoalInfo:
+    return GoalInfo(
+        id="goal-1",
+        objective=objective,
+        completion_criterion=completion_criterion,
+        status=status,
+        turns_used=3,
+        tokens_used=4200,
+        wall_clock_ms=65_000,
+        budget=GoalBudget(
+            token_budget=10_000,
+            turn_budget=8,
+            wall_clock_budget_ms=120_000,
+            remaining_tokens=5800,
+            remaining_turns=5,
+            remaining_wall_clock_ms=55_000,
+            token_budget_reached=False,
+            turn_budget_reached=False,
+            wall_clock_budget_reached=False,
+            over_budget=False,
+        ),
+        terminal_reason=terminal_reason,
+    )
+
+
 def _bind_control_session(store: StateStore) -> None:
     store.save(
         BridgeState(
@@ -617,7 +707,7 @@ async def test_bridge_commands_switch_stop_and_mode(
             "agent_config": {"permission_mode": "manual"},
         },
     ]
-    adapter = FakeAdapter()
+    adapter = FakeAdapter(message_limit=4000)
     store = StateStore(tmp_path / "state.json")
     router = ChatRouter(
         client,  # type: ignore[arg-type]
@@ -647,6 +737,9 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/tasks [running|completed|failed|cancelled]",
         "/skills run <name> [args]",
         "/mcp",
+        "/compact",
+        "/undo [count]",
+        "/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
     ):
         assert grammar in help_text
     assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
@@ -1110,6 +1203,509 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
     assert len(busy_rejections) == len(rejected_mutations)
 
 
+async def test_compact_correlates_manual_event_and_ignores_automatic_compaction(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: client.compact_calls == ["session-control"])
+        assert [text for _ref, _conversation, text in adapter.sent] == [
+            "Compacting..."
+        ]
+
+        client.emit(
+            "session-control", _event("compaction.started", trigger="auto")
+        )
+        client.emit(
+            "session-control",
+            _event(
+                "compaction.completed",
+                result={
+                    "summary": "automatic",
+                    "compactedCount": 99,
+                    "tokensBefore": 999,
+                    "tokensAfter": 1,
+                },
+            ),
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not command.done()
+        assert adapter.edits == []
+
+        client.emit(
+            "session-control", _event("compaction.started", trigger="manual")
+        )
+        client.emit(
+            "session-control",
+            _event(
+                "compaction.completed",
+                result={
+                    "summary": "manual",
+                    "compactedCount": 7,
+                    "tokensBefore": 12_345,
+                    "tokensAfter": 2345,
+                },
+            ),
+        )
+        await command
+    finally:
+        await router.close()
+
+    assert adapter.edits == [
+        (
+            adapter.sent[0][0],
+            "Compaction complete: 7 prompts compacted; tokens 12345 -> 2345.",
+        )
+    ]
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    (
+        ("compaction.blocked", "blocked"),
+        ("compaction.cancelled", "cancelled"),
+    ),
+)
+async def test_compact_edits_progress_for_terminal_failures(
+    tmp_path: Path, terminal: str, expected: str
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: bool(client.compact_calls))
+        client.emit(
+            "session-control", _event("compaction.started", trigger="manual")
+        )
+        client.emit("session-control", _event(terminal))
+        await command
+    finally:
+        await router.close()
+
+    assert len(adapter.sent) == 1
+    assert len(adapter.edits) == 1
+    assert adapter.edits[0][0] == adapter.sent[0][0]
+    assert expected in adapter.edits[0][1]
+
+
+async def test_compact_edits_progress_for_api_and_stream_failures(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.compact_error = KimiServerAPIError(40910, "No messages to compact")
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/compact"))
+        client.compact_error = None
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: len(client.compact_calls) == 2)
+        client.fail_stream("session-control", RuntimeError("socket lost"))
+        await command
+    finally:
+        await router.close()
+
+    assert len(adapter.sent) == 2
+    assert len(adapter.edits) == 2
+    assert adapter.edits[0][0] == adapter.sent[0][0]
+    assert "No messages to compact" in adapter.edits[0][1]
+    assert adapter.edits[1][0] == adapter.sent[1][0]
+    assert "event stream failed" in adapter.edits[1][1]
+
+
+async def test_compact_and_undo_validate_arguments_and_busy_state(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/compact now"))
+        for command in ("/undo 0", "/undo -1", "/undo 1 2", "/undo nope", "/undo ١"):
+            await router.handle_inbound(adapter, _message(command))
+        await router.handle_inbound(adapter, _message("/undo"))
+        await router.handle_inbound(adapter, _message("/undo 2"))
+
+        client.sessions[0]["busy"] = True
+        await router.handle_inbound(adapter, _message("/compact"))
+        await router.handle_inbound(adapter, _message("/undo 3"))
+    finally:
+        await router.close()
+
+    assert client.compact_calls == []
+    assert client.undo_calls == [
+        ("session-control", 1),
+        ("session-control", 2),
+    ]
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert sum(text.startswith("Usage: /undo") for text in texts) == 5
+    assert "Undid 1 history step." in texts
+    assert "Undid 2 history steps." in texts
+    assert sum(text.startswith("Session is busy.") for text in texts) == 2
+
+
+async def test_undo_surfaces_unavailable_and_compaction_boundary_errors(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        client.undo_error = KimiServerAPIError(40911, "Nothing to undo")
+        await router.handle_inbound(adapter, _message("/undo"))
+        client.undo_error = KimiServerAPIError(
+            40911, "Cannot undo across the compaction boundary"
+        )
+        await router.handle_inbound(adapter, _message("/undo 2"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any("Nothing to undo" in text for text in texts)
+    assert any("compaction boundary" in text for text in texts)
+    assert client.undo_calls == [
+        ("session-control", 1),
+        ("session-control", 2),
+    ]
+
+
+async def test_goal_status_reports_none_and_all_public_fields_while_busy(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/goal"))
+        client.goals["session-control"] = _goal(
+            completion_criterion="All checks pass",
+            terminal_reason="Waiting for review",
+        )
+        await router.handle_inbound(adapter, _message("/goal status"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert texts[0] == "No active goal."
+    status = texts[1]
+    for fragment in (
+        "Goal: Ship the bridge",
+        "Status: active",
+        "Completion criterion: All checks pass",
+        "Used: 3 turns; 4200 tokens; 1 min 5 s",
+        "Tokens: limit 10000; remaining 5800; reached no",
+        "Turns: limit 8; remaining 5; reached no",
+        "Time: limit 2 min; remaining 55 s; reached no",
+        "Over budget: no",
+        "Terminal reason: Waiting for review",
+    ):
+        assert fragment in status
+
+
+async def test_goal_creation_orders_public_profile_then_normal_manual_turn(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message("/goal Ship the bridge")
+        )
+        await router.handle_inbound(
+            adapter, _message("/goal replace another goal")
+        )
+        await router.handle_inbound(
+            adapter, _message("/goal next another goal")
+        )
+        await router.handle_inbound(adapter, _message("/goal status report"))
+        await router.handle_inbound(adapter, _message("/goal --"))
+    finally:
+        await router.close()
+
+    assert client.goal_subscription_ready == [True]
+    assert client.call_order == ["goal:create", "submit"]
+    assert client.profile_updates == [
+        ("session-control", {"goal_objective": "Ship the bridge"})
+    ]
+    assert client.prompts == [
+        (
+            "session-control",
+            "Ship the bridge",
+            {"permission_mode": "manual"},
+        )
+    ]
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert sum("goal already exists" in text for text in texts) == 2
+    assert any("must use /goal --" in text for text in texts)
+    assert any(text == "Usage: /goal -- <objective>" for text in texts)
+
+
+async def test_goal_escape_form_creates_reserved_word_objective(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message("/goal -- status weekly report")
+        )
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-control", {"goal_objective": "status weekly report"})
+    ]
+    assert client.prompts[0][1] == "status weekly report"
+
+
+async def test_goal_create_and_resume_reject_while_busy(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/goal Busy objective"))
+        client.goals["session-control"] = _goal(status="paused")
+        await router.handle_inbound(adapter, _message("/goal resume"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == []
+    assert client.prompts == []
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert sum(text.startswith("Session is busy.") for text in texts) == 2
+
+
+async def test_goal_resume_uses_ready_stream_without_second_submit(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.goals["session-control"] = _goal(status="paused")
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/goal resume"))
+        client.emit("session-control", _event("turn.started"))
+        client.emit(
+            "session-control",
+            _event("assistant.delta", delta="CONTINUE", offset=0),
+        )
+        await _wait_for(
+            lambda: any(text == "CONTINUE" for _ref, _conversation, text in adapter.sent)
+        )
+    finally:
+        await router.close()
+
+    assert client.goal_subscription_ready == [True]
+    assert client.profile_updates == [
+        ("session-control", {"goal_control": "resume"})
+    ]
+    assert client.prompts == []
+    assert any(text == "Goal resumed." for _ref, _conversation, text in adapter.sent)
+
+
+@pytest.mark.parametrize("interaction_kind", ("approval", "question"))
+async def test_goal_pause_aborts_busy_turn_and_cancels_pending_interaction(
+    tmp_path: Path, interaction_kind: str
+) -> None:
+    client = FakeKimiClient()
+    if interaction_kind == "approval":
+        client.approvals["session-1"] = [_approval()]
+    else:
+        client.questions["session-1"] = [_question_request()]
+    adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        message, _conversation, prompt = adapter.interactions[0]
+        client.sessions[0]["busy"] = True
+        client.goals["session-1"] = _goal()
+
+        await router.handle_inbound(adapter, _message("/mode yolo"))
+        assert adapter.outcomes == []
+        await router.handle_inbound(adapter, _message("/goal pause"))
+        await router.handle_inbound(adapter, _message("/goal status"))
+        await router.handle_interaction(
+            adapter,
+            _interaction(message, interaction_id=prompt.interaction_id),
+        )
+    finally:
+        await router.close()
+
+    assert client.aborted == ["session-1"]
+    assert client.call_order[-2:] == ["abort:session-1", "goal:pause"]
+    assert client.goals["session-1"].status == "paused"
+    assert [outcome.state for _message_ref, outcome in adapter.outcomes] == [
+        "cancelled",
+        "stale",
+    ]
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any("Status: paused" in text for text in texts)
+
+
+async def test_goal_cancel_cleans_origin_interaction_after_session_switch(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    origin_adapter = FakeAdapter()
+    current_adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    second_workspace = tmp_path / "second"
+    second_workspace.mkdir()
+    try:
+        await router.handle_inbound(origin_adapter, _message("run"))
+        await _wait_for(lambda: len(origin_adapter.interactions) == 1)
+        card, _conversation, prompt = origin_adapter.interactions[0]
+        await router.handle_inbound(
+            current_adapter, _message(f"/new {second_workspace}")
+        )
+        session_two = next(
+            session for session in client.sessions if session["id"] == "session-2"
+        )
+        session_two["busy"] = True
+        client.goals["session-2"] = _goal()
+
+        await router.handle_inbound(current_adapter, _message("/goal cancel"))
+        await router.handle_inbound(current_adapter, _message("/goal"))
+        await router.handle_interaction(
+            origin_adapter,
+            _interaction(card, interaction_id=prompt.interaction_id),
+        )
+    finally:
+        await router.close()
+
+    assert client.aborted == ["session-1", "session-2"]
+    assert "session-2" not in client.goals
+    assert [outcome.state for _ref, outcome in origin_adapter.outcomes] == [
+        "cancelled",
+        "stale",
+    ]
+    assert current_adapter.outcomes == []
+    assert any(
+        text == "No active goal."
+        for _ref, _conversation, text in current_adapter.sent
+    )
+
+
 async def test_control_commands_require_binding_and_surface_upstream_errors(
     tmp_path: Path,
 ) -> None:
@@ -1133,13 +1729,16 @@ async def test_control_commands_require_binding_and_surface_upstream_errors(
             "/tasks",
             "/skills",
             "/mcp",
+            "/compact",
+            "/undo",
+            "/goal",
         ):
             await router.handle_inbound(adapter, _message(command))
     finally:
         await router.close()
     assert [text for _ref, _conversation, text in adapter.sent] == [
         "No bound session."
-    ] * 9
+    ] * 12
 
     failing_client = FakeKimiClient()
     failing_client.sessions = [_control_session()]
@@ -1922,11 +2521,16 @@ async def test_resync_snapshot_rebuilds_in_flight_stream(
 
 
 def _event(
-    event_type: str, *, delta: str | None = None, offset: int | None = None
+    event_type: str,
+    *,
+    delta: str | None = None,
+    offset: int | None = None,
+    **payload_fields: Any,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"type": event_type}
     if delta is not None:
         payload["delta"] = delta
+    payload.update(payload_fields)
     event: dict[str, Any] = {"type": event_type, "payload": payload}
     if offset is not None:
         event["offset"] = offset

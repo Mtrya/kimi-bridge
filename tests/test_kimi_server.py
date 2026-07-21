@@ -19,6 +19,8 @@ from kimi_bridge.interactions import (
     SkippedAnswer,
 )
 from kimi_bridge.kimi_server import (
+    GoalBudget,
+    GoalInfo,
     KimiServerAPIError,
     KimiServerClient,
     KimiServerProtocolError,
@@ -730,6 +732,144 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         "method": "click",
     }
     assert http.requests[7][2]["json"] == {}
+
+
+async def test_stateful_session_methods_use_public_v1_shapes() -> None:
+    goal = {
+        "goalId": "goal-1",
+        "objective": "Ship the bridge",
+        "completionCriterion": "All checks pass",
+        "status": "paused",
+        "turnsUsed": 3,
+        "tokensUsed": 4200,
+        "wallClockMs": 65_000,
+        "budget": {
+            "tokenBudget": 10_000,
+            "turnBudget": 8,
+            "wallClockBudgetMs": None,
+            "remainingTokens": 5800,
+            "remainingTurns": 5,
+            "remainingWallClockMs": None,
+            "tokenBudgetReached": False,
+            "turnBudgetReached": False,
+            "wallClockBudgetReached": False,
+            "overBudget": False,
+        },
+        "terminalReason": "Waiting for review",
+    }
+    http = FakeHttpClient(
+        [
+            _envelope({}),
+            _envelope({"messages": [], "status": {}}),
+            _envelope(None),
+            _envelope(goal),
+            _envelope(_profile_payload()),
+            _envelope(_profile_payload()),
+            _envelope(_profile_payload()),
+            _envelope(_profile_payload()),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    await client.compact_session("session-1")
+    await client.undo_session("session-1", count=2)
+    assert await client.get_goal("session-1") is None
+    assert await client.get_goal("session-1") == GoalInfo(
+        id="goal-1",
+        objective="Ship the bridge",
+        completion_criterion="All checks pass",
+        status="paused",
+        turns_used=3,
+        tokens_used=4200,
+        wall_clock_ms=65_000,
+        budget=GoalBudget(
+            token_budget=10_000,
+            turn_budget=8,
+            wall_clock_budget_ms=None,
+            remaining_tokens=5800,
+            remaining_turns=5,
+            remaining_wall_clock_ms=None,
+            token_budget_reached=False,
+            turn_budget_reached=False,
+            wall_clock_budget_reached=False,
+            over_budget=False,
+        ),
+        terminal_reason="Waiting for review",
+    )
+    await client.update_profile(
+        "session-1", goal_objective="Ship the bridge"
+    )
+    await client.update_profile("session-1", goal_control="pause")
+    await client.update_profile("session-1", goal_control="resume")
+    await client.update_profile("session-1", goal_control="cancel")
+
+    assert [(method, url) for method, url, _kwargs in http.requests] == [
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:compact",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:undo",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/goal",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/goal",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
+        ),
+    ]
+    assert http.requests[0][2]["json"] == {}
+    assert http.requests[1][2]["json"] == {"count": 2}
+    assert http.requests[4][2]["json"] == {
+        "agent_config": {"goal_objective": "Ship the bridge"}
+    }
+    assert http.requests[5][2]["json"] == {
+        "agent_config": {"goal_control": "pause"}
+    }
+    assert http.requests[6][2]["json"] == {
+        "agent_config": {"goal_control": "resume"}
+    }
+    assert http.requests[7][2]["json"] == {
+        "agent_config": {"goal_control": "cancel"}
+    }
+
+
+async def test_undo_validates_count_and_surfaces_upstream_error() -> None:
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient(
+            [_envelope(None, code=40911, msg="Nothing to undo")]
+        ),
+    )
+
+    for count in (0, -1, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            await client.undo_session("session-1", count=count)  # type: ignore[arg-type]
+    with pytest.raises(KimiServerAPIError, match="Nothing to undo") as exc_info:
+        await client.undo_session("session-1")
+    assert exc_info.value.code == 40911
 
 
 async def test_no_active_turn_means_no_pending_interactions() -> None:

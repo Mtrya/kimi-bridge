@@ -102,6 +102,8 @@ class ServerConnection:
 
 PermissionMode = Literal["manual", "auto", "yolo"]
 PendingInteractionKind = Literal["none", "approval", "question"]
+GoalControl = Literal["pause", "resume", "cancel"]
+GoalStatus = Literal["active", "paused", "blocked", "complete"]
 TaskStatus = Literal["running", "completed", "failed", "cancelled"]
 TaskKind = Literal["subagent", "bash", "tool"]
 SkillSource = Literal["project", "user", "extra", "builtin"]
@@ -162,6 +164,37 @@ class SessionStatus:
     context_tokens: int
     context_limit: int
     context_usage: float
+
+
+@dataclass(frozen=True, slots=True)
+class GoalBudget:
+    """Public budget state for one Kimi goal."""
+
+    token_budget: int | None
+    turn_budget: int | None
+    wall_clock_budget_ms: int | None
+    remaining_tokens: int | None
+    remaining_turns: int | None
+    remaining_wall_clock_ms: int | None
+    token_budget_reached: bool
+    turn_budget_reached: bool
+    wall_clock_budget_reached: bool
+    over_budget: bool
+
+
+@dataclass(frozen=True, slots=True)
+class GoalInfo:
+    """Authoritative public-v1 state for one Kimi goal."""
+
+    id: str
+    objective: str
+    completion_criterion: str | None
+    status: GoalStatus
+    turns_used: int
+    tokens_used: int
+    wall_clock_ms: int
+    budget: GoalBudget
+    terminal_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,6 +738,34 @@ class KimiServerClient:
             context_limit=status.context_limit,
         )
 
+    async def compact_session(self, session_id: str) -> None:
+        """Start manual context compaction for an idle session."""
+
+        await self._request(
+            "POST",
+            f"/sessions/{session_id}:compact",
+            json_body={},
+        )
+
+    async def undo_session(self, session_id: str, *, count: int = 1) -> None:
+        """Undo the requested number of public session history steps."""
+
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("undo count must be a positive integer")
+        await self._request(
+            "POST",
+            f"/sessions/{session_id}:undo",
+            json_body={"count": count},
+        )
+
+    async def get_goal(self, session_id: str) -> GoalInfo | None:
+        """Return the session's current goal, if any."""
+
+        data = await self._request("GET", f"/sessions/{session_id}/goal")
+        if data is None:
+            return None
+        return _goal_info_from_wire(data)
+
     async def list_sessions(
         self,
         *,
@@ -776,6 +837,8 @@ class KimiServerClient:
         thinking: str | None = None,
         permission_mode: PermissionMode | None = None,
         plan_mode: bool | None = None,
+        goal_objective: str | None = None,
+        goal_control: GoalControl | None = None,
     ) -> SessionProfile:
         payload: dict[str, Any] = {}
         if title is not None:
@@ -789,6 +852,10 @@ class KimiServerClient:
             agent_config["permission_mode"] = permission_mode
         if plan_mode is not None:
             agent_config["plan_mode"] = plan_mode
+        if goal_objective is not None:
+            agent_config["goal_objective"] = goal_objective
+        if goal_control is not None:
+            agent_config["goal_control"] = goal_control
         if agent_config:
             payload["agent_config"] = agent_config
         if not payload:
@@ -1408,6 +1475,49 @@ def _session_status_from_wire(value: dict[str, Any]) -> SessionStatus:
         context_tokens=int(value["context_tokens"]),
         context_limit=int(value["max_context_tokens"]),
         context_usage=float(value["context_usage"]),
+    )
+
+
+def _goal_info_from_wire(value: dict[str, Any]) -> GoalInfo:
+    status = value["status"]
+    if status not in {"active", "paused", "blocked", "complete"}:
+        raise KimiServerProtocolError(f"unknown goal status: {status!r}")
+    budget = value["budget"]
+    completion_criterion = value.get("completionCriterion")
+    terminal_reason = value.get("terminalReason")
+    return GoalInfo(
+        id=str(value["goalId"]),
+        objective=str(value["objective"]),
+        completion_criterion=(
+            str(completion_criterion)
+            if completion_criterion is not None
+            else None
+        ),
+        status=cast(GoalStatus, status),
+        turns_used=int(value["turnsUsed"]),
+        tokens_used=int(value["tokensUsed"]),
+        wall_clock_ms=int(value["wallClockMs"]),
+        budget=GoalBudget(
+            token_budget=_optional_int(budget.get("tokenBudget")),
+            turn_budget=_optional_int(budget.get("turnBudget")),
+            wall_clock_budget_ms=_optional_int(
+                budget.get("wallClockBudgetMs")
+            ),
+            remaining_tokens=_optional_int(budget.get("remainingTokens")),
+            remaining_turns=_optional_int(budget.get("remainingTurns")),
+            remaining_wall_clock_ms=_optional_int(
+                budget.get("remainingWallClockMs")
+            ),
+            token_budget_reached=bool(budget["tokenBudgetReached"]),
+            turn_budget_reached=bool(budget["turnBudgetReached"]),
+            wall_clock_budget_reached=bool(
+                budget["wallClockBudgetReached"]
+            ),
+            over_budget=bool(budget["overBudget"]),
+        ),
+        terminal_reason=(
+            str(terminal_reason) if terminal_reason is not None else None
+        ),
     )
 
 
