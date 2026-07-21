@@ -1,14 +1,14 @@
 # kimi-bridge
 
-Bridge [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) to instant messaging platforms — Feishu first, Telegram second — so you can drive a full kimi-code agent from a chat window.
+Bridge [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) to instant messaging platforms so you can drive a full kimi-code agent from a chat window.
 
-**Status: the Feishu bridge is implemented, including durable session bindings, streamed edit-in-place replies, approval/question cards, prompt steering, inbound images/files, and bridge commands. Telegram is not implemented yet.** All major design decisions below are locked; the remaining open questions are deliberately small and listed at the bottom.
+**Status: the Feishu bridge is implemented, including durable session bindings, streamed edit-in-place replies, approval/question cards, prompt steering, inbound images/files, and bridge commands. The core message and interaction contracts are platform-neutral; additional platform adapters are deferred until their user experience is designed.** All major design decisions below are locked; remaining open questions are listed at the bottom.
 
 ## Architecture
 
 ```
-Feishu / Telegram
-        │  (platform adapters, one per IM)
+Feishu / future adapters
+        │  (one enabled platform adapter per process)
         ▼
    ChatRouter  ── bridge commands, session binding, event→message rendering
         │  (REST + a single WebSocket)
@@ -18,24 +18,27 @@ Feishu / Telegram
 
 Unlike ACP-based bridges, this talks to kimi-code's own local server API (`kimi web`, REST + WS), which exposes the full harness feature set: streaming deltas, approvals, `AskUserQuestion`, skills, plan mode, background tasks, subagents, prompt steering, and more. The server self-documents via `/openapi.json` and `/asyncapi.json` on its HTTP port.
 
+The router deals only in platform-neutral conversation, actor, message, prompt, response, and outcome values. Each adapter owns its native rendering and callback decoding; for example, Feishu card JSON never enters the router. The runtime intentionally enables one adapter per process today rather than introducing multi-adapter lifecycle machinery before it is needed.
+
 ## Decisions (locked)
 
 - **Language**: Python ≥ 3.11, asyncio throughout, typed.
 - **Backend**: local kimi-code server REST + WebSocket — not ACP — specifically to keep harness-specific features.
 - **Deployment**: always-on host, single user, authZ via a chat-user allowlist. Designed so multi-user could be added later, but not built.
 - **Server lifecycle**: the bridge supports exactly kimi-code 0.28.1, verifies both `kimi --version` and `/api/v1/meta`, then supervises `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child process. It parses the bearer token from startup output, restarts the child on crash, and rejects version mismatches because the API is 0.x.
-- **Platforms**: Feishu first (official `lark-oapi` SDK, WebSocket long-connection — no public endpoint needed); Telegram second (`aiogram`, polling). WeChat is out of scope.
+- **Platforms**: Feishu is implemented with the official `lark-oapi` SDK and a WebSocket long connection, so no public endpoint is needed. The core contracts are platform-neutral, but the runtime enables one adapter per process. Telegram is deferred until its transport and interaction semantics are designed; no Telegram SDK is selected. WeChat is out of scope.
 - **Sessions**: the shared kimi session store is fully exposed. Bridge commands: `/new [cwd]`, `/sessions`, `/switch <n|id>`, `/stop`, `/mode <manual|auto|yolo>`. Anything not starting with `/` goes to the bound session. Handoff between chat and terminal CLI (same session store, `kimi -S <id>`) is an advertised feature.
 - **Workspaces**: auto-created sessions use a scratch workspace (`~/.kimi-bridge/workspace/`); real project work goes through `/new <path>`.
 - **Streaming**: assistant text is rendered edit-in-place with throttled edits (~1 per 1.5–2s); messages are chunked at platform limits by the router, not the adapters. Thinking deltas are hidden. Tool-call rendering is an open experiment (see below).
-- **Permissions**: per-session permission mode via `/mode`. Approvals and `AskUserQuestion` surface as interactive cards (Feishu cards, Telegram inline keyboards); unanswered interactions auto-deny after a timeout. New sessions default to `manual`. `auto` is fully autonomous and never asks questions; `yolo` auto-approves regular tools but may still ask questions.
+- **Permissions**: per-session permission mode via `/mode`. Approvals and `AskUserQuestion` are platform-neutral interactions rendered by each adapter; Feishu uses interactive cards. Unanswered interactions auto-deny after a timeout. New sessions default to `manual`. `auto` is fully autonomous and never asks questions; `yolo` auto-approves regular tools but may still ask questions.
 - **Interrupt policy**: a new message during a running turn is submitted and steered into the active turn (delivered at the next step boundary, via `POST .../prompts:steer`). `/stop` aborts the turn. Steer is a nudge, not a brake — in-flight tool calls complete.
 - **Media**: inbound images are passed as image content parts; inbound files are saved into the session workspace with their path referenced in the prompt text. No outbound media in v1.
 - **State**: conversation→session mapping and per-chat settings persist to `~/.kimi-bridge/state.json` (atomic writes). Config at `~/.kimi-bridge/config.toml`.
 - **Client**: thin hand-written `httpx` + `websockets` client; no vendored SDK. Replies come from the assistant event stream (`assistant.delta`), not from a SendMessage-tool trick.
 
-## Open questions (intentionally small)
+## Open questions
 
+- **Telegram**: transport, identity/conversation mapping, edit behavior, and the degraded interaction experience must be designed before choosing an SDK or implementing an adapter.
 - **Tool-call rendering**: one-line status messages vs hidden — decided by experiment once a second platform exists; dropping them entirely remains an option.
 - **Thinking-delta display**: hidden now; a toggle may appear if missed.
 - **Outbound file sending** (`/send <path>`): likely v1.1, additive.

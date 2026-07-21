@@ -59,9 +59,9 @@ async def run() -> None:
             adapter_wait: asyncio.Task[None] | None = None
             signal_wait: asyncio.Task[bool] | None = None
             try:
-                await adapter.start(router.handle_inbound, router.handle_card_action)
+                await adapter.start(router.handle_inbound, router.handle_interaction)
                 adapter_wait = asyncio.create_task(
-                    adapter.wait(), name="feishu-adapter"
+                    adapter.wait(), name=f"{adapter.name}-adapter"
                 )
                 signal_wait = asyncio.create_task(
                     stop_requested.wait(), name="shutdown-signal"
@@ -72,7 +72,9 @@ async def run() -> None:
                 )
                 if adapter_wait in done:
                     await adapter_wait
-                    raise RuntimeError("Feishu WebSocket stopped unexpectedly")
+                    raise RuntimeError(
+                        f"{adapter.name} adapter stopped unexpectedly"
+                    )
             finally:
                 if signal_wait is not None and not signal_wait.done():
                     signal_wait.cancel()

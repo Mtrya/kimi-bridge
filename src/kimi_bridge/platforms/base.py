@@ -3,8 +3,33 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Protocol
+
+from ..interactions import (
+    InteractionOutcome,
+    InteractionPrompt,
+    InteractionResponse,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationRef:
+    platform: str
+    bot_id: str
+    conversation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ActorRef:
+    id: str
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MessageRef:
+    conversation: ConversationRef
+    message_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,33 +47,36 @@ class InboundFile:
 
 @dataclass(frozen=True, slots=True)
 class InboundMessage:
-    platform: str
-    bot_id: str
-    user_id: str
-    user_name: str | None
+    conversation: ConversationRef
+    actor: ActorRef
+    message_id: str
     text: str
     timestamp: float
-    message_id: str = ""
-    conversation_id: str = ""
     images: tuple[InboundImage, ...] = ()
     files: tuple[InboundFile, ...] = ()
 
+    @property
+    def source(self) -> MessageRef:
+        return MessageRef(self.conversation, self.message_id)
+
 
 @dataclass(frozen=True, slots=True)
-class CardAction:
-    platform: str
-    bot_id: str
-    user_id: str
-    conversation_id: str
-    message_id: str
-    value: dict[str, Any] = field(default_factory=dict)
-    form_value: dict[str, Any] = field(default_factory=dict)
-    action_name: str | None = None
+class InboundInteraction:
+    source: MessageRef
+    actor: ActorRef
+    interaction_id: str | None
+    response: InteractionResponse | None
+
+    @property
+    def conversation(self) -> ConversationRef:
+        return self.source.conversation
 
 
 # What an adapter does with an inbound message is the router's business.
 InboundHandler = Callable[["PlatformAdapter", InboundMessage], Awaitable[None]]
-CardActionHandler = Callable[["PlatformAdapter", CardAction], Awaitable[None]]
+InteractionHandler = Callable[
+    ["PlatformAdapter", InboundInteraction], Awaitable[None]
+]
 
 
 class PlatformAdapter(Protocol):
@@ -58,10 +86,17 @@ class PlatformAdapter(Protocol):
     async def start(
         self,
         on_message: InboundHandler,
-        on_card_action: CardActionHandler,
+        on_interaction: InteractionHandler,
     ) -> None: ...
+    async def wait(self) -> None: ...
     async def stop(self) -> None: ...
-    async def send_text(self, user_id: str, text: str) -> str: ...
-    async def edit_text(self, message_id: str, text: str) -> None: ...
-    async def send_card(self, user_id: str, card: dict[str, Any]) -> str: ...
-    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None: ...
+    async def send_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef: ...
+    async def edit_text(self, message: MessageRef, text: str) -> None: ...
+    async def present_interaction(
+        self, conversation: ConversationRef, prompt: InteractionPrompt
+    ) -> MessageRef: ...
+    async def finish_interaction(
+        self, message: MessageRef, outcome: InteractionOutcome
+    ) -> None: ...

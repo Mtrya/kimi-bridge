@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import json
 import logging
 import time
 import uuid
@@ -14,8 +13,31 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .interactions import (
+    ApprovalPrompt,
+    ApprovalRequest,
+    ApprovalResponse,
+    InteractionOutcome,
+    MultipleChoiceAnswer,
+    MultipleChoiceWithOtherAnswer,
+    OtherAnswer,
+    QuestionAnswer,
+    QuestionPrompt,
+    QuestionRequest,
+    QuestionResponse,
+    SingleChoiceAnswer,
+    SkippedAnswer,
+)
 from .kimi_server import KimiServerAPIError, KimiServerClient, KimiServerError
-from .platforms.base import CardAction, InboundFile, InboundMessage, PlatformAdapter
+from .platforms.base import (
+    ActorRef,
+    ConversationRef,
+    InboundFile,
+    InboundInteraction,
+    InboundMessage,
+    MessageRef,
+    PlatformAdapter,
+)
 from .state import (
     PERMISSION_MODES,
     BridgeState,
@@ -29,7 +51,6 @@ DEFAULT_PERMISSION_MODE = "manual"
 SESSION_TITLE_LIMIT = 80
 SESSION_LIST_LIMIT = 10
 INTERACTION_POLL_SECONDS = 1.0
-INTERACTION_SUMMARY_LIMIT = 1200
 TERMINAL_INTERACTION_ERROR_CODES = {40001, 40401, 40404, 40902}
 STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
@@ -53,7 +74,7 @@ HELP_TEXT = """Commands:
 @dataclass(slots=True)
 class _RenderState:
     text: str = ""
-    message_ids: list[str] = field(default_factory=list)
+    messages: list[MessageRef] = field(default_factory=list)
     rendered_chunks: list[str] = field(default_factory=list)
     turn_active: bool = False
     last_flush: float | None = None
@@ -66,8 +87,8 @@ class _ActiveStream:
     conversation_key: str
     session_id: str
     adapter: PlatformAdapter
-    user_id: str
-    conversation_id: str
+    conversation: ConversationRef
+    actor: ActorRef
     render: _RenderState = field(default_factory=_RenderState)
     task: asyncio.Task[None] | None = None
     interaction_task: asyncio.Task[None] | None = None
@@ -81,10 +102,10 @@ class _PendingInteraction:
     conversation_key: str
     session_id: str
     adapter: PlatformAdapter
-    user_id: str
-    conversation_id: str
-    message_id: str
-    request: dict[str, Any]
+    conversation: ConversationRef
+    actor: ActorRef
+    message: MessageRef
+    request: ApprovalRequest | QuestionRequest
     timeout_task: asyncio.Task[None] | None = None
 
 
@@ -162,8 +183,8 @@ class ChatRouter:
                 await self._handle_command(
                     conversation_key,
                     adapter,
-                    msg.user_id,
-                    msg.conversation_id,
+                    msg.conversation,
+                    msg.actor,
                     text,
                 )
                 return
@@ -180,8 +201,8 @@ class ChatRouter:
                 conversation_key,
                 binding.session_id,
                 adapter,
-                msg.user_id,
-                msg.conversation_id,
+                msg.conversation,
+                msg.actor,
             )
             content = await self._build_prompt_content(binding, msg)
             result = await self._client.submit_prompt(
@@ -198,49 +219,52 @@ class ChatRouter:
                     if exc.code != 40001:
                         raise
 
-    async def handle_card_action(
-        self, adapter: PlatformAdapter, action: CardAction
+    async def handle_interaction(
+        self, adapter: PlatformAdapter, action: InboundInteraction
     ) -> None:
-        """Resolve one normalized platform card callback."""
+        """Resolve one normalized platform interaction submission."""
 
         async with self._interaction_lock:
             pending = next(
                 (
                     item
                     for item in self._pending.values()
-                    if item.message_id == action.message_id
+                    if item.message == action.source
                 ),
                 None,
             )
             if pending is None:
                 try:
-                    await adapter.edit_card(
-                        action.message_id,
-                        _status_card(
-                            "Interaction expired",
-                            STALE_INTERACTION_TEXT,
-                            template="grey",
+                    await adapter.finish_interaction(
+                        action.source,
+                        InteractionOutcome(
+                            state="stale",
+                            detail=STALE_INTERACTION_TEXT,
                         ),
                     )
                 finally:
-                    await adapter.send_text(action.user_id, STALE_INTERACTION_TEXT)
+                    await adapter.send_text(
+                        action.conversation, STALE_INTERACTION_TEXT
+                    )
                 return
             if (
                 _conversation_key(action) != pending.conversation_key
-                or action.user_id != pending.user_id
-                or action.conversation_id != pending.conversation_id
+                or action.actor.id != pending.actor.id
+                or action.conversation != pending.conversation
             ):
                 await adapter.send_text(
-                    action.user_id,
+                    action.conversation,
                     "This interaction belongs to another conversation.",
                 )
                 return
-            action_interaction_id = action.value.get("interaction_id")
+            action_interaction_id = action.interaction_id
             if (
                 action_interaction_id is not None
                 and action_interaction_id != pending.interaction_id
             ):
-                await adapter.send_text(action.user_id, STALE_INTERACTION_TEXT)
+                await adapter.send_text(
+                    action.conversation, STALE_INTERACTION_TEXT
+                )
                 return
 
             try:
@@ -250,7 +274,7 @@ class ChatRouter:
                     outcome = await self._resolve_question_action(pending, action)
                     if outcome is None:
                         await adapter.send_text(
-                            action.user_id,
+                            action.conversation,
                             "Choose an option or enter a free-text answer.",
                         )
                         return
@@ -260,13 +284,9 @@ class ChatRouter:
                 outcome = "Already resolved or expired"
 
             await self._clear_pending(pending)
-            await adapter.edit_card(
-                pending.message_id,
-                _status_card(
-                    "Interaction complete",
-                    outcome,
-                    template="green",
-                ),
+            await adapter.finish_interaction(
+                pending.message,
+                InteractionOutcome(state="completed", detail=outcome),
             )
 
     async def dispatch_event(self, session_key: str, event: dict[str, Any]) -> None:
@@ -306,8 +326,8 @@ class ChatRouter:
         self,
         conversation_key: str,
         adapter: PlatformAdapter,
-        user_id: str,
-        conversation_id: str,
+        conversation: ConversationRef,
+        actor: ActorRef,
         text: str,
     ) -> None:
         command, _, argument = text.partition(" ")
@@ -315,13 +335,13 @@ class ChatRouter:
         argument = argument.strip()
 
         if command == "/help":
-            await self._send_chunked(adapter, user_id, HELP_TEXT)
+            await self._send_chunked(adapter, conversation, HELP_TEXT)
             return
         if command == "/new":
             try:
                 workspace = await self._resolve_new_workspace(argument)
             except ValueError as exc:
-                await self._send_chunked(adapter, user_id, str(exc))
+                await self._send_chunked(adapter, conversation, str(exc))
                 return
             binding = await self._create_and_bind(
                 conversation_key,
@@ -332,28 +352,32 @@ class ChatRouter:
                 conversation_key,
                 binding.session_id,
                 adapter,
-                user_id,
-                conversation_id,
+                conversation,
+                actor,
             )
             await self._send_chunked(
                 adapter,
-                user_id,
+                conversation,
                 f"Created session {binding.session_id}\nWorkspace: {binding.workspace}",
             )
             return
         if command == "/sessions":
             sessions = await self._list_recent_sessions()
             self._session_choices[conversation_key] = sessions
-            await self._send_chunked(adapter, user_id, _format_sessions(sessions))
+            await self._send_chunked(
+                adapter, conversation, _format_sessions(sessions)
+            )
             return
         if command == "/switch":
             if not argument:
-                await self._send_chunked(adapter, user_id, "Usage: /switch <n|id>")
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /switch <n|id>"
+                )
                 return
             session = await self._resolve_session(conversation_key, argument)
             if session is None:
                 await self._send_chunked(
-                    adapter, user_id, f"Session not found: {argument}"
+                    adapter, conversation, f"Session not found: {argument}"
                 )
                 return
             binding = self._binding_from_session(session)
@@ -362,33 +386,35 @@ class ChatRouter:
                     conversation_key,
                     binding.session_id,
                     adapter,
-                    user_id,
-                    conversation_id,
+                    conversation,
+                    actor,
                 )
             except KimiServerError as exc:
                 await self._send_chunked(
                     adapter,
-                    user_id,
+                    conversation,
                     f"Could not switch to {binding.session_id}: {exc}",
                 )
                 return
             self._state.bindings[conversation_key] = binding
             self._state_store.save(self._state)
             await self._send_chunked(
-                adapter, user_id, f"Switched to {binding.session_id}"
+                adapter, conversation, f"Switched to {binding.session_id}"
             )
             return
         if command == "/mode":
             if argument not in PERMISSION_MODES:
                 await self._send_chunked(
                     adapter,
-                    user_id,
+                    conversation,
                     "Usage: /mode <manual|auto|yolo>",
                 )
                 return
             binding = self._state.bindings.get(conversation_key)
             if binding is None:
-                await self._send_chunked(adapter, user_id, "No bound session.")
+                await self._send_chunked(
+                    adapter, conversation, "No bound session."
+                )
                 return
             await self._client.update_profile(
                 binding.session_id, permission_mode=argument
@@ -402,25 +428,27 @@ class ChatRouter:
             self._state_store.save(self._state)
             await self._send_chunked(
                 adapter,
-                user_id,
+                conversation,
                 f"Permission mode: {argument}\n{PERMISSION_MODE_DESCRIPTIONS[argument]}",
             )
             return
         if command == "/stop":
             binding = self._state.bindings.get(conversation_key)
             if binding is None:
-                await self._send_chunked(adapter, user_id, "No bound session.")
+                await self._send_chunked(
+                    adapter, conversation, "No bound session."
+                )
                 return
             aborted = await self._client.abort_prompt(binding.session_id)
             await self._send_chunked(
                 adapter,
-                user_id,
+                conversation,
                 "Stopped." if aborted else "No active prompt.",
             )
             return
 
         await self._send_chunked(
-            adapter, user_id, f"Unknown command: {command}\nUse /help."
+            adapter, conversation, f"Unknown command: {command}\nUse /help."
         )
 
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
@@ -497,8 +525,8 @@ class ChatRouter:
         conversation_key: str,
         session_id: str,
         adapter: PlatformAdapter,
-        user_id: str,
-        conversation_id: str,
+        conversation: ConversationRef,
+        actor: ActorRef,
     ) -> None:
         active = self._active
         if (
@@ -509,8 +537,8 @@ class ChatRouter:
             and not active.task.done()
         ):
             active.adapter = adapter
-            active.user_id = user_id
-            active.conversation_id = conversation_id
+            active.conversation = conversation
+            active.actor = actor
             return
 
         await self._stop_active_stream()
@@ -518,8 +546,8 @@ class ChatRouter:
             conversation_key=conversation_key,
             session_id=session_id,
             adapter=adapter,
-            user_id=user_id,
-            conversation_id=conversation_id,
+            conversation=conversation,
+            actor=actor,
         )
         active.task = asyncio.create_task(
             self._consume_events(active),
@@ -628,21 +656,35 @@ class ChatRouter:
             if approvals:
                 kind: Literal["approval", "question"] = "approval"
                 request = approvals[0]
-                request_id = str(request["approval_id"])
+                request_id = request.id
             elif questions:
                 kind = "question"
                 request = questions[0]
-                request_id = str(request["question_id"])
+                request_id = request.id
             else:
                 return
 
             interaction_id = uuid.uuid4().hex
             session = await self._client.get_session(active.session_id)
             if kind == "approval":
-                card = _approval_card(interaction_id, request, session)
+                assert isinstance(request, ApprovalRequest)
+                prompt = ApprovalPrompt(
+                    interaction_id=interaction_id,
+                    request=request,
+                    session_title=str(session.get("title") or "Untitled"),
+                    workspace=str(session["metadata"]["cwd"]),
+                )
             else:
-                card = _question_card(interaction_id, request, session)
-            message_id = await active.adapter.send_card(active.user_id, card)
+                assert isinstance(request, QuestionRequest)
+                prompt = QuestionPrompt(
+                    interaction_id=interaction_id,
+                    request=request,
+                    session_title=str(session.get("title") or "Untitled"),
+                    workspace=str(session["metadata"]["cwd"]),
+                )
+            message = await active.adapter.present_interaction(
+                active.conversation, prompt
+            )
             pending = _PendingInteraction(
                 interaction_id=interaction_id,
                 kind=kind,
@@ -650,9 +692,9 @@ class ChatRouter:
                 conversation_key=active.conversation_key,
                 session_id=active.session_id,
                 adapter=active.adapter,
-                user_id=active.user_id,
-                conversation_id=active.conversation_id,
-                message_id=message_id,
+                conversation=active.conversation,
+                actor=active.actor,
+                message=message,
                 request=request,
             )
             self._pending[active.conversation_key] = pending
@@ -685,12 +727,12 @@ class ChatRouter:
                 detail = "Expired after it had already been resolved."
             await self._clear_pending(pending)
             try:
-                await pending.adapter.edit_card(
-                    pending.message_id,
-                    _status_card("Interaction timed out", detail, template="red"),
+                await pending.adapter.finish_interaction(
+                    pending.message,
+                    InteractionOutcome(state="timed_out", detail=detail),
                 )
             finally:
-                await pending.adapter.send_text(pending.user_id, detail)
+                await pending.adapter.send_text(pending.conversation, detail)
 
     async def _clear_pending(self, pending: _PendingInteraction) -> None:
         if self._pending.get(pending.conversation_key) is pending:
@@ -702,11 +744,13 @@ class ChatRouter:
                 await task
 
     async def _resolve_approval_action(
-        self, pending: _PendingInteraction, action: CardAction
+        self, pending: _PendingInteraction, action: InboundInteraction
     ) -> str:
-        decision = action.value.get("decision")
-        if decision not in {"approved", "rejected", "cancelled"}:
-            raise ValueError("approval card callback has an invalid decision")
+        if not isinstance(pending.request, ApprovalRequest):
+            raise TypeError("approval interaction has a question request")
+        if not isinstance(action.response, ApprovalResponse):
+            raise ValueError("approval interaction has an invalid response")
+        decision = action.response.decision
         await self._client.resolve_approval(
             pending.session_id,
             pending.request_id,
@@ -719,11 +763,17 @@ class ChatRouter:
         }[decision]
 
     async def _resolve_question_action(
-        self, pending: _PendingInteraction, action: CardAction
+        self, pending: _PendingInteraction, action: InboundInteraction
     ) -> str | None:
-        answers = _answers_from_action(pending, action)
-        if answers is None:
+        if not isinstance(pending.request, QuestionRequest):
+            raise TypeError("question interaction has an approval request")
+        if action.response is None:
             return None
+        if not isinstance(action.response, QuestionResponse):
+            raise ValueError("question interaction has an invalid response")
+        answers = _validate_question_answers(
+            pending.request, action.response.answers
+        )
         await self._client.resolve_question(
             pending.session_id,
             pending.request_id,
@@ -791,7 +841,7 @@ class ChatRouter:
     async def _maybe_flush(self, active: _ActiveStream) -> None:
         render = active.render
         now = self._clock()
-        if not render.message_ids or render.last_flush is None:
+        if not render.messages or render.last_flush is None:
             await self._flush(active)
             return
         elapsed = now - render.last_flush
@@ -820,14 +870,16 @@ class ChatRouter:
         async with render.lock:
             chunks = _chunk_text(render.text, active.adapter.message_limit)
             for index, chunk in enumerate(chunks):
-                if index >= len(render.message_ids):
-                    message_id = await active.adapter.send_text(active.user_id, chunk)
-                    render.message_ids.append(message_id)
+                if index >= len(render.messages):
+                    message = await active.adapter.send_text(
+                        active.conversation, chunk
+                    )
+                    render.messages.append(message)
                 elif (
                     index >= len(render.rendered_chunks)
                     or render.rendered_chunks[index] != chunk
                 ):
-                    await active.adapter.edit_text(render.message_ids[index], chunk)
+                    await active.adapter.edit_text(render.messages[index], chunk)
             render.rendered_chunks = chunks
             render.last_flush = self._clock()
 
@@ -858,14 +910,15 @@ class ChatRouter:
         active.render.turn_active = False
 
     async def _send_chunked(
-        self, adapter: PlatformAdapter, user_id: str, text: str
+        self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
-            await adapter.send_text(user_id, chunk)
+            await adapter.send_text(conversation, chunk)
 
 
-def _conversation_key(message: InboundMessage | CardAction) -> str:
-    return f"{message.platform}:{message.bot_id}:{message.user_id}"
+def _conversation_key(message: InboundMessage | InboundInteraction) -> str:
+    conversation = message.conversation
+    return f"{conversation.platform}:{conversation.bot_id}:{message.actor.id}"
 
 
 def _title_from_message(message: InboundMessage) -> str:
@@ -952,445 +1005,47 @@ def _save_inbound_files(
     return saved
 
 
-def _card_shell(
-    title: str,
-    subtitle: str,
-    *,
-    template: str,
-    icon_token: str,
-    tag_text: str,
-    tag_color: str,
-    elements: list[dict[str, Any]],
-) -> dict[str, Any]:
-    return {
-        "schema": "2.0",
-        "config": {"update_multi": True, "width_mode": "default"},
-        "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "subtitle": {"tag": "plain_text", "content": subtitle},
-            "template": template,
-            "icon": {"tag": "standard_icon", "token": icon_token},
-            "text_tag_list": [
-                {
-                    "tag": "text_tag",
-                    "text": {"tag": "plain_text", "content": tag_text},
-                    "color": tag_color,
-                }
-            ],
-        },
-        "body": {
-            "direction": "vertical",
-            "padding": "12px 12px 20px 12px",
-            "vertical_spacing": "12px",
-            "elements": elements,
-        },
-    }
+def _validate_question_answers(
+    request: QuestionRequest,
+    answers: tuple[QuestionAnswer, ...],
+) -> tuple[QuestionAnswer, ...]:
+    questions = {question.id: question for question in request.questions}
+    if len({answer.question_id for answer in answers}) != len(answers):
+        raise ValueError("question response contains duplicate answers")
+    if {answer.question_id for answer in answers} != set(questions):
+        raise ValueError("question response must answer or skip every question")
 
-
-def _context_block(*lines: str) -> dict[str, Any]:
-    return {
-        "tag": "column_set",
-        "flex_mode": "none",
-        "columns": [
-            {
-                "tag": "column",
-                "width": "weighted",
-                "weight": 1,
-                "background_style": "grey-50",
-                "padding": "12px",
-                "vertical_spacing": "4px",
-                "elements": [
-                    {
-                        "tag": "div",
-                        "text": {
-                            "tag": "plain_text",
-                            "content": line,
-                            "lines": 8,
-                        },
-                    }
-                    for line in lines
-                    if line
-                ],
-            }
-        ],
-    }
-
-
-def _approval_card(
-    interaction_id: str,
-    approval: dict[str, Any],
-    session: dict[str, Any],
-) -> dict[str, Any]:
-    tool_name = str(approval["tool_name"])
-    action = str(approval.get("action") or "Approval required")
-    display = approval.get("tool_input_display")
-    summary = _summarize(display) if display is not None else ""
-    workspace = str(session["metadata"]["cwd"])
-    session_title = str(session.get("title") or "Untitled")
-    buttons = [
-        ("Approve", "approved", "primary_filled"),
-        ("Reject", "rejected", "danger"),
-        ("Cancel", "cancelled", "default"),
-    ]
-    button_block = {
-        "tag": "column_set",
-        "flex_mode": "trisect",
-        "horizontal_spacing": "8px",
-        "columns": [
-            {
-                "tag": "column",
-                "elements": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": label},
-                        "type": button_type,
-                        "width": "fill",
-                        "behaviors": [
-                            {
-                                "type": "callback",
-                                "value": {
-                                    "interaction_id": interaction_id,
-                                    "decision": decision,
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-            for label, decision, button_type in buttons
-        ],
-    }
-    return _card_shell(
-        "Approval required",
-        session_title,
-        template="default",
-        icon_token="approve_colorful",
-        tag_text="Pending",
-        tag_color="yellow",
-        elements=[
-            _context_block(
-                f"Tool: {tool_name}",
-                f"Action: {action}",
-                f"Workspace: {workspace}",
-                summary,
-            ),
-            button_block,
-        ],
-    )
-
-
-def _question_card(
-    interaction_id: str,
-    request: dict[str, Any],
-    session: dict[str, Any],
-) -> dict[str, Any]:
-    questions = request["questions"]
-    session_title = str(session.get("title") or "Untitled")
-    workspace = str(session["metadata"]["cwd"])
-    elements: list[dict[str, Any]] = [
-        _context_block(
-            f"Session: {session_title}",
-            f"Workspace: {workspace}",
-        )
-    ]
-    if len(questions) == 1 and not questions[0].get("multi_select", False):
-        question = questions[0]
-        elements.append(_context_block(_question_description(question)))
-        elements.append(
-            {
-                "tag": "column_set",
-                "flex_mode": "flow",
-                "horizontal_spacing": "8px",
-                "columns": [
-                    {
-                        "tag": "column",
-                        "width": "auto",
-                        "elements": [
-                            {
-                                "tag": "button",
-                                "text": {
-                                    "tag": "plain_text",
-                                    "content": str(option["label"])[:100],
-                                },
-                                "type": "default",
-                                "behaviors": [
-                                    {
-                                        "type": "callback",
-                                        "value": {
-                                            "interaction_id": interaction_id,
-                                            "question_id": question["id"],
-                                            "option_id": option["id"],
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                    for option in question["options"]
-                ]
-                + [
-                    {
-                        "tag": "column",
-                        "width": "auto",
-                        "elements": [
-                            {
-                                "tag": "button",
-                                "text": {
-                                    "tag": "plain_text",
-                                    "content": "Skip",
-                                },
-                                "type": "default",
-                                "behaviors": [
-                                    {
-                                        "type": "callback",
-                                        "value": {
-                                            "interaction_id": interaction_id,
-                                            "question_id": question["id"],
-                                            "skipped": True,
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
-        if question.get("allow_other", False):
-            elements.append(
-                {
-                    "tag": "form",
-                    "name": "other_answer",
-                    "direction": "vertical",
-                    "vertical_spacing": "8px",
-                    "elements": [
-                        {
-                            "tag": "input",
-                            "name": "other_0",
-                            "input_type": "multiline_text",
-                            "rows": 3,
-                            "max_length": 1000,
-                            "width": "fill",
-                            "label": {
-                                "tag": "plain_text",
-                                "content": str(
-                                    question.get("other_label") or "Other answer"
-                                ),
-                            },
-                        },
-                        {
-                            "tag": "button",
-                            "name": "submit_other",
-                            "form_action_type": "submit",
-                            "text": {
-                                "tag": "plain_text",
-                                "content": "Submit answer",
-                            },
-                            "type": "primary_filled",
-                            "width": "fill",
-                        },
-                    ],
-                }
-            )
-    else:
-        elements.append(_question_form(questions))
-    return _card_shell(
-        "Question from Kimi",
-        session_title,
-        template="blue",
-        icon_token="myai_colorful",
-        tag_text="Answer needed",
-        tag_color="blue",
-        elements=elements,
-    )
-
-
-def _question_form(questions: list[dict[str, Any]]) -> dict[str, Any]:
-    form_elements: list[dict[str, Any]] = []
-    for index, question in enumerate(questions):
-        form_elements.append(
-            {
-                "tag": "div",
-                "text": {
-                    "tag": "plain_text",
-                    "content": _question_description(question),
-                    "text_size": "normal",
-                    "lines": 8,
-                },
-            }
-        )
-        selector = {
-            "tag": (
-                "multi_select_static"
-                if question.get("multi_select", False)
-                else "select_static"
-            ),
-            "name": f"q_{index}",
-            "required": False,
-            "width": "fill",
-            "placeholder": {
-                "tag": "plain_text",
-                "content": "Choose one or more options",
-            },
-            "options": [
-                {
-                    "text": {
-                        "tag": "plain_text",
-                        "content": str(option["label"]),
-                    },
-                    "value": str(option["id"]),
-                }
-                for option in question["options"]
-            ],
-        }
-        form_elements.append(selector)
-        if question.get("allow_other", False):
-            form_elements.append(
-                {
-                    "tag": "input",
-                    "name": f"other_{index}",
-                    "input_type": "multiline_text",
-                    "rows": 2,
-                    "max_length": 1000,
-                    "width": "fill",
-                    "label": {
-                        "tag": "plain_text",
-                        "content": str(question.get("other_label") or "Other answer"),
-                    },
-                }
-            )
-    form_elements.append(
-        {
-            "tag": "button",
-            "name": "submit_answers",
-            "form_action_type": "submit",
-            "text": {"tag": "plain_text", "content": "Submit answers"},
-            "type": "primary_filled",
-            "width": "fill",
-        }
-    )
-    return {
-        "tag": "form",
-        "name": "question_answers",
-        "direction": "vertical",
-        "vertical_spacing": "8px",
-        "elements": form_elements,
-    }
-
-
-def _answers_from_action(
-    pending: _PendingInteraction, action: CardAction
-) -> dict[str, dict[str, Any]] | None:
-    questions = pending.request["questions"]
-    question_id = action.value.get("question_id")
-    if action.value.get("skipped") is True and isinstance(question_id, str):
-        if not any(item["id"] == question_id for item in questions):
-            raise ValueError("question card callback has an invalid question")
-        return {question_id: {"kind": "skipped"}}
-
-    option_id = action.value.get("option_id")
-    if isinstance(option_id, str) and isinstance(question_id, str):
-        question = next((item for item in questions if item["id"] == question_id), None)
-        if question is None or option_id not in {
-            option["id"] for option in question["options"]
-        }:
-            raise ValueError("question card callback has an invalid option")
-        return {question_id: {"kind": "single", "option_id": option_id}}
-
-    if not action.form_value and action.action_name != "submit_answers":
-        return None
-    answers: dict[str, dict[str, Any]] = {}
-    for index, question in enumerate(questions):
-        selected = _selected_values(action.form_value.get(f"q_{index}"))
-        option_ids = {str(option["id"]) for option in question["options"]}
-        if any(option_id not in option_ids for option_id in selected):
-            raise ValueError("question card callback has an invalid option")
-        if not question.get("multi_select", False) and len(selected) > 1:
-            raise ValueError("single-select question received multiple options")
-        other_value = action.form_value.get(f"other_{index}")
-        other = other_value.strip() if isinstance(other_value, str) else ""
-        if other and not question.get("allow_other", False):
-            raise ValueError("question does not allow a free-text answer")
-        if question.get("multi_select", False):
-            if other:
-                answers[str(question["id"])] = {
-                    "kind": "multi_with_other",
-                    "option_ids": selected,
-                    "other_text": other,
-                }
-            elif selected:
-                answers[str(question["id"])] = {
-                    "kind": "multi",
-                    "option_ids": selected,
-                }
-            else:
-                answers[str(question["id"])] = {"kind": "skipped"}
-        elif other:
-            answers[str(question["id"])] = {
-                "kind": "other",
-                "text": other,
-            }
-        elif selected:
-            answers[str(question["id"])] = {
-                "kind": "single",
-                "option_id": selected[0],
-            }
-        else:
-            answers[str(question["id"])] = {"kind": "skipped"}
+    for answer in answers:
+        question = questions[answer.question_id]
+        option_ids = {option.id for option in question.options}
+        if isinstance(answer, SkippedAnswer):
+            continue
+        if isinstance(answer, SingleChoiceAnswer):
+            if question.multi_select or answer.option_id not in option_ids:
+                raise ValueError("question response contains an invalid single choice")
+            continue
+        if isinstance(answer, MultipleChoiceAnswer):
+            if (
+                not question.multi_select
+                or not answer.option_ids
+                or any(option_id not in option_ids for option_id in answer.option_ids)
+            ):
+                raise ValueError("question response contains invalid multiple choices")
+            continue
+        if isinstance(answer, OtherAnswer):
+            if question.multi_select or not question.allow_other or not answer.text:
+                raise ValueError("question response contains invalid free text")
+            continue
+        if isinstance(answer, MultipleChoiceWithOtherAnswer):
+            if (
+                not question.multi_select
+                or not question.allow_other
+                or not answer.text
+                or any(option_id not in option_ids for option_id in answer.option_ids)
+            ):
+                raise ValueError(
+                    "question response contains invalid choices with free text"
+                )
+            continue
+        raise TypeError(f"unsupported question answer: {type(answer).__name__}")
     return answers
-
-
-def _selected_values(value: Any) -> list[str]:
-    if isinstance(value, str):
-        return [value] if value else []
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, str) and item]
-    return []
-
-
-def _question_description(question: dict[str, Any]) -> str:
-    lines: list[str] = []
-    header = question.get("header")
-    if isinstance(header, str) and header:
-        lines.append(header)
-    question_text = str(question["question"])
-    if not lines or lines[-1] != question_text:
-        lines.append(question_text)
-    body = question.get("body")
-    if isinstance(body, str) and body:
-        lines.append(body)
-    for option in question["options"]:
-        description = option.get("description")
-        if isinstance(description, str) and description:
-            lines.append(f"{option['label']}: {description}")
-    return "\n".join(lines)
-
-
-def _summarize(value: Any) -> str:
-    if isinstance(value, str):
-        text = value
-    else:
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    if len(text) > INTERACTION_SUMMARY_LIMIT:
-        return text[: INTERACTION_SUMMARY_LIMIT - 1] + "…"
-    return text
-
-
-def _status_card(title: str, detail: str, *, template: str) -> dict[str, Any]:
-    tag_color = {
-        "green": "green",
-        "red": "red",
-        "grey": "neutral",
-    }.get(template, "blue")
-    return _card_shell(
-        title,
-        "Kimi bridge",
-        template=template,
-        icon_token="notice_colorful",
-        tag_text=title,
-        tag_color=tag_color,
-        elements=[
-            _context_block("Interaction status"),
-            _context_block(detail),
-        ],
-    )

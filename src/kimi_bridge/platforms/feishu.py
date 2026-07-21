@@ -13,13 +13,23 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from ..interactions import InteractionOutcome, InteractionPrompt
 from .base import (
-    CardAction,
-    CardActionHandler,
+    ActorRef,
+    ConversationRef,
     InboundFile,
     InboundHandler,
     InboundImage,
+    InboundInteraction,
     InboundMessage,
+    InteractionHandler,
+    MessageRef,
+)
+from .feishu_cards import (
+    decode_interaction_response,
+    interaction_id_from_value,
+    render_interaction,
+    render_outcome,
 )
 
 
@@ -366,13 +376,13 @@ class FeishuAdapter:
         self._ws_factory = ws_factory
 
         self._on_message: InboundHandler | None = None
-        self._on_card_action: CardActionHandler | None = None
+        self._on_interaction: InteractionHandler | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._ws: _WebSocketRunner | None = None
         self._ws_thread: threading.Thread | None = None
         self._ws_error: BaseException | None = None
         self._inbound_tasks: set[asyncio.Task[None]] = set()
-        self._receive_id_types: dict[str, str] = {}
+        self._presented_interactions: dict[MessageRef, InteractionPrompt] = {}
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._started_at_ms = 0
@@ -380,12 +390,12 @@ class FeishuAdapter:
     async def start(
         self,
         on_message: InboundHandler,
-        on_card_action: CardActionHandler,
+        on_interaction: InteractionHandler,
     ) -> None:
         if self._ws_thread is not None:
             return
         self._on_message = on_message
-        self._on_card_action = on_card_action
+        self._on_interaction = on_interaction
         self._main_loop = asyncio.get_running_loop()
         self._started_at_ms = int(time.time() * 1000)
         if self._transport is None:
@@ -437,31 +447,49 @@ class FeishuAdapter:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._raise_ws_error()
 
-    async def send_text(self, user_id: str, text: str) -> str:
+    async def send_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
-        receive_id_type = self._receive_id_types.get(
-            user_id, "open_id" if user_id.startswith("ou_") else "user_id"
+        message_id = await self._transport.send_text(
+            conversation.conversation_id,
+            "chat_id",
+            text,
         )
-        return await self._transport.send_text(user_id, receive_id_type, text)
+        return MessageRef(conversation, message_id)
 
-    async def edit_text(self, message_id: str, text: str) -> None:
+    async def edit_text(self, message: MessageRef, text: str) -> None:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
-        await self._transport.edit_text(message_id, text)
+        await self._transport.edit_text(message.message_id, text)
 
-    async def send_card(self, user_id: str, card: dict[str, Any]) -> str:
+    async def present_interaction(
+        self, conversation: ConversationRef, prompt: InteractionPrompt
+    ) -> MessageRef:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
-        receive_id_type = self._receive_id_types.get(
-            user_id, "open_id" if user_id.startswith("ou_") else "user_id"
+        message_id = await self._transport.send_card(
+            conversation.conversation_id,
+            "chat_id",
+            render_interaction(prompt),
         )
-        return await self._transport.send_card(user_id, receive_id_type, card)
+        message = MessageRef(conversation, message_id)
+        self._presented_interactions[message] = prompt
+        return message
 
-    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None:
+    async def finish_interaction(
+        self, message: MessageRef, outcome: InteractionOutcome
+    ) -> None:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
-        await self._transport.edit_card(message_id, card)
+        try:
+            await self._transport.edit_card(
+                message.message_id,
+                render_outcome(outcome),
+            )
+        finally:
+            self._presented_interactions.pop(message, None)
 
     async def handle_event(self, data: Any) -> None:
         """Normalize one ``im.message.receive_v1`` SDK event."""
@@ -498,11 +526,15 @@ class FeishuAdapter:
         recipient = open_id or user_id
         if not isinstance(recipient, str) or not recipient:
             return
-        self._receive_id_types[recipient] = "open_id" if open_id else "user_id"
-
         chat_id = message.chat_id
         if not isinstance(chat_id, str) or not chat_id:
             return
+        bot_id = getattr(getattr(data, "header", None), "app_id", None)
+        conversation = ConversationRef(
+            platform=self.name,
+            bot_id=bot_id or self._app_id,
+            conversation_id=chat_id,
+        )
 
         content = json.loads(message.content)
         if not isinstance(content, dict):
@@ -529,7 +561,7 @@ class FeishuAdapter:
         elif message.message_type == "post":
             text, image_keys = _parse_post_content(content)
         else:
-            await self.send_text(recipient, UNSUPPORTED_MESSAGE)
+            await self.send_text(conversation, UNSUPPORTED_MESSAGE)
             return
 
         images = tuple(
@@ -550,18 +582,14 @@ class FeishuAdapter:
         )
         if self._on_message is None:
             raise RuntimeError("Feishu adapter is not started")
-        bot_id = getattr(getattr(data, "header", None), "app_id", None)
         await self._on_message(
             self,
             InboundMessage(
-                platform=self.name,
-                bot_id=bot_id or self._app_id,
-                user_id=recipient,
-                user_name=None,
+                conversation=conversation,
+                actor=ActorRef(recipient),
+                message_id=message_id,
                 text=text,
                 timestamp=create_time / 1000,
-                message_id=message_id,
-                conversation_id=chat_id,
                 images=images,
                 files=files,
             ),
@@ -590,7 +618,6 @@ class FeishuAdapter:
         recipient = operator.open_id or operator.user_id
         if not isinstance(recipient, str) or not recipient:
             return
-        self._receive_id_types[recipient] = "open_id" if operator.open_id else "user_id"
         context = event.context
         message_id = context.open_message_id
         chat_id = context.open_chat_id
@@ -598,23 +625,36 @@ class FeishuAdapter:
             return
         if not isinstance(chat_id, str) or not chat_id:
             return
-        if self._on_card_action is None:
+        if self._on_interaction is None:
             raise RuntimeError("Feishu adapter is not started")
         value = event.action.value
-        form_value = event.action.form_value
-        await self._on_card_action(
+        conversation = ConversationRef(
+            platform=self.name,
+            bot_id=getattr(header, "app_id", None) or self._app_id,
+            conversation_id=chat_id,
+        )
+        source = MessageRef(conversation, message_id)
+        prompt = self._presented_interactions.get(source)
+        response = (
+            decode_interaction_response(
+                prompt,
+                value=value,
+                form_value=event.action.form_value,
+                action_name=event.action.name,
+            )
+            if prompt is not None
+            else None
+        )
+        await self._on_interaction(
             self,
-            CardAction(
-                platform=self.name,
-                bot_id=getattr(header, "app_id", None) or self._app_id,
-                user_id=recipient,
-                conversation_id=chat_id,
-                message_id=message_id,
-                value=value if isinstance(value, dict) else {},
-                form_value=(form_value if isinstance(form_value, dict) else {}),
-                action_name=(
-                    event.action.name if isinstance(event.action.name, str) else None
+            InboundInteraction(
+                source=source,
+                actor=ActorRef(recipient),
+                interaction_id=(
+                    interaction_id_from_value(value)
+                    or (prompt.interaction_id if prompt is not None else None)
                 ),
+                response=response,
             ),
         )
 

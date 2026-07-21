@@ -5,12 +5,33 @@ import base64
 from pathlib import Path
 from typing import Any
 
+from kimi_bridge.interactions import (
+    ApprovalPrompt,
+    ApprovalRequest,
+    ApprovalResponse,
+    InteractionOutcome,
+    InteractionPrompt,
+    MultipleChoiceAnswer,
+    MultipleChoiceWithOtherAnswer,
+    OtherAnswer,
+    Question,
+    QuestionAnswer,
+    QuestionOption,
+    QuestionPrompt,
+    QuestionRequest,
+    QuestionResponse,
+    SingleChoiceAnswer,
+    SkippedAnswer,
+)
 from kimi_bridge.kimi_server import KimiServerAPIError
 from kimi_bridge.platforms.base import (
-    CardAction,
+    ActorRef,
+    ConversationRef,
     InboundFile,
     InboundImage,
+    InboundInteraction,
     InboundMessage,
+    MessageRef,
 )
 from kimi_bridge.router import ChatRouter
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
@@ -32,10 +53,12 @@ class FakeKimiClient:
         self.stream_actions: list[tuple[str, str]] = []
         self.call_order: list[str] = []
         self.snapshots: dict[str, dict[str, Any]] = {}
-        self.approvals: dict[str, list[dict[str, Any]]] = {}
-        self.questions: dict[str, list[dict[str, Any]]] = {}
+        self.approvals: dict[str, list[ApprovalRequest]] = {}
+        self.questions: dict[str, list[QuestionRequest]] = {}
         self.resolved_approvals: list[tuple[str, str, str]] = []
-        self.resolved_questions: list[tuple[str, str, dict[str, dict[str, Any]]]] = []
+        self.resolved_questions: list[
+            tuple[str, str, tuple[QuestionAnswer, ...]]
+        ] = []
         self.dismissed_questions: list[tuple[str, str]] = []
         self.stream_errors: dict[str, BaseException] = {}
         self._events: dict[
@@ -115,7 +138,7 @@ class FakeKimiClient:
             {"in_flight_turn": None, "messages": {"items": []}},
         )
 
-    async def list_approvals(self, session_id: str) -> list[dict[str, Any]]:
+    async def list_approvals(self, session_id: str) -> list[ApprovalRequest]:
         return list(self.approvals.get(session_id, []))
 
     async def resolve_approval(
@@ -125,24 +148,24 @@ class FakeKimiClient:
         self.approvals[session_id] = [
             item
             for item in self.approvals.get(session_id, [])
-            if item["approval_id"] != approval_id
+            if item.id != approval_id
         ]
         return True
 
-    async def list_questions(self, session_id: str) -> list[dict[str, Any]]:
+    async def list_questions(self, session_id: str) -> list[QuestionRequest]:
         return list(self.questions.get(session_id, []))
 
     async def resolve_question(
         self,
         session_id: str,
         question_id: str,
-        answers: dict[str, dict[str, Any]],
+        answers: tuple[QuestionAnswer, ...],
     ) -> bool:
         self.resolved_questions.append((session_id, question_id, answers))
         self.questions[session_id] = [
             item
             for item in self.questions.get(session_id, [])
-            if item["question_id"] != question_id
+            if item.id != question_id
         ]
         return True
 
@@ -151,7 +174,7 @@ class FakeKimiClient:
         self.questions[session_id] = [
             item
             for item in self.questions.get(session_id, [])
-            if item["question_id"] != question_id
+            if item.id != question_id
         ]
         return True
 
@@ -187,32 +210,49 @@ class FakeAdapter:
 
     def __init__(self, *, message_limit: int = 1000) -> None:
         self.message_limit = message_limit
-        self.sent: list[tuple[str, str, str]] = []
-        self.edits: list[tuple[str, str]] = []
-        self.cards: list[tuple[str, str, dict[str, Any]]] = []
-        self.card_edits: list[tuple[str, dict[str, Any]]] = []
+        self.sent: list[tuple[MessageRef, ConversationRef, str]] = []
+        self.edits: list[tuple[MessageRef, str]] = []
+        self.interactions: list[
+            tuple[MessageRef, ConversationRef, InteractionPrompt]
+        ] = []
+        self.outcomes: list[tuple[MessageRef, InteractionOutcome]] = []
 
-    async def start(self, _message_handler: Any, _card_handler: Any) -> None:
+    async def start(
+        self, _message_handler: Any, _interaction_handler: Any
+    ) -> None:
+        pass
+
+    async def wait(self) -> None:
         pass
 
     async def stop(self) -> None:
         pass
 
-    async def send_text(self, user_id: str, text: str) -> str:
-        message_id = f"message-{len(self.sent) + 1}"
-        self.sent.append((message_id, user_id, text))
-        return message_id
+    async def send_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        message = MessageRef(
+            conversation, f"message-{len(self.sent) + 1}"
+        )
+        self.sent.append((message, conversation, text))
+        return message
 
-    async def edit_text(self, message_id: str, text: str) -> None:
-        self.edits.append((message_id, text))
+    async def edit_text(self, message: MessageRef, text: str) -> None:
+        self.edits.append((message, text))
 
-    async def send_card(self, user_id: str, card: dict[str, Any]) -> str:
-        message_id = f"card-{len(self.cards) + 1}"
-        self.cards.append((message_id, user_id, card))
-        return message_id
+    async def present_interaction(
+        self, conversation: ConversationRef, prompt: InteractionPrompt
+    ) -> MessageRef:
+        message = MessageRef(
+            conversation, f"interaction-{len(self.interactions) + 1}"
+        )
+        self.interactions.append((message, conversation, prompt))
+        return message
 
-    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None:
-        self.card_edits.append((message_id, card))
+    async def finish_interaction(
+        self, message: MessageRef, outcome: InteractionOutcome
+    ) -> None:
+        self.outcomes.append((message, outcome))
 
 
 def _message(
@@ -223,77 +263,65 @@ def _message(
     images: tuple[InboundImage, ...] = (),
     files: tuple[InboundFile, ...] = (),
 ) -> InboundMessage:
+    conversation = ConversationRef("feishu", "cli_bot", conversation_id)
     return InboundMessage(
-        platform="feishu",
-        bot_id="cli_bot",
-        user_id=user_id,
-        user_name=None,
+        conversation=conversation,
+        actor=ActorRef(user_id),
         text=text,
         timestamp=1.0,
         message_id="om_inbound",
-        conversation_id=conversation_id,
         images=images,
         files=files,
     )
 
 
-def _card_action(
-    message_id: str,
+def _interaction(
+    source: MessageRef,
     *,
     user_id: str = "ou_user",
-    conversation_id: str = "oc_direct",
-    value: dict[str, Any] | None = None,
-    form_value: dict[str, Any] | None = None,
-    action_name: str | None = None,
-) -> CardAction:
-    return CardAction(
-        platform="feishu",
-        bot_id="cli_bot",
-        user_id=user_id,
-        conversation_id=conversation_id,
-        message_id=message_id,
-        value=value or {},
-        form_value=form_value or {},
-        action_name=action_name,
+    interaction_id: str | None = None,
+    response: ApprovalResponse | QuestionResponse | None = None,
+) -> InboundInteraction:
+    return InboundInteraction(
+        source=source,
+        actor=ActorRef(user_id),
+        interaction_id=interaction_id,
+        response=response,
     )
 
 
-def _approval(approval_id: str = "approval-1") -> dict[str, Any]:
-    return {
-        "approval_id": approval_id,
-        "session_id": "session-1",
-        "tool_call_id": "tool-1",
-        "tool_name": "Shell",
-        "action": "Run command",
-        "tool_input_display": {"command": "touch approved.txt"},
-        "created_at": "now",
-        "expires_at": "later",
-    }
+def _approval(approval_id: str = "approval-1") -> ApprovalRequest:
+    return ApprovalRequest(
+        id=approval_id,
+        session_id="session-1",
+        tool_name="Shell",
+        action="Run command",
+        input_display={"command": "touch approved.txt"},
+    )
 
 
 def _question_request(
     question_id: str = "question-1",
     *,
     allow_other: bool = True,
-) -> dict[str, Any]:
-    return {
-        "question_id": question_id,
-        "session_id": "session-1",
-        "questions": [
-            {
-                "id": "q1",
-                "question": "Pick one",
-                "header": "Choice",
-                "options": [
-                    {"id": "one", "label": "One"},
-                    {"id": "two", "label": "Two"},
-                ],
-                "allow_other": allow_other,
-                "other_label": "Something else",
-            }
-        ],
-        "created_at": "now",
-    }
+) -> QuestionRequest:
+    return QuestionRequest(
+        id=question_id,
+        session_id="session-1",
+        questions=(
+            Question(
+                id="q1",
+                text="Pick one",
+                header="Choice",
+                options=(
+                    QuestionOption(id="one", label="One"),
+                    QuestionOption(id="two", label="Two"),
+                ),
+                allow_other=allow_other,
+                other_label="Something else",
+            ),
+        ),
+    )
 
 
 async def test_first_message_creates_manual_session_and_persists_binding(
@@ -432,7 +460,7 @@ async def test_bridge_commands_switch_stop_and_mode(
     finally:
         await router.close()
 
-    texts = [text for _message_id, _user_id, text in adapter.sent]
+    texts = [text for _message, _conversation, text in adapter.sent]
     assert any("/mode <manual|auto|yolo>" in text for text in texts)
     assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
     assert any("Switched to session-b" in text for text in texts)
@@ -485,7 +513,7 @@ async def test_switch_stream_failure_is_visible_and_does_not_rebind(
     finally:
         await router.close()
 
-    texts = [text for _message_id, _user_id, text in adapter.sent]
+    texts = [text for _message, _conversation, text in adapter.sent]
     assert any(
         "session-broken" in text and "workspace root does not exist" in text
         for text in texts
@@ -545,7 +573,7 @@ async def test_submit_then_steer_and_no_active_turn_fallback(
     ]
 
 
-async def test_approval_card_resolves_and_rejects_wrong_user(
+async def test_approval_interaction_resolves_and_rejects_wrong_actor(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -559,37 +587,41 @@ async def test_approval_card_resolves_and_rejects_wrong_user(
     )
     try:
         await router.handle_inbound(adapter, _message("run a command"))
-        await _wait_for(lambda: len(adapter.cards) == 1)
-        message_id, _user, card = adapter.cards[0]
-        assert card["schema"] == "2.0"
-        button_columns = card["body"]["elements"][1]["columns"]
-        values = [
-            column["elements"][0]["behaviors"][0]["value"] for column in button_columns
-        ]
-        assert {value["decision"] for value in values} == {
-            "approved",
-            "rejected",
-            "cancelled",
-        }
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        message, conversation, prompt = adapter.interactions[0]
+        assert conversation == _message("").conversation
+        assert isinstance(prompt, ApprovalPrompt)
+        assert prompt.request == _approval()
+        assert prompt.session_title == "run a command"
+        assert prompt.workspace == str((tmp_path / "workspace").resolve())
 
-        await router.handle_card_action(
+        await router.handle_interaction(
             adapter,
-            _card_action(
-                message_id,
+            _interaction(
+                message,
                 user_id="ou_other",
-                value=values[0],
+                interaction_id=prompt.interaction_id,
+                response=ApprovalResponse("approved"),
             ),
         )
         assert client.resolved_approvals == []
-        await router.handle_card_action(
-            adapter, _card_action(message_id, value=values[0])
+        await router.handle_interaction(
+            adapter,
+            _interaction(
+                message,
+                interaction_id=prompt.interaction_id,
+                response=ApprovalResponse("approved"),
+            ),
         )
     finally:
         await router.close()
 
     assert client.resolved_approvals == [("session-1", "approval-1", "approved")]
-    assert len(adapter.card_edits) == 1
-    assert any(user_id == "ou_other" for _id, user_id, _text in adapter.sent)
+    assert len(adapter.outcomes) == 1
+    assert adapter.outcomes[0][0] == message
+    assert adapter.outcomes[0][1].state == "completed"
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0][1] == message.conversation
 
 
 async def test_question_option_and_free_text_paths(
@@ -606,42 +638,47 @@ async def test_question_option_and_free_text_paths(
     )
     try:
         await router.handle_inbound(adapter, _message("ask me"))
-        await _wait_for(lambda: len(adapter.cards) == 1)
-        message_id, _user, card = adapter.cards[0]
-        question_context = card["body"]["elements"][1]["columns"][0]["elements"][0][
-            "text"
-        ]["content"]
-        assert question_context == "Choice\nPick one"
-        option_columns = card["body"]["elements"][2]["columns"]
-        assert all(
-            column["elements"][0]["type"] == "default"
-            for column in option_columns
-        )
-        other_input = card["body"]["elements"][3]["elements"][0]
-        assert other_input.get("required", False) is False
-        option_value = option_columns[0]["elements"][0]["behaviors"][0]["value"]
-        await router.handle_card_action(
-            adapter, _card_action(message_id, value=option_value)
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        first_message, _conversation, first_prompt = adapter.interactions[0]
+        assert isinstance(first_prompt, QuestionPrompt)
+        assert first_prompt.request.questions[0].header == "Choice"
+        assert first_prompt.request.questions[0].text == "Pick one"
+        await router.handle_interaction(
+            adapter,
+            _interaction(
+                first_message,
+                interaction_id=first_prompt.interaction_id,
+                response=QuestionResponse(
+                    (SingleChoiceAnswer("q1", "one"),)
+                ),
+            ),
         )
 
         client.questions["session-1"] = [_question_request("question-2")]
         assert router._active is not None
         await router._discover_interaction(router._active)
-        second_id = adapter.cards[1][0]
-        await router.handle_card_action(
+        second_message, _conversation, second_prompt = adapter.interactions[1]
+        assert isinstance(second_prompt, QuestionPrompt)
+        await router.handle_interaction(
             adapter,
-            _card_action(second_id, form_value={"other_0": "custom"}),
+            _interaction(
+                second_message,
+                interaction_id=second_prompt.interaction_id,
+                response=QuestionResponse((OtherAnswer("q1", "custom"),)),
+            ),
         )
 
         client.questions["session-1"] = [_question_request("question-3")]
         await router._discover_interaction(router._active)
-        third_id, _user, third_card = adapter.cards[2]
-        skip_value = third_card["body"]["elements"][2]["columns"][-1]["elements"][0][
-            "behaviors"
-        ][0]["value"]
-        await router.handle_card_action(
+        third_message, _conversation, third_prompt = adapter.interactions[2]
+        assert isinstance(third_prompt, QuestionPrompt)
+        await router.handle_interaction(
             adapter,
-            _card_action(third_id, value=skip_value),
+            _interaction(
+                third_message,
+                interaction_id=third_prompt.interaction_id,
+                response=QuestionResponse((SkippedAnswer("q1"),)),
+            ),
         )
     finally:
         await router.close()
@@ -650,17 +687,17 @@ async def test_question_option_and_free_text_paths(
         (
             "session-1",
             "question-1",
-            {"q1": {"kind": "single", "option_id": "one"}},
+            (SingleChoiceAnswer("q1", "one"),),
         ),
         (
             "session-1",
             "question-2",
-            {"q1": {"kind": "other", "text": "custom"}},
+            (OtherAnswer("q1", "custom"),),
         ),
         (
             "session-1",
             "question-3",
-            {"q1": {"kind": "skipped"}},
+            (SkippedAnswer("q1"),),
         ),
     ]
 
@@ -669,40 +706,39 @@ async def test_multi_question_form_maps_all_answer_shapes(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
-    request = {
-        "question_id": "question-many",
-        "session_id": "session-1",
-        "questions": [
-            {
-                "id": "single",
-                "question": "One?",
-                "options": [
-                    {"id": "a", "label": "A"},
-                    {"id": "b", "label": "B"},
-                ],
-            },
-            {
-                "id": "multi",
-                "question": "Many?",
-                "options": [
-                    {"id": "x", "label": "X"},
-                    {"id": "y", "label": "Y"},
-                ],
-                "multi_select": True,
-                "allow_other": True,
-            },
-            {
-                "id": "multi-only",
-                "question": "More?",
-                "options": [
-                    {"id": "left", "label": "Left"},
-                    {"id": "right", "label": "Right"},
-                ],
-                "multi_select": True,
-            },
-        ],
-        "created_at": "now",
-    }
+    request = QuestionRequest(
+        id="question-many",
+        session_id="session-1",
+        questions=(
+            Question(
+                id="single",
+                text="One?",
+                options=(
+                    QuestionOption("a", "A"),
+                    QuestionOption("b", "B"),
+                ),
+            ),
+            Question(
+                id="multi",
+                text="Many?",
+                options=(
+                    QuestionOption("x", "X"),
+                    QuestionOption("y", "Y"),
+                ),
+                multi_select=True,
+                allow_other=True,
+            ),
+            Question(
+                id="multi-only",
+                text="More?",
+                options=(
+                    QuestionOption("left", "Left"),
+                    QuestionOption("right", "Right"),
+                ),
+                multi_select=True,
+            ),
+        ),
+    )
     client.questions["session-1"] = [request]
     adapter = FakeAdapter()
     router = ChatRouter(
@@ -713,38 +749,38 @@ async def test_multi_question_form_maps_all_answer_shapes(
     )
     try:
         await router.handle_inbound(adapter, _message("ask many"))
-        await _wait_for(lambda: len(adapter.cards) == 1)
-        assert adapter.cards[0][2]["body"]["elements"][1]["tag"] == "form"
-        await router.handle_card_action(
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        message, _conversation, prompt = adapter.interactions[0]
+        assert isinstance(prompt, QuestionPrompt)
+        await router.handle_interaction(
             adapter,
-            _card_action(
-                adapter.cards[0][0],
-                form_value={
-                    "q_1": ["x"],
-                    "other_1": "custom",
-                    "q_2": ["left", "right"],
-                },
-                action_name="submit_answers",
+            _interaction(
+                message,
+                interaction_id=prompt.interaction_id,
+                response=QuestionResponse(
+                    (
+                        SkippedAnswer("single"),
+                        MultipleChoiceWithOtherAnswer(
+                            "multi", ("x",), "custom"
+                        ),
+                        MultipleChoiceAnswer(
+                            "multi-only", ("left", "right")
+                        ),
+                    )
+                ),
             ),
         )
     finally:
         await router.close()
 
-    assert client.resolved_questions[-1][2] == {
-        "single": {"kind": "skipped"},
-        "multi": {
-            "kind": "multi_with_other",
-            "option_ids": ["x"],
-            "other_text": "custom",
-        },
-        "multi-only": {
-            "kind": "multi",
-            "option_ids": ["left", "right"],
-        },
-    }
+    assert client.resolved_questions[-1][2] == (
+        SkippedAnswer("single"),
+        MultipleChoiceWithOtherAnswer("multi", ("x",), "custom"),
+        MultipleChoiceAnswer("multi-only", ("left", "right")),
+    )
 
 
-async def test_approval_timeout_auto_rejects_and_updates_card(
+async def test_approval_timeout_auto_rejects_and_finishes_interaction(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -767,7 +803,7 @@ async def test_approval_timeout_auto_rejects_and_updates_card(
     )
     try:
         await router.handle_inbound(adapter, _message("run"))
-        await _wait_for(lambda: len(adapter.cards) == 1 and bool(delays))
+        await _wait_for(lambda: len(adapter.interactions) == 1 and bool(delays))
         release_timeout.set()
         await _wait_for(lambda: bool(client.resolved_approvals))
     finally:
@@ -775,7 +811,7 @@ async def test_approval_timeout_auto_rejects_and_updates_card(
 
     assert delays == [12]
     assert client.resolved_approvals == [("session-1", "approval-1", "rejected")]
-    assert len(adapter.card_edits) == 1
+    assert adapter.outcomes[0][1].state == "timed_out"
     assert len(adapter.sent) == 1
 
 
@@ -797,7 +833,7 @@ async def test_question_timeout_dismisses_request(tmp_path: Path) -> None:
     )
     try:
         await router.handle_inbound(adapter, _message("ask"))
-        await _wait_for(lambda: len(adapter.cards) == 1)
+        await _wait_for(lambda: len(adapter.interactions) == 1)
         release_timeout.set()
         await _wait_for(lambda: bool(client.dismissed_questions))
     finally:
@@ -806,7 +842,7 @@ async def test_question_timeout_dismisses_request(tmp_path: Path) -> None:
     assert client.dismissed_questions == [("session-1", "question-1")]
 
 
-async def test_stale_card_after_restart_is_explained_without_api_call(
+async def test_stale_interaction_after_restart_is_explained_without_api_call(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -818,12 +854,14 @@ async def test_stale_card_after_restart_is_explained_without_api_call(
         model="kimi-code/k3",
     )
 
-    await router.handle_card_action(adapter, _card_action("card-from-old-run"))
+    stale_message = MessageRef(_message("").conversation, "card-from-old-run")
+    await router.handle_interaction(adapter, _interaction(stale_message))
     await router.close()
 
     assert client.resolved_approvals == []
     assert client.resolved_questions == []
-    assert adapter.card_edits[0][0] == "card-from-old-run"
+    assert adapter.outcomes[0][0] == stale_message
+    assert adapter.outcomes[0][1].state == "stale"
     assert len(adapter.sent) == 1
 
 
@@ -883,6 +921,7 @@ async def test_delta_throttle_final_edit_and_router_chunking(
 ) -> None:
     client = FakeKimiClient()
     adapter = FakeAdapter(message_limit=4)
+    conversation = _message("").conversation
     release_flush = asyncio.Event()
     delays: list[float] = []
     now = [100.0]
@@ -914,7 +953,9 @@ async def test_delta_throttle_final_edit_and_router_chunking(
 
         release_flush.set()
         await _wait_for(lambda: len(adapter.sent) == 2 and bool(adapter.edits))
-        assert adapter.edits == [("message-1", "abcd")]
+        assert adapter.edits == [
+            (MessageRef(conversation, "message-1"), "abcd")
+        ]
         assert adapter.sent[1][2] == "ef"
 
         client.snapshots["session-1"] = {
@@ -929,16 +970,22 @@ async def test_delta_throttle_final_edit_and_router_chunking(
             },
         }
         client.emit("session-1", _event("turn.ended"))
-        await _wait_for(lambda: ("message-2", "efgh") in adapter.edits)
+        await _wait_for(
+            lambda: (MessageRef(conversation, "message-2"), "efgh")
+            in adapter.edits
+        )
     finally:
         await router.close()
 
     assert delays == [1.5]
     assert adapter.sent == [
-        ("message-1", "ou_user", "abc"),
-        ("message-2", "ou_user", "ef"),
+        (MessageRef(conversation, "message-1"), conversation, "abc"),
+        (MessageRef(conversation, "message-2"), conversation, "ef"),
     ]
-    assert adapter.edits[-1] == ("message-2", "efgh")
+    assert adapter.edits[-1] == (
+        MessageRef(conversation, "message-2"),
+        "efgh",
+    )
 
 
 async def test_resync_snapshot_rebuilds_in_flight_stream(
@@ -969,7 +1016,7 @@ async def test_resync_snapshot_rebuilds_in_flight_stream(
     finally:
         await router.close()
 
-    assert [text for _id, _user, text in adapter.sent] == [
+    assert [text for _message, _conversation, text in adapter.sent] == [
         "abcd",
         "efgh",
         "i",

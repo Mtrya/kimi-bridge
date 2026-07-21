@@ -7,6 +7,17 @@ from typing import Any
 
 import pytest
 
+from kimi_bridge.interactions import (
+    ApprovalRequest,
+    MultipleChoiceAnswer,
+    MultipleChoiceWithOtherAnswer,
+    OtherAnswer,
+    Question,
+    QuestionOption,
+    QuestionRequest,
+    SingleChoiceAnswer,
+    SkippedAnswer,
+)
 from kimi_bridge.kimi_server import (
     KimiServerAPIError,
     KimiServerClient,
@@ -345,8 +356,27 @@ async def test_rest_envelope_error_is_raised() -> None:
 
 
 async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> None:
-    approval = {"approval_id": "approval-1"}
-    question = {"question_id": "question-1", "questions": []}
+    approval = {
+        "approval_id": "approval-1",
+        "session_id": "session-1",
+        "tool_name": "Shell",
+        "action": "Run command",
+        "tool_input_display": {"command": "pwd"},
+    }
+    question = {
+        "question_id": "question-1",
+        "session_id": "session-1",
+        "questions": [
+            {
+                "id": "q1",
+                "question": "Pick one",
+                "options": [
+                    {"id": "one", "label": "One", "description": "First"}
+                ],
+                "allow_other": True,
+            }
+        ],
+    }
     http = FakeHttpClient(
         [
             _envelope({"prompt_id": "prompt-1", "status": "running"}),
@@ -379,10 +409,37 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     assert (await client.update_profile("session-1", permission_mode="yolo"))[
         "id"
     ] == "session-1"
-    assert await client.list_approvals("session-1") == [approval]
+    assert await client.list_approvals("session-1") == [
+        ApprovalRequest(
+            id="approval-1",
+            session_id="session-1",
+            tool_name="Shell",
+            action="Run command",
+            input_display={"command": "pwd"},
+        )
+    ]
     assert await client.resolve_approval("session-1", "approval-1", "approved")
-    assert await client.list_questions("session-1") == [question]
-    answers = {"q1": {"kind": "single", "option_id": "one"}}
+    assert await client.list_questions("session-1") == [
+        QuestionRequest(
+            id="question-1",
+            session_id="session-1",
+            questions=(
+                Question(
+                    id="q1",
+                    text="Pick one",
+                    options=(QuestionOption("one", "One", "First"),),
+                    allow_other=True,
+                ),
+            ),
+        )
+    ]
+    answers = (
+        SingleChoiceAnswer("q1", "one"),
+        MultipleChoiceAnswer("q2", ("x", "y")),
+        OtherAnswer("q3", "custom"),
+        MultipleChoiceWithOtherAnswer("q4", ("left",), "another"),
+        SkippedAnswer("q5"),
+    )
     assert await client.resolve_question("session-1", "question-1", answers)
     assert await client.dismiss_question("session-1", "question-1")
 
@@ -431,7 +488,17 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     assert http.requests[4][2]["json"] == {"decision": "approved"}
     assert http.requests[5][2]["params"] == {"status": "pending"}
     assert http.requests[6][2]["json"] == {
-        "answers": answers,
+        "answers": {
+            "q1": {"kind": "single", "option_id": "one"},
+            "q2": {"kind": "multi", "option_ids": ["x", "y"]},
+            "q3": {"kind": "other", "text": "custom"},
+            "q4": {
+                "kind": "multi_with_other",
+                "option_ids": ["left"],
+                "other_text": "another",
+            },
+            "q5": {"kind": "skipped"},
+        },
         "method": "click",
     }
     assert http.requests[7][2]["json"] == {}

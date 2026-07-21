@@ -23,6 +23,20 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from .interactions import (
+    ApprovalDecision,
+    ApprovalRequest,
+    MultipleChoiceAnswer,
+    MultipleChoiceWithOtherAnswer,
+    OtherAnswer,
+    Question,
+    QuestionAnswer,
+    QuestionOption,
+    QuestionRequest,
+    SingleChoiceAnswer,
+    SkippedAnswer,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 EXPECTED_SERVER_VERSION = "0.28.1"
@@ -607,7 +621,7 @@ class KimiServerClient:
             json_body={"agent_config": agent_config},
         )
 
-    async def list_approvals(self, session_id: str) -> list[dict[str, Any]]:
+    async def list_approvals(self, session_id: str) -> list[ApprovalRequest]:
         try:
             data = await self._request(
                 "GET",
@@ -618,13 +632,13 @@ class KimiServerClient:
             if exc.code == 40001:
                 return []
             raise
-        return list(data["items"])
+        return [_approval_request_from_wire(item) for item in data["items"]]
 
     async def resolve_approval(
         self,
         session_id: str,
         approval_id: str,
-        decision: Literal["approved", "rejected", "cancelled"],
+        decision: ApprovalDecision,
     ) -> bool:
         data = await self._request(
             "POST",
@@ -633,7 +647,7 @@ class KimiServerClient:
         )
         return bool(data["resolved"])
 
-    async def list_questions(self, session_id: str) -> list[dict[str, Any]]:
+    async def list_questions(self, session_id: str) -> list[QuestionRequest]:
         try:
             data = await self._request(
                 "GET",
@@ -644,18 +658,22 @@ class KimiServerClient:
             if exc.code == 40001:
                 return []
             raise
-        return list(data["items"])
+        return [_question_request_from_wire(item) for item in data["items"]]
 
     async def resolve_question(
         self,
         session_id: str,
         question_id: str,
-        answers: dict[str, dict[str, Any]],
+        answers: tuple[QuestionAnswer, ...],
     ) -> bool:
+        answers_payload = {
+            answer.question_id: _question_answer_to_wire(answer)
+            for answer in answers
+        }
         data = await self._request(
             "POST",
             f"/sessions/{session_id}/questions/{question_id}",
-            json_body={"answers": answers, "method": "click"},
+            json_body={"answers": answers_payload, "method": "click"},
         )
         return bool(data["resolved"])
 
@@ -1044,6 +1062,71 @@ def _websocket_url(base_url: str) -> str:
     parsed = urlsplit(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, "/api/v1/ws", "", ""))
+
+
+def _approval_request_from_wire(value: dict[str, Any]) -> ApprovalRequest:
+    action = value.get("action")
+    return ApprovalRequest(
+        id=str(value["approval_id"]),
+        session_id=str(value["session_id"]),
+        tool_name=str(value["tool_name"]),
+        action=str(action) if action else "Approval required",
+        input_display=value.get("tool_input_display"),
+    )
+
+
+def _question_request_from_wire(value: dict[str, Any]) -> QuestionRequest:
+    questions: list[Question] = []
+    for item in value["questions"]:
+        options = tuple(
+            QuestionOption(
+                id=str(option["id"]),
+                label=str(option["label"]),
+                description=(
+                    str(option["description"])
+                    if option.get("description") is not None
+                    else None
+                ),
+            )
+            for option in item["options"]
+        )
+        questions.append(
+            Question(
+                id=str(item["id"]),
+                text=str(item["question"]),
+                options=options,
+                header=(str(item["header"]) if item.get("header") else None),
+                body=str(item["body"]) if item.get("body") else None,
+                multi_select=bool(item.get("multi_select", False)),
+                allow_other=bool(item.get("allow_other", False)),
+                other_label=(
+                    str(item["other_label"]) if item.get("other_label") else None
+                ),
+            )
+        )
+    return QuestionRequest(
+        id=str(value["question_id"]),
+        session_id=str(value["session_id"]),
+        questions=tuple(questions),
+    )
+
+
+def _question_answer_to_wire(answer: QuestionAnswer) -> dict[str, Any]:
+    if isinstance(answer, SkippedAnswer):
+        return {"kind": "skipped"}
+    if isinstance(answer, SingleChoiceAnswer):
+        return {"kind": "single", "option_id": answer.option_id}
+    if isinstance(answer, MultipleChoiceAnswer):
+        return {"kind": "multi", "option_ids": list(answer.option_ids)}
+    if isinstance(answer, OtherAnswer):
+        return {"kind": "other", "text": answer.text}
+    if isinstance(answer, MultipleChoiceWithOtherAnswer):
+        return {
+            "kind": "multi_with_other",
+            "option_ids": list(answer.option_ids),
+            "other_text": answer.text,
+        }
+    raise TypeError(f"unsupported question answer: {type(answer).__name__}")
 
 
 def _cursor_from_mapping(value: Any) -> _EventCursor:

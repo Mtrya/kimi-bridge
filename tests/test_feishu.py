@@ -10,13 +10,39 @@ from typing import Any
 
 import pytest
 
-from kimi_bridge.platforms.base import CardAction, InboundMessage
+from kimi_bridge.interactions import (
+    ApprovalPrompt,
+    ApprovalRequest,
+    ApprovalResponse,
+    InteractionOutcome,
+    MultipleChoiceAnswer,
+    MultipleChoiceWithOtherAnswer,
+    OtherAnswer,
+    Question,
+    QuestionOption,
+    QuestionPrompt,
+    QuestionRequest,
+    QuestionResponse,
+    SingleChoiceAnswer,
+    SkippedAnswer,
+)
+from kimi_bridge.platforms.base import (
+    ActorRef,
+    ConversationRef,
+    InboundInteraction,
+    InboundMessage,
+    MessageRef,
+)
 from kimi_bridge.platforms.feishu import (
     FeishuAdapter,
     UNSUPPORTED_MESSAGE,
     _DownloadedResource,
     _LarkTextTransport,
     _LarkWebSocketRunner,
+)
+from kimi_bridge.platforms.feishu_cards import (
+    decode_interaction_response,
+    render_interaction,
 )
 
 
@@ -130,8 +156,50 @@ def _card_event(
     )
 
 
-async def _discard_card(_adapter: Any, _action: CardAction) -> None:
+async def _discard_interaction(
+    _adapter: Any, _action: InboundInteraction
+) -> None:
     pass
+
+
+def _approval_prompt() -> ApprovalPrompt:
+    return ApprovalPrompt(
+        interaction_id="interaction-1",
+        request=ApprovalRequest(
+            id="approval-1",
+            session_id="session-1",
+            tool_name="Shell",
+            action="Run command",
+            input_display={"command": "touch approved.txt"},
+        ),
+        session_title="Test session",
+        workspace="/tmp/workspace",
+    )
+
+
+def _question_prompt() -> QuestionPrompt:
+    return QuestionPrompt(
+        interaction_id="interaction-1",
+        request=QuestionRequest(
+            id="question-1",
+            session_id="session-1",
+            questions=(
+                Question(
+                    id="q1",
+                    text="Pick one",
+                    header="Choice",
+                    options=(
+                        QuestionOption("one", "One"),
+                        QuestionOption("two", "Two"),
+                    ),
+                    allow_other=True,
+                    other_label="Something else",
+                ),
+            ),
+        ),
+        session_title="Test session",
+        workspace="/tmp/workspace",
+    )
 
 
 async def test_allowlisted_p2p_text_is_normalized_once() -> None:
@@ -154,33 +222,40 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
         transport=transport,
         ws_factory=factory,
     )
-    await adapter.start(on_message, _discard_card)
+    await adapter.start(on_message, _discard_interaction)
     try:
         event = _event(message_id="om_1")
         await adapter.handle_event(event)
         await adapter.handle_event(event)
 
+        conversation = ConversationRef("feishu", "cli_event", "oc_direct")
         assert received == [
             InboundMessage(
-                platform="feishu",
-                bot_id="cli_event",
-                user_id="ou_allowed",
-                user_name=None,
+                conversation=conversation,
+                actor=ActorRef("ou_allowed"),
                 text="hello",
                 timestamp=event.event.message.create_time / 1000,
                 message_id="om_1",
-                conversation_id="oc_direct",
             )
         ]
-        assert await adapter.send_text("ou_allowed", "reply") == "message-1"
-        await adapter.edit_text("message-1", "updated")
-        card = {"schema": "2.0", "body": {"elements": []}}
-        assert await adapter.send_card("ou_allowed", card) == "card-1"
-        await adapter.edit_card("card-1", card)
-        assert transport.sent == [("ou_allowed", "open_id", "reply")]
+        text_message = MessageRef(conversation, "message-1")
+        assert await adapter.send_text(conversation, "reply") == text_message
+        await adapter.edit_text(text_message, "updated")
+        card_message = MessageRef(conversation, "card-1")
+        assert (
+            await adapter.present_interaction(conversation, _approval_prompt())
+            == card_message
+        )
+        await adapter.finish_interaction(
+            card_message,
+            InteractionOutcome(state="completed", detail="Approved"),
+        )
+        assert transport.sent == [("oc_direct", "chat_id", "reply")]
         assert transport.edited == [("message-1", "updated")]
-        assert transport.sent_cards == [("ou_allowed", "open_id", card)]
-        assert transport.edited_cards == [("card-1", card)]
+        assert transport.sent_cards[0][:2] == ("oc_direct", "chat_id")
+        assert transport.sent_cards[0][2]["schema"] == "2.0"
+        assert transport.edited_cards[0][0] == "card-1"
+        assert transport.edited_cards[0][1]["header"]["template"] == "green"
     finally:
         await adapter.stop()
 
@@ -306,7 +381,7 @@ async def test_groups_bots_and_non_allowlisted_users_are_silent() -> None:
     )
     await adapter.start(
         lambda _adapter, message: _append(received, message),
-        _discard_card,
+        _discard_interaction,
     )
     try:
         await adapter.handle_event(_event(message_id="om_group", chat_type="group"))
@@ -342,7 +417,7 @@ async def test_image_file_and_multi_image_post_are_downloaded() -> None:
     )
     await adapter.start(
         lambda _adapter, message: _append(received, message),
-        _discard_card,
+        _discard_interaction,
     )
     try:
         await adapter.handle_event(
@@ -391,9 +466,135 @@ async def test_image_file_and_multi_image_post_are_downloaded() -> None:
     ]
 
 
+def test_approval_card_rendering_and_callback_decoding() -> None:
+    prompt = _approval_prompt()
+    card = render_interaction(prompt)
+
+    assert card["schema"] == "2.0"
+    button_columns = card["body"]["elements"][1]["columns"]
+    values = [
+        column["elements"][0]["behaviors"][0]["value"]
+        for column in button_columns
+    ]
+    assert {value["decision"] for value in values} == {
+        "approved",
+        "rejected",
+        "cancelled",
+    }
+    assert {value["interaction_id"] for value in values} == {
+        prompt.interaction_id
+    }
+    assert decode_interaction_response(
+        prompt,
+        value=values[0],
+        form_value=None,
+        action_name=None,
+    ) == ApprovalResponse("approved")
+
+
+def test_single_question_card_rendering_and_answer_decoding() -> None:
+    prompt = _question_prompt()
+    card = render_interaction(prompt)
+
+    question_context = card["body"]["elements"][1]["columns"][0]["elements"][0][
+        "text"
+    ]["content"]
+    assert question_context == "Choice\nPick one"
+    option_columns = card["body"]["elements"][2]["columns"]
+    assert all(
+        column["elements"][0]["type"] == "default"
+        for column in option_columns
+    )
+    other_input = card["body"]["elements"][3]["elements"][0]
+    assert other_input.get("required", False) is False
+
+    option_value = option_columns[0]["elements"][0]["behaviors"][0]["value"]
+    assert decode_interaction_response(
+        prompt,
+        value=option_value,
+        form_value=None,
+        action_name=None,
+    ) == QuestionResponse((SingleChoiceAnswer("q1", "one"),))
+
+    skip_value = option_columns[-1]["elements"][0]["behaviors"][0]["value"]
+    assert decode_interaction_response(
+        prompt,
+        value=skip_value,
+        form_value=None,
+        action_name=None,
+    ) == QuestionResponse((SkippedAnswer("q1"),))
+
+    assert decode_interaction_response(
+        prompt,
+        value=None,
+        form_value={"other_0": " custom "},
+        action_name="submit_other",
+    ) == QuestionResponse((OtherAnswer("q1", "custom"),))
+
+
+def test_multi_question_card_form_decodes_all_answer_shapes() -> None:
+    prompt = QuestionPrompt(
+        interaction_id="interaction-many",
+        request=QuestionRequest(
+            id="question-many",
+            session_id="session-1",
+            questions=(
+                Question(
+                    id="single",
+                    text="One?",
+                    options=(
+                        QuestionOption("a", "A"),
+                        QuestionOption("b", "B"),
+                    ),
+                ),
+                Question(
+                    id="multi",
+                    text="Many?",
+                    options=(
+                        QuestionOption("x", "X"),
+                        QuestionOption("y", "Y"),
+                    ),
+                    multi_select=True,
+                    allow_other=True,
+                ),
+                Question(
+                    id="multi-only",
+                    text="More?",
+                    options=(
+                        QuestionOption("left", "Left"),
+                        QuestionOption("right", "Right"),
+                    ),
+                    multi_select=True,
+                ),
+            ),
+        ),
+        session_title="Test session",
+        workspace="/tmp/workspace",
+    )
+
+    card = render_interaction(prompt)
+    assert card["body"]["elements"][1]["tag"] == "form"
+    assert decode_interaction_response(
+        prompt,
+        value=None,
+        form_value={
+            "q_1": ["x"],
+            "other_1": "custom",
+            "q_2": ["left", "right"],
+        },
+        action_name="submit_answers",
+    ) == QuestionResponse(
+        (
+            SkippedAnswer("single"),
+            MultipleChoiceWithOtherAnswer("multi", ("x",), "custom"),
+            MultipleChoiceAnswer("multi-only", ("left", "right")),
+        )
+    )
+
+
 async def test_card_callback_is_normalized_and_non_allowlisted_is_silent() -> None:
     transport = FakeTransport()
-    actions: list[CardAction] = []
+    actions: list[InboundInteraction] = []
     runners: list[FakeWebSocketRunner] = []
 
     def factory(message_callback: Any, card_callback: Any) -> FakeWebSocketRunner:
@@ -401,7 +602,9 @@ async def test_card_callback_is_normalized_and_non_allowlisted_is_silent() -> No
         runners.append(runner)
         return runner
 
-    async def on_card(_adapter: Any, action: CardAction) -> None:
+    async def on_interaction(
+        _adapter: Any, action: InboundInteraction
+    ) -> None:
         actions.append(action)
 
     adapter = FeishuAdapter(
@@ -411,9 +614,21 @@ async def test_card_callback_is_normalized_and_non_allowlisted_is_silent() -> No
         transport=transport,
         ws_factory=factory,
     )
-    await adapter.start(lambda _adapter, _message: _noop(), on_card)
+    await adapter.start(lambda _adapter, _message: _noop(), on_interaction)
     try:
-        response = runners[0].card_callback(_card_event(value={"decision": "approved"}))
+        conversation = ConversationRef("feishu", "cli_event", "oc_direct")
+        message = await adapter.present_interaction(
+            conversation, _approval_prompt()
+        )
+        response = runners[0].card_callback(
+            _card_event(
+                message_id=message.message_id,
+                value={
+                    "interaction_id": "interaction-1",
+                    "decision": "approved",
+                },
+            )
+        )
         assert response is not None
         await _wait_for(lambda: len(actions) == 1)
         await adapter.handle_card_action_event(
@@ -423,14 +638,50 @@ async def test_card_callback_is_normalized_and_non_allowlisted_is_silent() -> No
         await adapter.stop()
 
     assert actions == [
-        CardAction(
-            platform="feishu",
-            bot_id="cli_event",
-            user_id="ou_allowed",
-            conversation_id="oc_direct",
-            message_id="om_card",
-            value={"decision": "approved"},
-            action_name="submit",
+        InboundInteraction(
+            source=MessageRef(conversation, "card-1"),
+            actor=ActorRef("ou_allowed"),
+            interaction_id="interaction-1",
+            response=ApprovalResponse("approved"),
+        )
+    ]
+
+
+async def test_card_callback_after_restart_preserves_stale_identity() -> None:
+    transport = FakeTransport()
+    actions: list[InboundInteraction] = []
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+        ws_factory=FakeWebSocketRunner,
+    )
+    await adapter.start(
+        lambda _adapter, _message: _noop(),
+        lambda _adapter, action: _append(actions, action),
+    )
+    try:
+        await adapter.handle_card_action_event(
+            _card_event(
+                value={
+                    "interaction_id": "interaction-from-old-run",
+                    "decision": "approved",
+                }
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert actions == [
+        InboundInteraction(
+            source=MessageRef(
+                ConversationRef("feishu", "cli_event", "oc_direct"),
+                "om_card",
+            ),
+            actor=ActorRef("ou_allowed"),
+            interaction_id="interaction-from-old-run",
+            response=None,
         )
     ]
 
@@ -447,7 +698,7 @@ async def test_other_message_type_gets_supported_types_notice() -> None:
     )
     await adapter.start(
         lambda _adapter, message: _append(received, message),
-        _discard_card,
+        _discard_interaction,
     )
     try:
         await adapter.handle_event(_event(message_id="om_audio", message_type="audio"))
@@ -455,7 +706,7 @@ async def test_other_message_type_gets_supported_types_notice() -> None:
         await adapter.stop()
 
     assert received == []
-    assert transport.sent == [("ou_allowed", "open_id", UNSUPPORTED_MESSAGE)]
+    assert transport.sent == [("oc_direct", "chat_id", UNSUPPORTED_MESSAGE)]
 
 
 async def _append(items: list[Any], item: Any) -> None:
