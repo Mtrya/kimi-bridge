@@ -36,6 +36,7 @@ def render_outcome(outcome: InteractionOutcome) -> dict[str, Any]:
         "completed": ("Interaction complete", "green"),
         "timed_out": ("Interaction timed out", "red"),
         "stale": ("Interaction expired", "grey"),
+        "cancelled": ("Interaction cancelled", "grey"),
     }[outcome.state]
     return _status_card(title, outcome.detail, template=template)
 

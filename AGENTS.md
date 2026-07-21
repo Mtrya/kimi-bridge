@@ -4,7 +4,7 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## Project state
 
-**The managed server client and Feishu bridge are implemented, including interactive approvals/questions, prompt steering, and inbound media.** The core contracts are platform-neutral, but additional adapters remain future work and the runtime intentionally enables one adapter per process. All major decisions are locked in README.md ("Decisions (locked)") — treat them as requirements, not suggestions; changing one requires explicit user sign-off and a README update in the same change. The remaining open questions are listed in README.md; do not silently "fill them in" with assumptions — surface them to the user instead. The phased execution roadmap lives in `roadmap/` (local, gitignored working docs; `roadmap/reference/` holds snapshots of the kimi server OpenAPI/AsyncAPI specs). Each phase doc there is self-contained and names its own validation and exit criteria.
+**The managed server client, Feishu bridge, and experimental Telegram adapter are implemented, including interactive approvals/questions, prompt steering, and inbound media.** Feishu is live-validated; Telegram is fake-tested but not live-validated because credentials are unavailable. The core contracts are platform-neutral, and the runtime intentionally enables one selected adapter per process. All major decisions are locked in README.md ("Decisions (locked)") — treat them as requirements, not suggestions; changing one requires explicit user sign-off and a README update in the same change. The remaining open questions are listed in README.md; do not silently "fill them in" with assumptions — surface them to the user instead. The phased execution roadmap lives in `roadmap/` (local, gitignored working docs; `roadmap/reference/` holds snapshots of the kimi server OpenAPI/AsyncAPI specs). Each phase doc there is self-contained and names its own validation and exit criteria.
 
 ## Layout
 
@@ -12,6 +12,7 @@ Guidance for AI agents (and humans) working in this repo.
 - `src/kimi_bridge/interactions.py` — platform-neutral approval/question prompts, answers, responses, and outcomes.
 - `src/kimi_bridge/router.py` — IM-conversation ↔ kimi-session mapping, interaction lifecycle, and event dispatch. It must not construct platform UI payloads.
 - `src/kimi_bridge/platforms/` — one adapter per IM platform, behind the semantic `PlatformAdapter` protocol in `base.py`. Native UI rendering and callback decoding stay inside the platform package.
+- `src/kimi_bridge/platforms/telegram.py` — the handwritten Telegram Bot API transport and adapter. Telegram update dictionaries, inline keyboards, callback tokens, `ForceReply` wizard state, retry policy, and file downloads stay here.
 - `references/` — read-only reference repos (hakimi, wechat-acp). Never modify, never import from them.
 
 ## kimi server API
@@ -24,10 +25,10 @@ Guidance for AI agents (and humans) working in this repo.
 ## Conventions
 
 - Python ≥ 3.11, asyncio throughout, typed (dataclasses / Protocol, `from __future__ import annotations`).
-- Minimal dependencies: core is `httpx` + `websockets` only. Platform SDKs are extras and each addition is a deliberate decision, not a drive-by.
+- Minimal dependencies: core is `httpx` + `websockets` only. Feishu uses the optional `lark-oapi` SDK; Telegram reuses `httpx` and must not gain a framework dependency without an explicit design change.
 - Keep the shared contracts semantic and platform-neutral. Do not introduce a generic UI schema, plugin framework, capability registry, or multi-adapter runtime without a concrete second platform requiring it.
 - If a file is gitignored, it's gitignored for a reason — never force-add it.
 
 ## Testing
 
-Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions; platform tests assert native rendering and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, configuration, and state persistence behind fakes in CI; do not require a live kimi server or real IM credentials. The standalone smoke script is the explicit live-server check.
+Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions; platform tests assert native rendering and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, Telegram Bot API transport, configuration, and state persistence behind fakes in CI; do not require a live kimi server or real IM credentials. The standalone smoke script is the explicit live-server check.

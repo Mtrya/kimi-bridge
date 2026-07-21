@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from kimi_bridge.config import Config, FeishuConfig, KimiServerConfig, load_config
+from kimi_bridge.config import (
+    Config,
+    FeishuConfig,
+    KimiServerConfig,
+    TelegramConfig,
+    load_config,
+)
 
 
 def test_missing_config_uses_defaults(tmp_path: Path) -> None:
@@ -55,6 +61,69 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
         allowed_users=frozenset({"ou_one", "user_two"}),
     )
     assert "secret-value" not in repr(config)
+
+
+def test_loads_telegram_and_ignores_partial_unselected_feishu(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "telegram"',
+                "",
+                "[feishu]",
+                'app_id = "unused"',
+                "",
+                "[telegram]",
+                'bot_token = "123456:secret-token"',
+                "allowed_users = [123456789, 987654321]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.platform == "telegram"
+    assert config.telegram == TelegramConfig(
+        bot_token="123456:secret-token",
+        allowed_users=frozenset({123456789, 987654321}),
+    )
+    assert config.feishu.app_id == "unused"
+    assert "123456:secret-token" not in repr(config)
+
+
+def test_rejects_unknown_platform(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('platform = "auto"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="platform must be one of"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "allowed_users",
+    ['["123"]', "[0]", "[-1]", "[true]"],
+)
+def test_rejects_non_positive_or_non_numeric_telegram_users(
+    tmp_path: Path, allowed_users: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "telegram"',
+                "[telegram]",
+                'bot_token = "token"',
+                f"allowed_users = {allowed_users}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(TypeError, match="positive integers"):
+        load_config(path)
 
 
 def test_rejects_partial_feishu_credentials(tmp_path: Path) -> None:

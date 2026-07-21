@@ -43,6 +43,7 @@ from kimi_bridge.platforms.feishu import (
 from kimi_bridge.platforms.feishu_cards import (
     decode_interaction_response,
     render_interaction,
+    render_outcome,
 )
 
 
@@ -200,6 +201,13 @@ def _question_prompt() -> QuestionPrompt:
         session_title="Test session",
         workspace="/tmp/workspace",
     )
+
+
+def test_cancelled_outcome_renders_a_terminal_neutral_card() -> None:
+    card = render_outcome(InteractionOutcome(state="cancelled", detail="Stopped"))
+
+    assert card["header"]["template"] == "grey"
+    assert card["header"]["text_tag_list"][0]["color"] == "neutral"
 
 
 async def test_allowlisted_p2p_text_is_normalized_once() -> None:

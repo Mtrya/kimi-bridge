@@ -780,6 +780,115 @@ async def test_multi_question_form_maps_all_answer_shapes(
     )
 
 
+async def test_stop_cancels_pending_approval_and_makes_callback_stale(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        message, _conversation, prompt = adapter.interactions[0]
+
+        await router.handle_inbound(adapter, _message("/stop"))
+        await router.handle_interaction(
+            adapter,
+            _interaction(
+                message,
+                interaction_id=prompt.interaction_id,
+                response=ApprovalResponse("approved"),
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert client.aborted == ["session-1"]
+    assert client.resolved_approvals == []
+    assert [outcome.state for _message, outcome in adapter.outcomes] == [
+        "cancelled",
+        "stale",
+    ]
+    assert any(text == "Stopped." for _ref, _conversation, text in adapter.sent)
+
+
+async def test_stop_cancels_pending_question_without_dismissing_it(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.questions["session-1"] = [_question_request()]
+    adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("ask"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        await router.handle_inbound(adapter, _message("/stop"))
+    finally:
+        await router.close()
+
+    assert client.aborted == ["session-1"]
+    assert client.resolved_questions == []
+    assert client.dismissed_questions == []
+    assert adapter.outcomes[-1][1].state == "cancelled"
+
+
+async def test_stop_aborts_pending_interaction_after_binding_changes(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    new_workspace = tmp_path / "new-workspace"
+    new_workspace.mkdir()
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        await router.handle_inbound(
+            adapter, _message(f"/new {new_workspace}")
+        )
+        await router.handle_inbound(adapter, _message("/stop"))
+    finally:
+        await router.close()
+
+    assert client.aborted == ["session-1", "session-2"]
+    assert adapter.outcomes[-1][1].state == "cancelled"
+
+
 async def test_approval_timeout_auto_rejects_and_finishes_interaction(
     tmp_path: Path,
 ) -> None:

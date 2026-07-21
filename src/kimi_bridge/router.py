@@ -439,12 +439,27 @@ class ChatRouter:
                     adapter, conversation, "No bound session."
                 )
                 return
-            aborted = await self._client.abort_prompt(binding.session_id)
-            await self._send_chunked(
-                adapter,
-                conversation,
-                "Stopped." if aborted else "No active prompt.",
-            )
+            async with self._interaction_lock:
+                pending = self._pending.get(conversation_key)
+                session_ids: list[str] = []
+                if pending is not None:
+                    session_ids.append(pending.session_id)
+                if binding.session_id not in session_ids:
+                    session_ids.append(binding.session_id)
+                aborted = False
+                for session_id in session_ids:
+                    aborted = await self._client.abort_prompt(session_id) or aborted
+                if pending is not None:
+                    await self._clear_pending(pending)
+                    await pending.adapter.finish_interaction(
+                        pending.message,
+                        InteractionOutcome(
+                            state="cancelled",
+                            detail="Cancelled by /stop.",
+                        ),
+                    )
+            result = "Stopped." if aborted or pending is not None else "No active prompt."
+            await self._send_chunked(adapter, conversation, result)
             return
 
         await self._send_chunked(

@@ -113,7 +113,7 @@ class QuestionResponse:
 
 
 InteractionResponse: TypeAlias = ApprovalResponse | QuestionResponse
-InteractionState: TypeAlias = Literal["completed", "timed_out", "stale"]
+InteractionState: TypeAlias = Literal["completed", "timed_out", "stale", "cancelled"]
 
 
 @dataclass(frozen=True, slots=True)
