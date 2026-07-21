@@ -24,13 +24,53 @@ from kimi_bridge.kimi_server import (
     KimiServerProtocolError,
     KimiServerStartupError,
     KimiServerSupervisor,
+    ModelInfo,
     ServerConnection,
+    SessionStatus,
+    SessionUsage,
+    SkillInfo,
+    TaskInfo,
+    ToolInfo,
     parse_server_startup_line,
 )
 
 
 def _envelope(data: Any, *, code: int = 0, msg: str = "success") -> dict[str, Any]:
     return {"code": code, "msg": msg, "data": data, "request_id": "req-1"}
+
+
+def _profile_payload(
+    *,
+    session_id: str = "session-1",
+    title: str = "Test session",
+    model: str = "kimi-code/k3",
+    thinking: str = "high",
+    permission_mode: str = "manual",
+    plan_mode: bool = False,
+) -> dict[str, Any]:
+    return {
+        "id": session_id,
+        "title": title,
+        "busy": False,
+        "pending_interaction": "none",
+        "metadata": {"cwd": "/tmp/workspace"},
+        "agent_config": {
+            "model": model,
+            "thinking": thinking,
+            "permission_mode": permission_mode,
+            "plan_mode": plan_mode,
+        },
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "cache_read_tokens": 3,
+            "cache_creation_tokens": 4,
+            "total_cost_usd": 0.0125,
+            "context_tokens": 30,
+            "context_limit": 100,
+            "turn_count": 2,
+        },
+    }
 
 
 class FakeResponse:
@@ -355,6 +395,194 @@ async def test_rest_envelope_error_is_raised() -> None:
     assert caught.value.code == 40401
 
 
+async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
+    model = {
+        "provider": "kimi-code",
+        "model": "kimi-code/k3",
+        "display_name": "K3",
+        "max_context_size": 262144,
+        "capabilities": ["thinking"],
+        "support_efforts": ["low", "high", "max"],
+        "default_effort": "high",
+    }
+    status = {
+        "busy": True,
+        "model": "kimi-code/k3",
+        "thinking_level": "max",
+        "permission": "manual",
+        "plan_mode": True,
+        "swarm_mode": False,
+        "context_tokens": 30,
+        "max_context_tokens": 100,
+        "context_usage": 0.3,
+    }
+    task = {
+        "id": "task/1",
+        "session_id": "session-1",
+        "kind": "bash",
+        "description": "Run checks",
+        "status": "running",
+        "command": "pytest",
+        "created_at": "created",
+        "started_at": "started",
+        "output_preview": "tail",
+        "output_bytes": 4,
+    }
+    skill = {
+        "name": "review/code",
+        "description": "Review code",
+        "path": "/skills/review/code",
+        "source": "user",
+        "type": "prompt",
+        "disable_model_invocation": False,
+    }
+    tool = {
+        "name": "mcp_search",
+        "description": "Search",
+        "input_schema": {},
+        "source": "mcp",
+        "mcp_server_id": "search-server",
+    }
+    updated = _profile_payload(
+        title="Renamed",
+        model="kimi-code/k3",
+        thinking="max",
+        plan_mode=True,
+    )
+    http = FakeHttpClient(
+        [
+            _envelope({"server_version": "0.28.1"}),
+            _envelope({"items": [model]}),
+            _envelope(_profile_payload()),
+            _envelope(status),
+            _envelope(status),
+            _envelope(updated),
+            _envelope({"items": [task]}),
+            _envelope(task),
+            _envelope({"cancelled": True}),
+            _envelope({"skills": [skill]}),
+            _envelope({"activated": True, "skill_name": "review/code"}),
+            _envelope({"tools": [tool]}),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    assert await client.get_server_version() == "0.28.1"
+    assert await client.list_models() == [
+        ModelInfo(
+            alias="kimi-code/k3",
+            provider="kimi-code",
+            display_name="K3",
+            max_context_size=262144,
+            capabilities=("thinking",),
+            support_efforts=("low", "high", "max"),
+            default_effort="high",
+        )
+    ]
+    assert (await client.get_session_profile("session-1")).title == "Test session"
+    assert await client.get_session_status("session-1") == SessionStatus(
+        busy=True,
+        model="kimi-code/k3",
+        thinking_effort="max",
+        permission_mode="manual",
+        plan_mode=True,
+        swarm_mode=False,
+        context_tokens=30,
+        context_limit=100,
+        context_usage=0.3,
+    )
+    assert await client.get_session_usage("session-1") == SessionUsage(
+        None, None, None, None, 30, 100
+    )
+    assert (
+        await client.update_profile(
+            "session-1",
+            title="Renamed",
+            model="kimi-code/k3",
+            thinking="max",
+            plan_mode=True,
+        )
+    ).title == "Renamed"
+    assert await client.list_tasks("session-1", status="running") == [
+        TaskInfo(
+            id="task/1",
+            session_id="session-1",
+            kind="bash",
+            description="Run checks",
+            status="running",
+            command="pytest",
+            created_at="created",
+            started_at="started",
+            output_preview="tail",
+            output_bytes=4,
+        )
+    ]
+    assert (
+        await client.get_task("session-1", "task/1", output_bytes=8192)
+    ).output_preview == "tail"
+    assert await client.cancel_task("session-1", "task/1")
+    assert await client.list_skills("session-1") == [
+        SkillInfo(
+            name="review/code",
+            description="Review code",
+            source="user",
+            path="/skills/review/code",
+            kind="prompt",
+            disable_model_invocation=False,
+        )
+    ]
+    assert (
+        await client.activate_skill(
+            "session-1", "review/code", args="focus tests"
+        )
+        == "review/code"
+    )
+    assert await client.list_tools("session-1") == [
+        ToolInfo("mcp_search", "Search", "mcp", "search-server")
+    ]
+
+    assert [request[0:2] for request in http.requests] == [
+        ("GET", "http://127.0.0.1:43123/api/v1/meta"),
+        ("GET", "http://127.0.0.1:43123/api/v1/models"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/status"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/status"),
+        ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/tasks"),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/tasks/task%2F1",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/tasks/task%2F1:cancel",
+        ),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/skills"),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/skills/review%2Fcode:activate",
+        ),
+        ("GET", "http://127.0.0.1:43123/api/v1/tools"),
+    ]
+    assert http.requests[5][2]["json"] == {
+        "title": "Renamed",
+        "agent_config": {
+            "model": "kimi-code/k3",
+            "thinking": "max",
+            "plan_mode": True,
+        },
+    }
+    assert http.requests[6][2]["params"] == {"status": "running"}
+    assert http.requests[7][2]["params"] == {
+        "with_output": True,
+        "output_bytes": 8192,
+    }
+    assert http.requests[10][2]["json"] == {"args": "focus tests"}
+    assert http.requests[11][2]["params"] == {"session_id": "session-1"}
+
+
 async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> None:
     approval = {
         "approval_id": "approval-1",
@@ -381,7 +609,7 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         [
             _envelope({"prompt_id": "prompt-1", "status": "running"}),
             _envelope({"steered": True, "prompt_ids": ["prompt-1"]}),
-            _envelope({"id": "session-1"}),
+            _envelope(_profile_payload(permission_mode="yolo")),
             _envelope({"items": [approval]}),
             _envelope({"resolved": True, "resolved_at": "now"}),
             _envelope({"items": [question]}),
@@ -406,9 +634,9 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         "session-1", content, model="kimi-code/k3", permission_mode="manual"
     )
     assert await client.steer_prompts("session-1", ["prompt-1"])
-    assert (await client.update_profile("session-1", permission_mode="yolo"))[
-        "id"
-    ] == "session-1"
+    assert (
+        await client.update_profile("session-1", permission_mode="yolo")
+    ).session_id == "session-1"
     assert await client.list_approvals("session-1") == [
         ApprovalRequest(
             id="approval-1",
@@ -553,6 +781,81 @@ async def test_materializes_session_before_initial_subscription() -> None:
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
     ]
+
+
+async def test_live_usage_event_feeds_inspection_and_reconnect_invalidates_it() -> None:
+    status = {
+        "busy": False,
+        "model": "kimi-code/k3",
+        "thinking_level": "high",
+        "permission": "manual",
+        "plan_mode": False,
+        "swarm_mode": False,
+        "context_tokens": 321,
+        "max_context_tokens": 1000,
+        "context_usage": 0.321,
+    }
+    usage_event = _session_event(
+        1, "epoch-1", "agent.status.updated", volatile=True
+    )
+    usage_event["payload"] = {
+        "type": "agent.status.updated",
+        "usage": {
+            "total": {
+                "inputOther": 10,
+                "output": 4,
+                "inputCacheRead": 20,
+                "inputCacheCreation": 3,
+            }
+        },
+    }
+    first = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[usage_event],
+        disconnect_after_events=True,
+    )
+    second = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[_session_event(2, "epoch-1", "turn.ended")],
+    )
+    http = FakeHttpClient([_envelope(status) for _ in range(4)])
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([first, second]),
+        sleep=no_sleep,
+    )
+    events = client.subscribe_events("session-1")
+
+    assert (await asyncio.wait_for(anext(events), 1))["payload"] == usage_event[
+        "payload"
+    ]
+    assert await client.get_session_usage("session-1") == SessionUsage(
+        10, 4, 20, 3, 321, 1000
+    )
+
+    assert (await asyncio.wait_for(anext(events), 1))["payload"]["type"] == (
+        "turn.ended"
+    )
+    assert await client.get_session_usage("session-1") == SessionUsage(
+        None, None, None, None, 321, 1000
+    )
+    await events.aclose()
 
 
 async def test_missing_session_fails_before_websocket_connection() -> None:

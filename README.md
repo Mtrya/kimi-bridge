@@ -2,7 +2,7 @@
 
 Bridge [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) to instant messaging platforms so you can drive a full kimi-code agent from a chat window.
 
-**Status: the Feishu bridge is implemented and live-validated. The experimental Telegram adapter is implementation-complete and fake-tested; live Telegram validation remains pending. Both adapters support durable session bindings, streamed edit-in-place replies, approvals/questions, prompt steering, inbound media, and bridge commands through platform-neutral core contracts.** All major design decisions below are locked; remaining open questions are listed at the bottom.
+**Status: the Feishu bridge is implemented and live-validated. The experimental Telegram adapter is implementation-complete and fake-tested; live Telegram validation remains pending. Both adapters support durable session bindings, streamed edit-in-place replies, approvals/questions, prompt steering, inbound media, session control and inspection, and bridge commands through platform-neutral core contracts.** All major design decisions below are locked; remaining open questions are listed at the bottom.
 
 ## Architecture
 
@@ -28,13 +28,13 @@ The router deals only in platform-neutral conversation, actor, message, prompt, 
 - **Server lifecycle**: the bridge supports exactly kimi-code 0.28.1, verifies both `kimi --version` and `/api/v1/meta`, then supervises `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child process. It parses the bearer token from startup output, restarts the child on crash, and rejects version mismatches because the API is 0.x.
 - **Platforms**: Feishu is implemented with the official `lark-oapi` SDK and a WebSocket long connection, so no public endpoint is needed. The runtime enables one adapter per process, selected by top-level configuration that defaults to Feishu; both platform credential tables may coexist, but only the selected one is validated and constructed. WeChat is out of scope.
 - **Telegram**: the experimental adapter uses a narrow handwritten `httpx` Bot API client with private-chat long polling, stable numeric user-ID allowlisting, and no Telegram SDK. Startup discards queued updates instead of replaying instructions received while the bridge was offline. Text streams through one persistent message plus edits. Approvals use inline keyboards; questions use a sequential one-message wizard with immediate single choice, toggle-and-Done multi-select, per-question Skip, and explicit `ForceReply` for custom answers. Wizard state is memory-only, so old callbacks become stale after restart. The implementation is fake-tested; credentials are currently unavailable for live validation.
-- **Sessions**: the shared kimi session store is fully exposed. Bridge commands: `/new [cwd]`, `/sessions`, `/switch <n|id>`, `/stop`, `/mode <manual|auto|yolo>`. Anything not starting with `/` goes to the bound session. Handoff between chat and terminal CLI (same session store, `kimi -S <id>`) is an advertised feature.
+- **Sessions**: the shared kimi session store is fully exposed. Commands cover creation/switching, permission mode, model and thinking effort, plan mode, status/title/usage, background tasks, skill activation, and read-only session-derived MCP inspection. Anything not starting with `/` goes to the bound session. Handoff between chat and terminal CLI (same session store, `kimi -S <id>`) is an advertised feature.
 - **Workspaces**: auto-created sessions use a scratch workspace (`~/.kimi-bridge/workspace/`); real project work goes through `/new <path>`.
 - **Streaming**: assistant text is rendered edit-in-place with throttled edits (~1 per 1.5–2s); messages are chunked at platform limits by the router, not the adapters. Thinking deltas are hidden. Tool-call rendering is an open experiment (see below).
 - **Permissions**: per-session permission mode via `/mode`. Approvals and `AskUserQuestion` are platform-neutral interactions rendered by each adapter; Feishu uses interactive cards and Telegram uses inline-keyboard flows. Unanswered interactions auto-deny after one fixed timeout for the whole request. New sessions default to `manual`. `auto` is fully autonomous and never asks questions; `yolo` auto-approves regular tools but may still ask questions.
 - **Interrupt policy**: a new message during a running turn is submitted and steered into the active turn (delivered at the next step boundary, via `POST .../prompts:steer`). `/stop` aborts the turn and closes any pending approval or question as cancelled. Steer is a nudge, not a brake — in-flight tool calls complete.
 - **Media**: inbound images are passed as image content parts; inbound files are saved into the session workspace with their path referenced in the prompt text. Telegram deliberately supports one photo or one document with an optional caption, rejects albums and other media, and enforces the Bot API's 20 MB download limit. No outbound media in v1.
-- **State**: conversation→session mapping and per-chat settings persist to `~/.kimi-bridge/state.json` (atomic writes). Config at `~/.kimi-bridge/config.toml`.
+- **State**: conversation→session mapping and bridge-owned per-chat settings persist to `~/.kimi-bridge/state.json` (atomic writes). Model, thinking effort, and plan mode remain in Kimi's session profile and are inherited by later turns; the bridge does not duplicate them in its state. Config is at `~/.kimi-bridge/config.toml`.
 - **Client**: thin hand-written `httpx` + `websockets` client; no vendored SDK. Replies come from the assistant event stream (`assistant.delta`), not from a SendMessage-tool trick.
 
 ## Open questions
@@ -103,7 +103,16 @@ The bridge accepts direct text, image, file, and rich-post image messages. Group
 
 New sessions default to `permission_mode = "manual"`. Approval and `AskUserQuestion` requests arrive as interactive cards; unanswered approvals are rejected and unanswered questions are dismissed after `interaction_timeout_seconds`. Card callbacks are accepted only from the allowlisted user and original conversation. Cards that outlive a bridge restart are marked stale when clicked.
 
-Available commands are `/new [cwd]`, `/sessions`, `/switch <n|id>`, `/mode <manual|auto|yolo>`, `/stop`, and `/help`. A non-command message submitted while a turn is already active is queued and steered into that turn at the next step boundary. Conversation bindings and their permission modes are atomically persisted in `~/.kimi-bridge/state.json`.
+Available commands are:
+
+- `/new [cwd]`, `/sessions`, `/switch <n|id>`, `/mode <manual|auto|yolo>`, `/stop`, and `/help` for bridge and session lifecycle.
+- `/model [alias]`, `/effort [effort]`, and `/plan [on|off]` for session-profile controls. Model aliases and effort values are exact and come from the live model catalog; bare forms only report state. Changing the model preserves the current effort when supported, otherwise it uses that model's advertised default effort or `off` when thinking is unsupported.
+- `/status`, `/title [text]`, and `/usage` for session inspection and renaming. Session token totals come from live server events and context occupancy comes from session status; unavailable values are reported as unknown. Account plan quota and reset times are not exposed by the public `kimi web` API.
+- `/tasks [running|completed|failed|cancelled]`, `/tasks show <id>`, and `/tasks cancel <id>` for public background-task inspection and cancellation. Task detail requests at most an 8 KiB output tail.
+- `/skills` and `/skills run <name> [args]` for exact-name skill listing and activation. Activation produces a normal streamed model turn.
+- `/mcp` for a read-only view of MCP tools resolved for the bound session. It does not expose global MCP restart or mutation.
+
+Read commands remain available while a turn is busy. `/title <text>`, `/tasks cancel <id>`, and `/mode` changes are also allowed while busy; model, effort, plan, and skill-activation mutations reject instead of queueing. A non-command message submitted while a turn is already active is queued and steered into that turn at the next step boundary. Conversation bindings and permission modes are atomically persisted in `~/.kimi-bridge/state.json`; model, effort, and plan state remain authoritative in Kimi's session profile.
 
 ### Telegram bot setup (experimental)
 

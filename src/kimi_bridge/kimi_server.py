@@ -16,8 +16,8 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Literal, cast
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 import websockets
@@ -87,7 +87,7 @@ class KimiServerAPIError(KimiServerError):
 
 
 class KimiServerProtocolError(KimiServerError):
-    """The WebSocket peer violated or rejected the expected protocol."""
+    """The server violated or rejected the expected REST/WebSocket protocol."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +98,109 @@ class ServerConnection:
     port: int
     generation: int
     token: str = field(repr=False)
+
+
+PermissionMode = Literal["manual", "auto", "yolo"]
+PendingInteractionKind = Literal["none", "approval", "question"]
+TaskStatus = Literal["running", "completed", "failed", "cancelled"]
+TaskKind = Literal["subagent", "bash", "tool"]
+SkillSource = Literal["project", "user", "extra", "builtin"]
+ToolSource = Literal["builtin", "skill", "mcp"]
+
+
+@dataclass(frozen=True, slots=True)
+class ModelInfo:
+    """One exact model alias advertised by the managed server."""
+
+    alias: str
+    provider: str
+    display_name: str | None
+    max_context_size: int
+    capabilities: tuple[str, ...]
+    support_efforts: tuple[str, ...]
+    default_effort: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUsage:
+    """Usage available through the public server surfaces for a session."""
+
+    input_tokens: int | None
+    output_tokens: int | None
+    cache_read_tokens: int | None
+    cache_creation_tokens: int | None
+    context_tokens: int | None
+    context_limit: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionProfile:
+    """Session profile fields used by bridge controls and inspection."""
+
+    session_id: str
+    title: str
+    workspace: str
+    busy: bool
+    pending_interaction: PendingInteractionKind
+    model: str
+    thinking_effort: str | None
+    permission_mode: PermissionMode | None
+    plan_mode: bool | None
+    usage: SessionUsage
+
+
+@dataclass(frozen=True, slots=True)
+class SessionStatus:
+    """Realtime status materialized by kimi-code for one session."""
+
+    busy: bool
+    model: str | None
+    thinking_effort: str
+    permission_mode: PermissionMode
+    plan_mode: bool
+    swarm_mode: bool
+    context_tokens: int
+    context_limit: int
+    context_usage: float
+
+
+@dataclass(frozen=True, slots=True)
+class TaskInfo:
+    """One public background task record."""
+
+    id: str
+    session_id: str
+    kind: TaskKind
+    description: str
+    status: TaskStatus
+    command: str | None
+    created_at: Any
+    started_at: Any = None
+    completed_at: Any = None
+    output_preview: str | None = None
+    output_bytes: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SkillInfo:
+    """One skill available to a bound session."""
+
+    name: str
+    description: str
+    source: SkillSource
+    path: str
+    kind: str | None = None
+    disable_model_invocation: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolInfo:
+    """One tool resolved for a bound session."""
+
+    name: str
+    description: str
+    source: ToolSource
+    mcp_server_id: str | None = None
 
 
 def parse_server_startup_line(line: str) -> tuple[int, str] | None:
@@ -495,6 +598,7 @@ class KimiServerClient:
         self._reconnect_max_backoff = reconnect_max_backoff
         self._subscription_lock = asyncio.Lock()
         self._subscription_ready: dict[str, asyncio.Event] = {}
+        self._usage_totals: dict[str, SessionUsage] = {}
         self._active_ws: Any | None = None
         self._closed = False
 
@@ -530,9 +634,19 @@ class KimiServerClient:
             )
         return model
 
-    async def check_server_version(self) -> str:
+    async def get_server_version(self) -> str:
+        """Return the managed server's advertised version."""
+
         metadata = await self.meta()
-        server_version = str(metadata["server_version"])
+        server_version = metadata.get("server_version")
+        if not isinstance(server_version, str) or not server_version:
+            raise KimiServerProtocolError(
+                "kimi server metadata has no server_version"
+            )
+        return server_version
+
+    async def check_server_version(self) -> str:
+        server_version = await self.get_server_version()
         LOGGER.info("kimi server version: %s", server_version)
         if server_version != EXPECTED_SERVER_VERSION:
             raise KimiServerStartupError(
@@ -540,6 +654,12 @@ class KimiServerClient:
                 f"expected {EXPECTED_SERVER_VERSION}, got {server_version}"
             )
         return server_version
+
+    async def list_models(self) -> list[ModelInfo]:
+        """Return the exact configured model aliases and capabilities."""
+
+        data = await self._request("GET", "/models")
+        return [_model_info_from_wire(item) for item in data["items"]]
 
     async def create_session(
         self,
@@ -560,6 +680,30 @@ class KimiServerClient:
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/sessions/{session_id}")
+
+    async def get_session_profile(self, session_id: str) -> SessionProfile:
+        data = await self._request("GET", f"/sessions/{session_id}/profile")
+        return _session_profile_from_wire(data)
+
+    async def get_session_status(self, session_id: str) -> SessionStatus:
+        data = await self._request("GET", f"/sessions/{session_id}/status")
+        return _session_status_from_wire(data)
+
+    async def get_session_usage(self, session_id: str) -> SessionUsage:
+        status = await self.get_session_status(session_id)
+        totals = self._usage_totals.get(session_id)
+        return SessionUsage(
+            input_tokens=(totals.input_tokens if totals is not None else None),
+            output_tokens=(totals.output_tokens if totals is not None else None),
+            cache_read_tokens=(
+                totals.cache_read_tokens if totals is not None else None
+            ),
+            cache_creation_tokens=(
+                totals.cache_creation_tokens if totals is not None else None
+            ),
+            context_tokens=status.context_tokens,
+            context_limit=status.context_limit,
+        )
 
     async def list_sessions(
         self,
@@ -591,13 +735,24 @@ class KimiServerClient:
         self,
         session_id: str,
         content: str | list[dict[str, Any]],
-        **profile: Any,
+        *,
+        model: str | None = None,
+        thinking: str | None = None,
+        permission_mode: PermissionMode | None = None,
+        plan_mode: bool | None = None,
     ) -> dict[str, Any]:
         content_items = (
             [{"type": "text", "text": content}] if isinstance(content, str) else content
         )
         payload: dict[str, Any] = {"content": content_items}
-        payload.update(profile)
+        if model is not None:
+            payload["model"] = model
+        if thinking is not None:
+            payload["thinking"] = thinking
+        if permission_mode is not None:
+            payload["permission_mode"] = permission_mode
+        if plan_mode is not None:
+            payload["plan_mode"] = plan_mode
         return await self._request(
             "POST",
             f"/sessions/{session_id}/prompts",
@@ -613,13 +768,92 @@ class KimiServerClient:
         return bool(data["steered"])
 
     async def update_profile(
-        self, session_id: str, **agent_config: Any
-    ) -> dict[str, Any]:
-        return await self._request(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+        permission_mode: PermissionMode | None = None,
+        plan_mode: bool | None = None,
+    ) -> SessionProfile:
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        agent_config: dict[str, Any] = {}
+        if model is not None:
+            agent_config["model"] = model
+        if thinking is not None:
+            agent_config["thinking"] = thinking
+        if permission_mode is not None:
+            agent_config["permission_mode"] = permission_mode
+        if plan_mode is not None:
+            agent_config["plan_mode"] = plan_mode
+        if agent_config:
+            payload["agent_config"] = agent_config
+        if not payload:
+            raise ValueError("profile update must contain at least one field")
+        data = await self._request(
             "POST",
             f"/sessions/{session_id}/profile",
-            json_body={"agent_config": agent_config},
+            json_body=payload,
         )
+        return _session_profile_from_wire(data)
+
+    async def list_tasks(
+        self, session_id: str, *, status: TaskStatus | None = None
+    ) -> list[TaskInfo]:
+        params = {"status": status} if status is not None else None
+        data = await self._request(
+            "GET", f"/sessions/{session_id}/tasks", params=params
+        )
+        return [_task_info_from_wire(item) for item in data["items"]]
+
+    async def get_task(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        output_bytes: int = 8192,
+    ) -> TaskInfo:
+        if output_bytes < 0:
+            raise ValueError("output_bytes must be non-negative")
+        data = await self._request(
+            "GET",
+            f"/sessions/{session_id}/tasks/{quote(task_id, safe='')}",
+            params={"with_output": True, "output_bytes": output_bytes},
+        )
+        return _task_info_from_wire(data)
+
+    async def cancel_task(self, session_id: str, task_id: str) -> bool:
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/tasks/{quote(task_id, safe='')}:cancel",
+        )
+        return bool(data["cancelled"])
+
+    async def list_skills(self, session_id: str) -> list[SkillInfo]:
+        data = await self._request("GET", f"/sessions/{session_id}/skills")
+        return [_skill_info_from_wire(item) for item in data["skills"]]
+
+    async def activate_skill(
+        self, session_id: str, skill_name: str, *, args: str = ""
+    ) -> str:
+        payload = {"args": args} if args else {}
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/skills/{quote(skill_name, safe='')}:activate",
+            json_body=payload,
+        )
+        if not data["activated"]:
+            raise KimiServerProtocolError("kimi server did not activate the skill")
+        return str(data["skill_name"])
+
+    async def list_tools(self, session_id: str) -> list[ToolInfo]:
+        data = await self._request(
+            "GET", "/tools", params={"session_id": session_id}
+        )
+        return [_tool_info_from_wire(item) for item in data["tools"]]
 
     async def list_approvals(self, session_id: str) -> list[ApprovalRequest]:
         try:
@@ -732,6 +966,10 @@ class KimiServerClient:
         async with self._subscription_lock:
             while not self._closed:
                 ready.clear()
+                # Usage totals are live-only WebSocket state. A reconnect may
+                # have missed updates, so do not present the previous value as
+                # current until the server publishes another total.
+                self._usage_totals.pop(session_id, None)
                 connection = await self._connection_info()
                 ws_url = _websocket_url(connection.base_url)
                 try:
@@ -831,6 +1069,7 @@ class KimiServerClient:
                                     yield resync_event
                                     must_reconnect = True
                                     break
+                                self._record_session_usage(session_id, frame)
                                 yield frame
                                 continue
 
@@ -857,6 +1096,7 @@ class KimiServerClient:
                                 epoch=frame.get("epoch")
                                 or (cursor.epoch if cursor is not None else None),
                             )
+                            self._record_session_usage(session_id, frame)
                             yield frame
 
                         if must_reconnect:
@@ -1030,6 +1270,29 @@ class KimiServerClient:
             "snapshot": snapshot,
         }
 
+    def _record_session_usage(
+        self, session_id: str, frame: dict[str, Any]
+    ) -> None:
+        payload = frame["payload"]
+        if payload.get("type") != "agent.status.updated":
+            return
+        usage = payload.get("usage")
+        if not isinstance(usage, dict) or "total" not in usage:
+            return
+        total = usage["total"]
+        if not isinstance(total, dict):
+            raise KimiServerProtocolError(
+                "agent.status.updated usage total must be an object"
+            )
+        self._usage_totals[session_id] = SessionUsage(
+            input_tokens=int(total["inputOther"]),
+            output_tokens=int(total["output"]),
+            cache_read_tokens=int(total["inputCacheRead"]),
+            cache_creation_tokens=int(total["inputCacheCreation"]),
+            context_tokens=None,
+            context_limit=None,
+        )
+
     @staticmethod
     async def _receive_json(ws: Any) -> dict[str, Any]:
         raw_frame = await ws.recv()
@@ -1062,6 +1325,155 @@ def _websocket_url(base_url: str) -> str:
     parsed = urlsplit(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, "/api/v1/ws", "", ""))
+
+
+def _model_info_from_wire(value: dict[str, Any]) -> ModelInfo:
+    capabilities = value.get("capabilities") or []
+    support_efforts = value.get("support_efforts") or []
+    display_name = value.get("display_name")
+    default_effort = value.get("default_effort")
+    return ModelInfo(
+        alias=str(value["model"]),
+        provider=str(value["provider"]),
+        display_name=(str(display_name) if display_name is not None else None),
+        max_context_size=int(value["max_context_size"]),
+        capabilities=tuple(str(item) for item in capabilities),
+        support_efforts=tuple(str(item) for item in support_efforts),
+        default_effort=(
+            str(default_effort) if default_effort is not None else None
+        ),
+    )
+
+
+def _session_usage_from_wire(value: dict[str, Any]) -> SessionUsage:
+    return SessionUsage(
+        input_tokens=_optional_int(value.get("input_tokens")),
+        output_tokens=_optional_int(value.get("output_tokens")),
+        cache_read_tokens=_optional_int(value.get("cache_read_tokens")),
+        cache_creation_tokens=_optional_int(value.get("cache_creation_tokens")),
+        context_tokens=_optional_int(value.get("context_tokens")),
+        context_limit=_optional_int(value.get("context_limit")),
+    )
+
+
+def _session_profile_from_wire(value: dict[str, Any]) -> SessionProfile:
+    agent_config = value["agent_config"]
+    metadata = value["metadata"]
+    pending_interaction = value.get("pending_interaction", "none")
+    if pending_interaction not in {"none", "approval", "question"}:
+        raise KimiServerProtocolError(
+            f"unknown pending interaction kind: {pending_interaction!r}"
+        )
+    permission_mode = agent_config.get("permission_mode")
+    if permission_mode is not None and permission_mode not in {
+        "manual",
+        "auto",
+        "yolo",
+    }:
+        raise KimiServerProtocolError(
+            f"unknown session permission mode: {permission_mode!r}"
+        )
+    thinking_effort = agent_config.get("thinking")
+    plan_mode = agent_config.get("plan_mode")
+    return SessionProfile(
+        session_id=str(value["id"]),
+        title=str(value["title"]),
+        workspace=str(metadata["cwd"]),
+        busy=bool(value["busy"]),
+        pending_interaction=cast(PendingInteractionKind, pending_interaction),
+        model=str(agent_config["model"]),
+        thinking_effort=(
+            str(thinking_effort) if thinking_effort is not None else None
+        ),
+        permission_mode=cast(PermissionMode | None, permission_mode),
+        plan_mode=(bool(plan_mode) if plan_mode is not None else None),
+        usage=_session_usage_from_wire(value["usage"]),
+    )
+
+
+def _session_status_from_wire(value: dict[str, Any]) -> SessionStatus:
+    permission_mode = value["permission"]
+    if permission_mode not in {"manual", "auto", "yolo"}:
+        raise KimiServerProtocolError(
+            f"unknown session permission mode: {permission_mode!r}"
+        )
+    model = value.get("model")
+    return SessionStatus(
+        busy=bool(value["busy"]),
+        model=str(model) if model else None,
+        thinking_effort=str(value["thinking_level"]),
+        permission_mode=cast(PermissionMode, permission_mode),
+        plan_mode=bool(value["plan_mode"]),
+        swarm_mode=bool(value["swarm_mode"]),
+        context_tokens=int(value["context_tokens"]),
+        context_limit=int(value["max_context_tokens"]),
+        context_usage=float(value["context_usage"]),
+    )
+
+
+def _task_info_from_wire(value: dict[str, Any]) -> TaskInfo:
+    kind = value["kind"]
+    status = value["status"]
+    if kind not in {"subagent", "bash", "tool"}:
+        raise KimiServerProtocolError(f"unknown task kind: {kind!r}")
+    if status not in {"running", "completed", "failed", "cancelled"}:
+        raise KimiServerProtocolError(f"unknown task status: {status!r}")
+    command = value.get("command")
+    output_preview = value.get("output_preview")
+    return TaskInfo(
+        id=str(value["id"]),
+        session_id=str(value["session_id"]),
+        kind=cast(TaskKind, kind),
+        description=str(value["description"]),
+        status=cast(TaskStatus, status),
+        command=str(command) if command is not None else None,
+        created_at=value["created_at"],
+        started_at=value.get("started_at"),
+        completed_at=value.get("completed_at"),
+        output_preview=(
+            str(output_preview) if output_preview is not None else None
+        ),
+        output_bytes=_optional_int(value.get("output_bytes")),
+    )
+
+
+def _skill_info_from_wire(value: dict[str, Any]) -> SkillInfo:
+    source = value["source"]
+    if source not in {"project", "user", "extra", "builtin"}:
+        raise KimiServerProtocolError(f"unknown skill source: {source!r}")
+    skill_type = value.get("type")
+    disable_model_invocation = value.get("disable_model_invocation")
+    return SkillInfo(
+        name=str(value["name"]),
+        description=str(value["description"]),
+        source=cast(SkillSource, source),
+        path=str(value["path"]),
+        kind=str(skill_type) if skill_type is not None else None,
+        disable_model_invocation=(
+            bool(disable_model_invocation)
+            if disable_model_invocation is not None
+            else None
+        ),
+    )
+
+
+def _tool_info_from_wire(value: dict[str, Any]) -> ToolInfo:
+    source = value["source"]
+    if source not in {"builtin", "skill", "mcp"}:
+        raise KimiServerProtocolError(f"unknown tool source: {source!r}")
+    mcp_server_id = value.get("mcp_server_id")
+    return ToolInfo(
+        name=str(value["name"]),
+        description=str(value["description"]),
+        source=cast(ToolSource, source),
+        mcp_server_id=(
+            str(mcp_server_id) if mcp_server_id is not None else None
+        ),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    return int(value) if value is not None else None
 
 
 def _approval_request_from_wire(value: dict[str, Any]) -> ApprovalRequest:

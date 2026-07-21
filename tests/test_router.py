@@ -23,7 +23,17 @@ from kimi_bridge.interactions import (
     SingleChoiceAnswer,
     SkippedAnswer,
 )
-from kimi_bridge.kimi_server import KimiServerAPIError
+from kimi_bridge.kimi_server import (
+    KimiServerAPIError,
+    ModelInfo,
+    SessionProfile,
+    SessionStatus,
+    SessionUsage,
+    SkillInfo,
+    TaskInfo,
+    TaskStatus,
+    ToolInfo,
+)
 from kimi_bridge.platforms.base import (
     ActorRef,
     ConversationRef,
@@ -39,12 +49,33 @@ from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
 class FakeKimiClient:
     def __init__(self) -> None:
+        self.server_version = "0.28.1"
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | list[dict[str, Any]], dict[str, Any]]] = []
         self.prompt_statuses: list[str] = []
         self.steered: list[tuple[str, list[str]]] = []
         self.steer_error: KimiServerAPIError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
+        self.models = [
+            ModelInfo(
+                alias="kimi-code/k3",
+                provider="kimi-code",
+                display_name="K3",
+                max_context_size=262_144,
+                capabilities=("thinking", "always_thinking"),
+                support_efforts=("low", "high", "max"),
+                default_effort="high",
+            )
+        ]
+        self.tasks: dict[str, list[TaskInfo]] = {}
+        self.task_details: dict[tuple[str, str], TaskInfo] = {}
+        self.task_list_calls: list[tuple[str, TaskStatus | None]] = []
+        self.task_detail_calls: list[tuple[str, str, int]] = []
+        self.cancelled_tasks: list[tuple[str, str]] = []
+        self.skills: dict[str, list[SkillInfo]] = {}
+        self.activated_skills: list[tuple[str, str, str]] = []
+        self.activation_subscription_ready: list[bool] = []
+        self.tools: dict[str, list[ToolInfo]] = {}
         self.aborted: list[str] = []
         self.abort_result = True
         self.sessions: list[dict[str, Any]] = []
@@ -108,13 +139,117 @@ class FakeKimiClient:
             raise self.steer_error
         return True
 
-    async def update_profile(
-        self, session_id: str, **agent_config: Any
-    ) -> dict[str, Any]:
-        self.profile_updates.append((session_id, agent_config))
+    async def get_server_version(self) -> str:
+        return self.server_version
+
+    async def list_models(self) -> list[ModelInfo]:
+        return list(self.models)
+
+    async def get_session_profile(self, session_id: str) -> SessionProfile:
         session = await self.get_session(session_id)
-        session.setdefault("agent_config", {}).update(agent_config)
-        return session
+        agent_config = session.setdefault("agent_config", {})
+        return SessionProfile(
+            session_id=session_id,
+            title=str(session.get("title", "")),
+            workspace=str(session["metadata"]["cwd"]),
+            busy=bool(session.get("busy", False)),
+            pending_interaction=session.get("pending_interaction", "none"),
+            model=str(agent_config.get("model", "kimi-code/k3")),
+            thinking_effort=agent_config.get("thinking", "high"),
+            permission_mode=agent_config.get("permission_mode", "manual"),
+            plan_mode=bool(agent_config.get("plan_mode", False)),
+            usage=session.get(
+                "usage",
+                SessionUsage(0, 0, 0, 0, 0, 262_144),
+            ),
+        )
+
+    async def get_session_status(self, session_id: str) -> SessionStatus:
+        profile = await self.get_session_profile(session_id)
+        context_tokens = profile.usage.context_tokens or 0
+        context_limit = profile.usage.context_limit or 0
+        return SessionStatus(
+            busy=profile.busy,
+            model=profile.model,
+            thinking_effort=profile.thinking_effort or "off",
+            permission_mode=profile.permission_mode or "manual",
+            plan_mode=bool(profile.plan_mode),
+            swarm_mode=False,
+            context_tokens=context_tokens,
+            context_limit=context_limit,
+            context_usage=(context_tokens / context_limit if context_limit else 0),
+        )
+
+    async def get_session_usage(self, session_id: str) -> SessionUsage:
+        return (await self.get_session_profile(session_id)).usage
+
+    async def update_profile(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+        permission_mode: str | None = None,
+        plan_mode: bool | None = None,
+    ) -> SessionProfile:
+        changes = {
+            key: value
+            for key, value in {
+                "title": title,
+                "model": model,
+                "thinking": thinking,
+                "permission_mode": permission_mode,
+                "plan_mode": plan_mode,
+            }.items()
+            if value is not None
+        }
+        self.profile_updates.append((session_id, changes))
+        session = await self.get_session(session_id)
+        if title is not None:
+            session["title"] = title
+        agent_config = session.setdefault("agent_config", {})
+        agent_config.update(
+            {
+                key: value
+                for key, value in changes.items()
+                if key != "title"
+            }
+        )
+        return await self.get_session_profile(session_id)
+
+    async def list_tasks(
+        self, session_id: str, *, status: TaskStatus | None = None
+    ) -> list[TaskInfo]:
+        self.task_list_calls.append((session_id, status))
+        tasks = self.tasks.get(session_id, [])
+        return [task for task in tasks if status is None or task.status == status]
+
+    async def get_task(
+        self, session_id: str, task_id: str, *, output_bytes: int = 8192
+    ) -> TaskInfo:
+        self.task_detail_calls.append((session_id, task_id, output_bytes))
+        return self.task_details[(session_id, task_id)]
+
+    async def cancel_task(self, session_id: str, task_id: str) -> bool:
+        self.cancelled_tasks.append((session_id, task_id))
+        return True
+
+    async def list_skills(self, session_id: str) -> list[SkillInfo]:
+        return list(self.skills.get(session_id, []))
+
+    async def activate_skill(
+        self, session_id: str, skill_name: str, *, args: str = ""
+    ) -> str:
+        ready = self._ready.get(session_id)
+        self.activation_subscription_ready.append(
+            ready is not None and ready.is_set()
+        )
+        self.activated_skills.append((session_id, skill_name, args))
+        return skill_name
+
+    async def list_tools(self, session_id: str) -> list[ToolInfo]:
+        return list(self.tools.get(session_id, []))
 
     async def list_sessions(self, **params: Any) -> list[dict[str, Any]]:
         self.list_calls.append(params)
@@ -324,6 +459,45 @@ def _question_request(
     )
 
 
+def _control_session(
+    *,
+    busy: bool = False,
+    model: str = "kimi-code/k3",
+    thinking: str = "high",
+    plan_mode: bool = False,
+    pending_interaction: str = "none",
+    usage: SessionUsage | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": "session-control",
+        "title": "Control session",
+        "busy": busy,
+        "pending_interaction": pending_interaction,
+        "metadata": {"cwd": "/tmp/control"},
+        "agent_config": {
+            "model": model,
+            "thinking": thinking,
+            "permission_mode": "manual",
+            "plan_mode": plan_mode,
+        },
+        "usage": usage or SessionUsage(10, 20, 3, 4, 30, 120),
+    }
+
+
+def _bind_control_session(store: StateStore) -> None:
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-control",
+                    workspace="/tmp/control",
+                    permission_mode="manual",
+                )
+            }
+        )
+    )
+
+
 async def test_first_message_creates_manual_session_and_persists_binding(
     tmp_path: Path,
 ) -> None:
@@ -346,14 +520,14 @@ async def test_first_message_creates_manual_session_and_persists_binding(
         (
             str(workspace.resolve()),
             "hello from Feishu",
-            {"permission_mode": "manual"},
+            {"model": "kimi-code/k3", "permission_mode": "manual"},
         )
     ]
     assert client.prompts == [
         (
             "session-1",
             [{"type": "text", "text": "hello from Feishu"}],
-            {"model": "kimi-code/k3", "permission_mode": "manual"},
+            {"permission_mode": "manual"},
         )
     ]
     binding = store.load().bindings["feishu:cli_bot:ou_user"]
@@ -461,7 +635,20 @@ async def test_bridge_commands_switch_stop_and_mode(
         await router.close()
 
     texts = [text for _message, _conversation, text in adapter.sent]
-    assert any("/mode <manual|auto|yolo>" in text for text in texts)
+    help_text = next(text for text in texts if text.startswith("Commands:"))
+    for grammar in (
+        "/mode <manual|auto|yolo>",
+        "/model [alias]",
+        "/effort [effort]",
+        "/plan [on|off]",
+        "/status",
+        "/title [text]",
+        "/usage",
+        "/tasks [running|completed|failed|cancelled]",
+        "/skills run <name> [args]",
+        "/mcp",
+    ):
+        assert grammar in help_text
     assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
     assert any("Switched to session-b" in text for text in texts)
     assert any("Permission mode: yolo" in text for text in texts)
@@ -471,6 +658,605 @@ async def test_bridge_commands_switch_stop_and_mode(
     binding = store.load().bindings["feishu:cli_bot:ou_user"]
     assert binding.session_id == "session-b"
     assert binding.permission_mode == "yolo"
+
+
+async def test_model_and_effort_commands_use_exact_catalog_and_profile_inheritance(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.models.extend(
+        (
+            ModelInfo(
+                alias="kimi-code/other",
+                provider="kimi-code",
+                display_name="Other",
+                max_context_size=131_072,
+                capabilities=("thinking",),
+                support_efforts=("low", "high"),
+                default_effort="high",
+            ),
+            ModelInfo(
+                alias="kimi-code/legacy",
+                provider="kimi-code",
+                display_name="Legacy",
+                max_context_size=131_072,
+                capabilities=("thinking", "always_thinking"),
+                support_efforts=(),
+                default_effort=None,
+            ),
+            ModelInfo(
+                alias="kimi-code/fast",
+                provider="kimi-code",
+                display_name="Fast",
+                max_context_size=131_072,
+                capabilities=(),
+                support_efforts=(),
+                default_effort=None,
+            ),
+        )
+    )
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="startup-default",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/model"))
+        await router.handle_inbound(adapter, _message("/model K3"))
+        await router.handle_inbound(adapter, _message("/effort"))
+        await router.handle_inbound(adapter, _message("/effort off"))
+        await router.handle_inbound(adapter, _message("/effort max"))
+        await router.handle_inbound(
+            adapter, _message("/model kimi-code/other")
+        )
+        await router.handle_inbound(
+            adapter, _message("/model kimi-code/legacy")
+        )
+        await router.handle_inbound(adapter, _message("/effort"))
+        await router.handle_inbound(adapter, _message("/effort off"))
+        await router.handle_inbound(
+            adapter, _message("/model kimi-code/fast")
+        )
+        await router.handle_inbound(adapter, _message("/effort high"))
+        await router.handle_inbound(adapter, _message("/effort off"))
+        await router.handle_inbound(adapter, _message("profile survives"))
+    finally:
+        await router.close()
+
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    catalog = next(text for text in texts if "Available models:" in text)
+    assert "kimi-code/k3 — K3" in catalog
+    assert "kimi-code/other — Other" in catalog
+    assert "kimi-code/legacy — Legacy — thinking efforts: on" in catalog
+    assert "kimi-code/fast — Fast" in catalog
+    assert any("Unknown model alias: K3" in text for text in texts)
+    assert any("Valid choices: low, high, max" in text for text in texts)
+    assert any(
+        "Unsupported effort for kimi-code/k3: off" in text for text in texts
+    )
+    assert any("max -> high" in text for text in texts)
+    assert any("high -> on" in text for text in texts)
+    assert any("Valid choices: on" in text for text in texts)
+    assert any(
+        "Unsupported effort for kimi-code/legacy: off" in text
+        for text in texts
+    )
+    assert any("on -> off" in text for text in texts)
+    assert any("Unsupported effort for kimi-code/fast" in text for text in texts)
+    assert client.profile_updates == [
+        ("session-control", {"thinking": "max"}),
+        (
+            "session-control",
+            {"model": "kimi-code/other", "thinking": "high"},
+        ),
+        (
+            "session-control",
+            {"model": "kimi-code/legacy", "thinking": "on"},
+        ),
+        (
+            "session-control",
+            {"model": "kimi-code/fast", "thinking": "off"},
+        ),
+    ]
+    assert client.prompts[-1][2] == {"permission_mode": "manual"}
+
+
+async def test_plan_is_explicit_idle_only_and_idempotent(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(plan_mode=False)]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/plan"))
+        await router.handle_inbound(adapter, _message("/plan on"))
+        await router.handle_inbound(adapter, _message("/plan on"))
+        await router.handle_inbound(adapter, _message("/plan off"))
+        await router.handle_inbound(adapter, _message("/plan toggle"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-control", {"plan_mode": True}),
+        ("session-control", {"plan_mode": False}),
+    ]
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert texts[0] == "Current plan mode: off"
+    assert any("already: on" in text for text in texts)
+    assert any("Usage: /plan" in text for text in texts)
+
+
+async def test_status_title_and_usage_report_session_owned_values(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(
+            busy=True,
+            thinking="max",
+            plan_mode=True,
+            pending_interaction="question",
+            usage=SessionUsage(100, 40, 25, 5, 300, 1200),
+        )
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/title"))
+        await router.handle_inbound(
+            adapter, _message("/title   Exact  Title  ")
+        )
+        await router.handle_inbound(adapter, _message("/status"))
+        await router.handle_inbound(adapter, _message("/usage"))
+        client.sessions[0]["usage"] = SessionUsage(
+            None, None, None, None, None, None
+        )
+        await router.handle_inbound(adapter, _message("/usage"))
+    finally:
+        await router.close()
+
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert "Title: Control session" in texts
+    assert "Title: Exact  Title" in texts
+    status_text = next(text for text in texts if text.startswith("Session:"))
+    assert "Session: Exact  Title" in status_text
+    assert "State: busy" in status_text
+    assert "Pending interaction: question" in status_text
+    assert "Thinking effort: max" in status_text
+    assert "Plan mode: on" in status_text
+    assert "Permission mode: manual" in status_text
+    assert "Kimi-code: 0.28.1" in status_text
+    usage_text = next(text for text in texts if "Input tokens: 100" in text)
+    assert "Cache-read tokens: 25" in usage_text
+    assert "Context: 300/1200 (25.0%)" in usage_text
+    assert "Turns:" not in usage_text
+    assert "Cost:" not in usage_text
+    assert texts[-1].count("unknown") >= 5
+    assert client.profile_updates == [
+        ("session-control", {"title": "Exact  Title"})
+    ]
+
+
+async def test_empty_session_uses_configured_default_as_effective_model(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(model="", thinking="off")]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/model"))
+        await router.handle_inbound(adapter, _message("/effort"))
+        await router.handle_inbound(adapter, _message("/status"))
+        await router.handle_inbound(adapter, _message("/effort high"))
+    finally:
+        await router.close()
+
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert "Current model: kimi-code/k3" in texts[0]
+    assert "Valid choices: low, high, max" in texts[1]
+    assert "Model: kimi-code/k3" in texts[2]
+    assert client.profile_updates == [
+        ("session-control", {"thinking": "high"})
+    ]
+
+
+async def test_task_commands_filter_bound_output_and_cancel_while_busy(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    running = TaskInfo(
+        id="task-running",
+        session_id="session-control",
+        kind="bash",
+        description="Long command",
+        status="running",
+        command="sleep 60",
+        created_at="created",
+        started_at="started",
+        output_preview="last output",
+        output_bytes=10000,
+    )
+    completed = TaskInfo(
+        id="task-complete",
+        session_id="session-control",
+        kind="subagent",
+        description="Finished helper",
+        status="completed",
+        command=None,
+        created_at="created",
+        completed_at="completed",
+    )
+    client.tasks["session-control"] = [running, completed]
+    client.task_details[("session-control", "task-running")] = running
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/tasks"))
+        await router.handle_inbound(adapter, _message("/tasks running"))
+        await router.handle_inbound(
+            adapter, _message("/tasks show task-running")
+        )
+        await router.handle_inbound(
+            adapter, _message("/tasks cancel task-running")
+        )
+        await router.handle_inbound(adapter, _message("/tasks unknown"))
+    finally:
+        await router.close()
+
+    assert client.task_list_calls == [
+        ("session-control", None),
+        ("session-control", "running"),
+    ]
+    assert client.task_detail_calls == [
+        ("session-control", "task-running", 8192)
+    ]
+    assert client.cancelled_tasks == [("session-control", "task-running")]
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert any("task-running [running] bash" in text for text in texts)
+    assert any("task-complete [completed] subagent" in text for text in texts)
+    assert any("Output tail:\nlast output" in text for text in texts)
+    assert any(text == "Cancelled task task-running" for text in texts)
+    assert any("Usage: /tasks" in text for text in texts)
+
+
+async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.skills["session-control"] = [
+        SkillInfo(
+            name="harmless",
+            description="Reply without tools",
+            source="user",
+            path="/tmp/harmless/SKILL.md",
+        )
+    ]
+    client.tools["session-control"] = [
+        ToolInfo("builtin", "Built in", "builtin"),
+        ToolInfo("search", "Search docs", "mcp", "docs"),
+        ToolInfo("lookup", "Look up records", "mcp", "records"),
+        ToolInfo("orphan", "Missing server", "mcp"),
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/skills"))
+        await router.handle_inbound(
+            adapter, _message("/skills run missing")
+        )
+        sent_before_activation = len(adapter.sent)
+        await router.handle_inbound(
+            adapter, _message("/skills run harmless focus tests")
+        )
+        assert len(adapter.sent) == sent_before_activation
+        client.emit("session-control", _event("turn.started"))
+        client.emit(
+            "session-control",
+            _event("assistant.delta", delta="SKILL_OK", offset=0),
+        )
+        await _wait_for(lambda: len(adapter.sent) == sent_before_activation + 1)
+        client.snapshots["session-control"] = {
+            "in_flight_turn": None,
+            "messages": {
+                "items": [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "SKILL_OK"}],
+                    }
+                ]
+            },
+        }
+        client.emit("session-control", _event("turn.ended"))
+        await asyncio.sleep(0)
+        await router.handle_inbound(adapter, _message("/mcp"))
+    finally:
+        await router.close()
+
+    assert client.activated_skills == [
+        ("session-control", "harmless", "focus tests")
+    ]
+    assert client.activation_subscription_ready == [True]
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert any("harmless [user]" in text for text in texts)
+    assert any("Unknown skill: missing" in text for text in texts)
+    assert texts.count("SKILL_OK") == 1
+    mcp_text = next(text for text in texts if text.startswith("MCP servers:"))
+    assert "docs\n- search — Search docs" in mcp_text
+    assert "records\n- lookup — Look up records" in mcp_text
+    assert "builtin" not in mcp_text
+    assert "orphan" not in mcp_text
+
+
+async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    client.models.append(
+        ModelInfo(
+            alias="kimi-code/fast",
+            provider="kimi-code",
+            display_name="Fast",
+            max_context_size=131_072,
+            capabilities=(),
+            support_efforts=(),
+            default_effort=None,
+        )
+    )
+    task = TaskInfo(
+        id="task-1",
+        session_id="session-control",
+        kind="tool",
+        description="Busy task",
+        status="running",
+        command=None,
+        created_at="created",
+    )
+    client.tasks["session-control"] = [task]
+    client.task_details[("session-control", "task-1")] = task
+    client.skills["session-control"] = [
+        SkillInfo("harmless", "Harmless", "user", "/tmp/skill")
+    ]
+    client.tools["session-control"] = [
+        ToolInfo("search", "Search", "mcp", "server")
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    reads_and_allowed_mutations = (
+        "/model",
+        "/effort",
+        "/plan",
+        "/status",
+        "/title",
+        "/usage",
+        "/tasks",
+        "/tasks running",
+        "/tasks show task-1",
+        "/tasks cancel task-1",
+        "/skills",
+        "/mcp",
+        "/title Busy Rename",
+    )
+    rejected_mutations = (
+        "/model kimi-code/fast",
+        "/effort off",
+        "/plan on",
+        "/skills run harmless",
+    )
+    try:
+        for command in reads_and_allowed_mutations:
+            await router.handle_inbound(adapter, _message(command))
+        for command in rejected_mutations:
+            await router.handle_inbound(adapter, _message(command))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-control", {"title": "Busy Rename"})
+    ]
+    assert client.cancelled_tasks == [("session-control", "task-1")]
+    assert client.activated_skills == []
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    busy_rejections = [text for text in texts if text.startswith("Session is busy.")]
+    assert len(busy_rejections) == len(rejected_mutations)
+
+
+async def test_control_commands_require_binding_and_surface_upstream_errors(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    store = StateStore(tmp_path / "state.json")
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        for command in (
+            "/model",
+            "/effort",
+            "/plan",
+            "/status",
+            "/title",
+            "/usage",
+            "/tasks",
+            "/skills",
+            "/mcp",
+        ):
+            await router.handle_inbound(adapter, _message(command))
+    finally:
+        await router.close()
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "No bound session."
+    ] * 9
+
+    failing_client = FakeKimiClient()
+    failing_client.sessions = [_control_session()]
+
+    async def fail_models() -> list[ModelInfo]:
+        raise KimiServerAPIError(50301, "catalog unavailable")
+
+    failing_client.list_models = fail_models  # type: ignore[method-assign]
+    failing_store = StateStore(tmp_path / "failing-state.json")
+    _bind_control_session(failing_store)
+    failing_adapter = FakeAdapter()
+    failing_router = ChatRouter(
+        failing_client,  # type: ignore[arg-type]
+        state_store=failing_store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await failing_router.handle_inbound(failing_adapter, _message("/model"))
+    finally:
+        await failing_router.close()
+    assert "catalog unavailable" in failing_adapter.sent[-1][2]
+
+
+async def test_control_command_grammars_reject_extra_or_incomplete_arguments(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        for command in (
+            "/status now",
+            "/usage now",
+            "/mcp restart",
+            "/skills activate harmless",
+            "/skills run",
+            "/tasks show",
+            "/tasks cancel",
+            "/plan maybe",
+        ):
+            await router.handle_inbound(adapter, _message(command))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any(text == "Usage: /status" for text in texts)
+    assert any(text == "Usage: /usage" for text in texts)
+    assert any(text == "Usage: /mcp" for text in texts)
+    assert sum("Usage: /skills run" in text for text in texts) == 2
+    assert sum("Usage: /tasks" in text for text in texts) == 2
+    assert any("Usage: /plan" in text for text in texts)
+    assert client.profile_updates == []
+    assert client.activated_skills == []
+    assert client.cancelled_tasks == []
+    assert client.tools == {}
+
+
+async def test_switched_session_profile_is_not_overridden_by_next_prompt(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    first = _control_session(model="kimi-code/k3", thinking="high")
+    second = {
+        "id": "session-other",
+        "title": "Other session",
+        "busy": False,
+        "pending_interaction": "none",
+        "metadata": {"cwd": "/tmp/other"},
+        "agent_config": {
+            "model": "kimi-code/other",
+            "thinking": "low",
+            "permission_mode": "auto",
+            "plan_mode": True,
+        },
+        "usage": SessionUsage(0, 0, 0, 0, 0, 131_072),
+    }
+    client.sessions = [first, second]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="startup-default",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message("/switch session-other")
+        )
+        await router.handle_inbound(adapter, _message("after switch"))
+    finally:
+        await router.close()
+
+    assert client.prompts == [
+        (
+            "session-other",
+            [{"type": "text", "text": "after switch"}],
+            {"permission_mode": "auto"},
+        )
+    ]
+    assert second["agent_config"] == {
+        "model": "kimi-code/other",
+        "thinking": "low",
+        "permission_mode": "auto",
+        "plan_mode": True,
+    }
+    assert client.profile_updates == []
 
 
 async def test_switch_stream_failure_is_visible_and_does_not_rebind(
@@ -542,7 +1328,10 @@ async def test_new_command_uses_requested_workspace_without_forwarding(
         await router.close()
 
     assert client.created[0][0] == str(project.resolve())
-    assert client.created[0][2] == {"permission_mode": "manual"}
+    assert client.created[0][2] == {
+        "model": "kimi-code/k3",
+        "permission_mode": "manual",
+    }
     assert client.prompts == []
 
 

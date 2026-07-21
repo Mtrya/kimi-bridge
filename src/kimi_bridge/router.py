@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from .interactions import (
     ApprovalPrompt,
@@ -28,7 +28,20 @@ from .interactions import (
     SingleChoiceAnswer,
     SkippedAnswer,
 )
-from .kimi_server import KimiServerAPIError, KimiServerClient, KimiServerError
+from .kimi_server import (
+    KimiServerAPIError,
+    KimiServerClient,
+    KimiServerError,
+    KimiServerProtocolError,
+    ModelInfo,
+    SessionProfile,
+    SessionStatus,
+    SessionUsage,
+    SkillInfo,
+    TaskInfo,
+    TaskStatus,
+    ToolInfo,
+)
 from .platforms.base import (
     ActorRef,
     ConversationRef,
@@ -50,7 +63,11 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_PERMISSION_MODE = "manual"
 SESSION_TITLE_LIMIT = 80
 SESSION_LIST_LIMIT = 10
+TASK_OUTPUT_BYTES = 8 * 1024
 INTERACTION_POLL_SECONDS = 1.0
+TASK_STATUSES: frozenset[str] = frozenset(
+    {"running", "completed", "failed", "cancelled"}
+)
 TERMINAL_INTERACTION_ERROR_CODES = {40001, 40401, 40404, 40902}
 STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
@@ -67,6 +84,18 @@ HELP_TEXT = """Commands:
 /sessions — list recent sessions
 /switch <n|id> — bind a listed or explicit session
 /mode <manual|auto|yolo> — manual uses chat interactions; auto never asks; yolo may ask questions
+/model [alias] — show or set the exact session model
+/effort [effort] — show or set thinking effort for the current model
+/plan [on|off] — show or explicitly set plan mode
+/status — show bound session and runtime state
+/title [text] — show or rename the session
+/usage — show session token, context, turn, and cost usage
+/tasks [running|completed|failed|cancelled] — list tasks
+/tasks show <id> — inspect a task with an 8 KiB output tail
+/tasks cancel <id> — cancel a task
+/skills — list skills available to the session
+/skills run <name> [args] — activate an exact skill
+/mcp — list session-derived MCP tools
 /stop — abort the active prompt
 /help — show this help"""
 
@@ -180,13 +209,18 @@ class ChatRouter:
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
         async with lock:
             if text.startswith("/") and not msg.images and not msg.files:
-                await self._handle_command(
-                    conversation_key,
-                    adapter,
-                    msg.conversation,
-                    msg.actor,
-                    text,
-                )
+                try:
+                    await self._handle_command(
+                        conversation_key,
+                        adapter,
+                        msg.conversation,
+                        msg.actor,
+                        text,
+                    )
+                except KimiServerError as exc:
+                    await self._send_chunked(
+                        adapter, conversation=msg.conversation, text=f"Command failed: {exc}"
+                    )
                 return
 
             binding = self._state.bindings.get(conversation_key)
@@ -208,7 +242,6 @@ class ChatRouter:
             result = await self._client.submit_prompt(
                 binding.session_id,
                 content,
-                model=self._model,
                 permission_mode=binding.permission_mode,
             )
             if result.get("status") in {"queued", "blocked"}:
@@ -402,6 +435,62 @@ class ChatRouter:
                 adapter, conversation, f"Switched to {binding.session_id}"
             )
             return
+        if command == "/model":
+            await self._handle_model(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/effort":
+            await self._handle_effort(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/plan":
+            await self._handle_plan(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/status":
+            if argument:
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /status"
+                )
+                return
+            await self._handle_status(conversation_key, adapter, conversation)
+            return
+        if command == "/title":
+            await self._handle_title(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/usage":
+            if argument:
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /usage"
+                )
+                return
+            await self._handle_usage(conversation_key, adapter, conversation)
+            return
+        if command == "/tasks":
+            await self._handle_tasks(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/skills":
+            await self._handle_skills(
+                conversation_key,
+                adapter,
+                conversation,
+                actor,
+                argument,
+            )
+            return
+        if command == "/mcp":
+            if argument:
+                await self._send_chunked(adapter, conversation, "Usage: /mcp")
+                return
+            await self._handle_mcp(conversation_key, adapter, conversation)
+            return
         if command == "/mode":
             if argument not in PERMISSION_MODES:
                 await self._send_chunked(
@@ -410,11 +499,10 @@ class ChatRouter:
                     "Usage: /mode <manual|auto|yolo>",
                 )
                 return
-            binding = self._state.bindings.get(conversation_key)
+            binding = await self._require_binding(
+                conversation_key, adapter, conversation
+            )
             if binding is None:
-                await self._send_chunked(
-                    adapter, conversation, "No bound session."
-                )
                 return
             await self._client.update_profile(
                 binding.session_id, permission_mode=argument
@@ -433,11 +521,10 @@ class ChatRouter:
             )
             return
         if command == "/stop":
-            binding = self._state.bindings.get(conversation_key)
+            binding = await self._require_binding(
+                conversation_key, adapter, conversation
+            )
             if binding is None:
-                await self._send_chunked(
-                    adapter, conversation, "No bound session."
-                )
                 return
             async with self._interaction_lock:
                 pending = self._pending.get(conversation_key)
@@ -466,6 +553,388 @@ class ChatRouter:
             adapter, conversation, f"Unknown command: {command}\nUse /help."
         )
 
+    async def _handle_model(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            profile, status, models = await asyncio.gather(
+                self._client.get_session_profile(binding.session_id),
+                self._client.get_session_status(binding.session_id),
+                self._client.list_models(),
+            )
+            await self._send_chunked(
+                adapter,
+                conversation,
+                _format_models(
+                    _effective_model(profile, status, self._model), models
+                ),
+            )
+            return
+
+        status = await self._require_idle(
+            binding, adapter, conversation, "Model changes"
+        )
+        if status is None:
+            return
+        models = await self._client.list_models()
+        selected = next(
+            (model for model in models if model.alias == argument), None
+        )
+        if selected is None:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Unknown model alias: {argument}\nUse /model to list exact aliases.",
+            )
+            return
+
+        current_effort = status.thinking_effort
+        choices = _model_effort_choices(selected)
+        if current_effort in choices:
+            next_effort = current_effort
+        elif selected.default_effort in selected.support_efforts:
+            assert selected.default_effort is not None
+            next_effort = selected.default_effort
+        elif not selected.support_efforts:
+            next_effort = "on" if _model_supports_thinking(selected) else "off"
+        else:
+            raise KimiServerProtocolError(
+                f"model {selected.alias} advertises efforts without a valid default"
+            )
+        await self._client.update_profile(
+            binding.session_id,
+            model=selected.alias,
+            thinking=next_effort,
+        )
+        lines = [f"Model: {selected.alias}"]
+        if next_effort != current_effort:
+            lines.append(
+                f"Thinking effort adjusted: {current_effort} -> {next_effort}"
+            )
+        await self._send_chunked(adapter, conversation, "\n".join(lines))
+
+    async def _handle_effort(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            profile, status, models = await asyncio.gather(
+                self._client.get_session_profile(binding.session_id),
+                self._client.get_session_status(binding.session_id),
+                self._client.list_models(),
+            )
+            model = _find_model(
+                models, _effective_model(profile, status, self._model)
+            )
+            choices = ", ".join(_model_effort_choices(model))
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Thinking effort: {status.thinking_effort}\nValid choices: {choices}",
+            )
+            return
+
+        status = await self._require_idle(
+            binding, adapter, conversation, "Thinking-effort changes"
+        )
+        if status is None:
+            return
+        profile, models = await asyncio.gather(
+            self._client.get_session_profile(binding.session_id),
+            self._client.list_models(),
+        )
+        model = _find_model(
+            models, _effective_model(profile, status, self._model)
+        )
+        choices = _model_effort_choices(model)
+        if argument not in choices:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Unsupported effort for {model.alias}: {argument}\nValid choices: {', '.join(choices)}",
+            )
+            return
+        if argument == status.thinking_effort:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Thinking effort already: {argument}",
+            )
+            return
+        await self._client.update_profile(
+            binding.session_id, thinking=argument
+        )
+        await self._send_chunked(
+            adapter, conversation, f"Thinking effort: {argument}"
+        )
+
+    async def _handle_plan(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        if argument not in {"", "on", "off"}:
+            await self._send_chunked(
+                adapter, conversation, "Usage: /plan [on|off]"
+            )
+            return
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            status = await self._client.get_session_status(binding.session_id)
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Current plan mode: {'on' if status.plan_mode else 'off'}",
+            )
+            return
+        status = await self._require_idle(
+            binding, adapter, conversation, "Plan-mode changes"
+        )
+        if status is None:
+            return
+        enabled = argument == "on"
+        if status.plan_mode == enabled:
+            await self._send_chunked(
+                adapter, conversation, f"Plan mode already: {argument}"
+            )
+            return
+        await self._client.update_profile(
+            binding.session_id, plan_mode=enabled
+        )
+        await self._send_chunked(
+            adapter, conversation, f"Plan mode: {argument}"
+        )
+
+    async def _handle_status(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        profile, status, server_version = await asyncio.gather(
+            self._client.get_session_profile(binding.session_id),
+            self._client.get_session_status(binding.session_id),
+            self._client.get_server_version(),
+        )
+        await self._send_chunked(
+            adapter,
+            conversation,
+            _format_status(
+                profile,
+                status,
+                binding.permission_mode,
+                server_version,
+                self._model,
+            ),
+        )
+
+    async def _handle_title(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            profile = await self._client.get_session_profile(binding.session_id)
+            await self._send_chunked(
+                adapter, conversation, f"Title: {profile.title}"
+            )
+            return
+        await self._client.update_profile(binding.session_id, title=argument)
+        await self._send_chunked(adapter, conversation, f"Title: {argument}")
+
+    async def _handle_usage(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        usage = await self._client.get_session_usage(binding.session_id)
+        await self._send_chunked(
+            adapter, conversation, _format_usage(usage)
+        )
+
+    async def _handle_tasks(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument or argument in TASK_STATUSES:
+            status = cast(TaskStatus, argument) if argument else None
+            tasks = await self._client.list_tasks(
+                binding.session_id, status=status
+            )
+            await self._send_chunked(
+                adapter, conversation, _format_tasks(tasks, status)
+            )
+            return
+        parts = argument.split()
+        if len(parts) == 2 and parts[0] == "show":
+            task = await self._client.get_task(
+                binding.session_id,
+                parts[1],
+                output_bytes=TASK_OUTPUT_BYTES,
+            )
+            await self._send_chunked(
+                adapter, conversation, _format_task_detail(task)
+            )
+            return
+        if len(parts) == 2 and parts[0] == "cancel":
+            await self._client.cancel_task(binding.session_id, parts[1])
+            await self._send_chunked(
+                adapter, conversation, f"Cancelled task {parts[1]}"
+            )
+            return
+        await self._send_chunked(
+            adapter,
+            conversation,
+            "Usage: /tasks [running|completed|failed|cancelled] | /tasks show <id> | /tasks cancel <id>",
+        )
+
+    async def _handle_skills(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            skills = await self._client.list_skills(binding.session_id)
+            await self._send_chunked(
+                adapter, conversation, _format_skills(skills)
+            )
+            return
+
+        verb, _, activation = argument.partition(" ")
+        activation = activation.strip()
+        if verb != "run" or not activation:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                "Usage: /skills run <name> [args]",
+            )
+            return
+        skill_name, _, args = activation.partition(" ")
+        status = await self._require_idle(
+            binding, adapter, conversation, "Skill activation"
+        )
+        if status is None:
+            return
+        skills = await self._client.list_skills(binding.session_id)
+        if not any(skill.name == skill_name for skill in skills):
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Unknown skill: {skill_name}\nUse /skills to list exact names.",
+            )
+            return
+        await self._ensure_active_stream(
+            conversation_key,
+            binding.session_id,
+            adapter,
+            conversation,
+            actor,
+        )
+        await self._client.activate_skill(
+            binding.session_id, skill_name, args=args.strip()
+        )
+
+    async def _handle_mcp(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+    ) -> None:
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        tools = await self._client.list_tools(binding.session_id)
+        await self._send_chunked(
+            adapter, conversation, _format_mcp_tools(tools)
+        )
+
+    async def _require_binding(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+    ) -> ConversationBinding | None:
+        binding = self._state.bindings.get(conversation_key)
+        if binding is None:
+            await self._send_chunked(adapter, conversation, "No bound session.")
+        return binding
+
+    async def _require_idle(
+        self,
+        binding: ConversationBinding,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        operation: str,
+    ) -> SessionStatus | None:
+        status = await self._client.get_session_status(binding.session_id)
+        if status.busy:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Session is busy. {operation} can only run while idle.",
+            )
+            return None
+        return status
+
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
         idle, busy = await asyncio.gather(
             self._client.list_sessions(busy=False, page_size=SESSION_LIST_LIMIT),
@@ -491,6 +960,7 @@ class ChatRouter:
         session_id = await self._client.create_session(
             str(workspace),
             title=title,
+            model=self._model,
             permission_mode=DEFAULT_PERMISSION_MODE,
         )
         binding = ConversationBinding(
@@ -967,6 +1437,160 @@ def _format_sessions(sessions: list[dict[str, Any]]) -> str:
         status = "busy" if session.get("busy") else "idle"
         lines.append(f"{index}. {title} [{status}]\n{workspace}\n{session['id']}")
     return "\n\n".join(lines)
+
+
+def _format_models(current_model: str, models: list[ModelInfo]) -> str:
+    lines = [f"Current model: {current_model}", "Available models:"]
+    for model in models:
+        display_name = model.display_name or "display name unavailable"
+        efforts = ", ".join(_model_effort_choices(model))
+        lines.append(
+            f"- {model.alias} — {display_name} — thinking efforts: {efforts}"
+        )
+    return "\n".join(lines)
+
+
+def _model_effort_choices(model: ModelInfo) -> tuple[str, ...]:
+    efforts = tuple(dict.fromkeys(model.support_efforts))
+    always_thinking = "always_thinking" in model.capabilities
+    if efforts:
+        return efforts if always_thinking else ("off", *efforts)
+    if always_thinking:
+        return ("on",)
+    if _model_supports_thinking(model):
+        return ("on", "off")
+    return ("off",)
+
+
+def _model_supports_thinking(model: ModelInfo) -> bool:
+    return bool(
+        {"thinking", "always_thinking"}.intersection(model.capabilities)
+    )
+
+
+def _find_model(models: list[ModelInfo], alias: str) -> ModelInfo:
+    model = next((item for item in models if item.alias == alias), None)
+    if model is None:
+        raise KimiServerProtocolError(
+            f"session model {alias!r} is absent from the model catalog"
+        )
+    return model
+
+
+def _effective_model(
+    profile: SessionProfile, status: SessionStatus, default_model: str
+) -> str:
+    return status.model or profile.model or default_model
+
+
+def _format_status(
+    profile: SessionProfile,
+    status: SessionStatus,
+    permission_mode: str,
+    server_version: str,
+    default_model: str,
+) -> str:
+    return "\n".join(
+        (
+            f"Session: {profile.title}",
+            f"ID: {profile.session_id}",
+            f"Workspace: {profile.workspace}",
+            f"State: {'busy' if status.busy else 'idle'}",
+            f"Pending interaction: {profile.pending_interaction}",
+            f"Model: {_effective_model(profile, status, default_model)}",
+            f"Thinking effort: {status.thinking_effort}",
+            f"Plan mode: {'on' if status.plan_mode else 'off'}",
+            f"Permission mode: {permission_mode}",
+            f"Kimi-code: {server_version}",
+        )
+    )
+
+
+def _format_usage(usage: SessionUsage) -> str:
+    if usage.context_tokens is None or usage.context_limit is None:
+        context = "unknown"
+    elif usage.context_limit <= 0:
+        context = f"{usage.context_tokens}/{usage.context_limit} (unknown percentage)"
+    else:
+        percentage = usage.context_tokens / usage.context_limit * 100
+        context = (
+            f"{usage.context_tokens}/{usage.context_limit} ({percentage:.1f}%)"
+        )
+    return "\n".join(
+        (
+            f"Input tokens: {_optional_number(usage.input_tokens)}",
+            f"Output tokens: {_optional_number(usage.output_tokens)}",
+            f"Cache-read tokens: {_optional_number(usage.cache_read_tokens)}",
+            f"Cache-creation tokens: {_optional_number(usage.cache_creation_tokens)}",
+            f"Context: {context}",
+        )
+    )
+
+
+def _optional_number(value: int | None) -> str:
+    return str(value) if value is not None else "unknown"
+
+
+def _format_tasks(tasks: list[TaskInfo], status: TaskStatus | None) -> str:
+    if not tasks:
+        suffix = f" with status {status}" if status is not None else ""
+        return f"No tasks found{suffix}."
+    lines: list[str] = []
+    for task in tasks:
+        lines.append(
+            f"{task.id} [{task.status}] {task.kind}\n{task.description}"
+        )
+    return "\n\n".join(lines)
+
+
+def _format_task_detail(task: TaskInfo) -> str:
+    lines = [
+        f"Task: {task.id}",
+        f"Status: {task.status}",
+        f"Kind: {task.kind}",
+        f"Description: {task.description}",
+    ]
+    if task.command is not None:
+        lines.append(f"Command: {task.command}")
+    lines.append(f"Created: {task.created_at}")
+    if task.started_at is not None:
+        lines.append(f"Started: {task.started_at}")
+    if task.completed_at is not None:
+        lines.append(f"Completed: {task.completed_at}")
+    if task.output_bytes is not None:
+        lines.append(f"Output bytes: {task.output_bytes}")
+    if task.output_preview is not None:
+        lines.extend(("Output tail:", task.output_preview))
+    else:
+        lines.append("Output tail: unavailable")
+    return "\n".join(lines)
+
+
+def _format_skills(skills: list[SkillInfo]) -> str:
+    if not skills:
+        return "No skills available."
+    return "\n\n".join(
+        f"{skill.name} [{skill.source}]\n{skill.description}"
+        for skill in skills
+    )
+
+
+def _format_mcp_tools(tools: list[ToolInfo]) -> str:
+    grouped: dict[str, list[ToolInfo]] = {}
+    for tool in tools:
+        if tool.source != "mcp" or not tool.mcp_server_id:
+            continue
+        grouped.setdefault(tool.mcp_server_id, []).append(tool)
+    if not grouped:
+        return "No MCP tools available for this session."
+    sections: list[str] = []
+    for server_id in sorted(grouped):
+        lines = [server_id]
+        for tool in sorted(grouped[server_id], key=lambda item: item.name):
+            description = f" — {tool.description}" if tool.description else ""
+            lines.append(f"- {tool.name}{description}")
+        sections.append("\n".join(lines))
+    return "MCP servers:\n" + "\n\n".join(sections)
 
 
 def _session_recency_key(session: dict[str, Any]) -> str:
