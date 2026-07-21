@@ -6,8 +6,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import tempfile
-from pathlib import Path
 from typing import Any
 
 from kimi_bridge.config import load_config
@@ -43,9 +41,7 @@ async def smoke() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    supervisor = KimiServerSupervisor(
-        preferred_port=config.kimi_server.port
-    )
+    supervisor = KimiServerSupervisor(preferred_port=config.kimi_server.port)
     async with supervisor:
         print(f"managed kimi server ready at {supervisor.connection.base_url}")
         async with KimiServerClient(supervisor=supervisor) as client:
@@ -57,44 +53,45 @@ async def smoke() -> None:
                     "kimi-code has no default_model; configure one before "
                     "running the smoke test"
                 )
-            with tempfile.TemporaryDirectory(prefix="kimi-bridge-smoke-") as cwd:
-                session_id = await client.create_session(str(Path(cwd)))
-                print(f"created session {session_id}")
-                logging.getLogger(__name__).warning(
-                    "smoke session uses permission_mode=auto because the "
-                    "interactive approval layer is not present yet"
-                )
+            smoke_workspace = config.default_workspace / ".smoke"
+            smoke_workspace.mkdir(parents=True, exist_ok=True)
+            session_id = await client.create_session(str(smoke_workspace))
+            print(f"created session {session_id}")
+            logging.getLogger(__name__).info(
+                "smoke session uses permission_mode=auto so the "
+                "non-interactive check is fully autonomous and never asks questions"
+            )
 
-                collector = asyncio.create_task(
-                    _collect_turn(client, session_id), name="smoke-event-collector"
+            collector = asyncio.create_task(
+                _collect_turn(client, session_id), name="smoke-event-collector"
+            )
+            try:
+                await client.wait_until_subscribed(session_id)
+                await client.submit_prompt(
+                    session_id,
+                    PROMPT,
+                    model=default_model,
+                    permission_mode="auto",
                 )
-                try:
-                    await client.wait_until_subscribed(session_id)
-                    await client.submit_prompt(
-                        session_id,
-                        PROMPT,
-                        model=default_model,
-                        permission_mode="auto",
-                    )
-                    assistant_text, turn_end = await asyncio.wait_for(
-                        collector, TURN_TIMEOUT_SECONDS
-                    )
-                finally:
-                    if not collector.done():
-                        collector.cancel()
-                        try:
-                            await collector
-                        except asyncio.CancelledError:
-                            pass
+                assistant_text, turn_end = await asyncio.wait_for(
+                    collector, TURN_TIMEOUT_SECONDS
+                )
+            finally:
+                if not collector.done():
+                    collector.cancel()
+                    try:
+                        await collector
+                    except asyncio.CancelledError:
+                        pass
 
-                reason = turn_end["payload"]["reason"]
-                if reason != "completed":
-                    raise AssertionError(f"turn ended with reason {reason!r}")
-                if "PONG" not in assistant_text:
-                    raise AssertionError(
-                        f"assistant deltas did not contain PONG: {assistant_text!r}"
-                    )
-                print("smoke passed: observed PONG and a completed turn")
+            reason = turn_end["payload"]["reason"]
+            if reason != "completed":
+                raise AssertionError(f"turn ended with reason {reason!r}")
+            if "PONG" not in assistant_text:
+                raise AssertionError(
+                    f"assistant deltas did not contain PONG: {assistant_text!r}"
+                )
+            print("smoke passed: observed PONG and a completed turn")
 
 
 if __name__ == "__main__":

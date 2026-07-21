@@ -10,6 +10,8 @@ import pytest
 from kimi_bridge.kimi_server import (
     KimiServerAPIError,
     KimiServerClient,
+    KimiServerProtocolError,
+    KimiServerStartupError,
     KimiServerSupervisor,
     ServerConnection,
     parse_server_startup_line,
@@ -32,11 +34,19 @@ class FakeResponse:
 
 
 class FakeHttpClient:
-    def __init__(self, responses: Iterable[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        responses: Iterable[dict[str, Any]],
+        *,
+        actions: list[str] | None = None,
+    ) -> None:
         self._responses = iter(responses)
+        self._actions = actions
         self.requests: list[tuple[str, str, dict[str, Any]]] = []
 
     async def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+        if self._actions is not None:
+            self._actions.append(f"http:{method}:{url}")
         self.requests.append((method, url, kwargs))
         return FakeResponse(next(self._responses))
 
@@ -48,11 +58,13 @@ class FakeWebSocket:
         subscribe_payload: dict[str, Any],
         events: Iterable[dict[str, Any]] = (),
         events_before_ack: bool = False,
+        disconnect_after_events: bool = False,
     ) -> None:
         self._subscribe_payload = subscribe_payload
         self._events = list(events)
         self._events_before_ack = events_before_ack
-        self._incoming: asyncio.Queue[str] = asyncio.Queue()
+        self._disconnect_after_events = disconnect_after_events
+        self._incoming: asyncio.Queue[str | BaseException] = asyncio.Queue()
         self._incoming.put_nowait(
             json.dumps(
                 {
@@ -116,22 +128,52 @@ class FakeWebSocket:
             if not self._events_before_ack:
                 for event in self._events:
                     self._incoming.put_nowait(json.dumps(event))
+            if self._disconnect_after_events:
+                self._incoming.put_nowait(OSError("connection lost"))
 
     async def recv(self) -> str:
-        return await self._incoming.get()
+        incoming = await self._incoming.get()
+        if isinstance(incoming, BaseException):
+            raise incoming
+        return incoming
 
     async def close(self) -> None:
         self.closed = True
 
 
 class FakeWebSocketConnect:
-    def __init__(self, sockets: Iterable[FakeWebSocket]) -> None:
+    def __init__(
+        self,
+        sockets: Iterable[FakeWebSocket],
+        *,
+        actions: list[str] | None = None,
+    ) -> None:
         self._sockets = iter(sockets)
+        self._actions = actions
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def __call__(self, url: str, **kwargs: Any) -> FakeWebSocket:
+        if self._actions is not None:
+            self._actions.append(f"ws:{url}")
         self.calls.append((url, kwargs))
         return next(self._sockets)
+
+
+class FakeCompletedProcess:
+    def __init__(self, output: str, *, returncode: int = 0) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(output.encode())
+        self.stdout.feed_eof()
+        self.returncode = returncode
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
 
 
 class FakeProcess:
@@ -163,13 +205,21 @@ class FakeProcess:
 
 
 class FakeProcessFactory:
-    def __init__(self, processes: Iterable[FakeProcess]) -> None:
+    def __init__(self, processes: Iterable[Any]) -> None:
         self._processes = iter(processes)
         self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    async def __call__(self, *args: Any, **kwargs: Any) -> FakeProcess:
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         self.calls.append((args, kwargs))
         return next(self._processes)
+
+
+class FakeSupervisor:
+    def __init__(self, connections: Iterable[ServerConnection]) -> None:
+        self._connections = iter(connections)
+
+    async def wait_until_ready(self) -> ServerConnection:
+        return next(self._connections)
 
 
 def _session_event(
@@ -209,7 +259,7 @@ def test_parses_contract_and_ansi_startup_lines_without_exposing_token() -> None
 async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> None:
     http = FakeHttpClient(
         [
-            _envelope({"server_version": "0.27.0"}),
+            _envelope({"server_version": "0.28.1"}),
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"id": "session-1"}),
@@ -230,16 +280,17 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
             _envelope({"as_of_seq": 4, "epoch": "epoch-1"}),
         ]
     )
-    client = KimiServerClient(
-        "http://127.0.0.1:43123", "token-1", http_client=http
-    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
-    assert await client.check_server_version() == "0.27.0"
+    assert await client.check_server_version() == "0.28.1"
     assert await client.get_config() == {"default_model": "kimi-code/k3"}
     assert await client.get_default_model() == "kimi-code/k3"
-    assert await client.create_session(
-        str(tmp_path), title="Test session", permission_mode="auto"
-    ) == "session-1"
+    assert (
+        await client.create_session(
+            str(tmp_path), title="Test session", permission_mode="auto"
+        )
+        == "session-1"
+    )
     assert (await client.get_session("session-1"))["id"] == "session-1"
     await client.submit_prompt(
         "session-1",
@@ -285,9 +336,7 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
 
 async def test_rest_envelope_error_is_raised() -> None:
     http = FakeHttpClient([_envelope(None, code=40401, msg="not found")])
-    client = KimiServerClient(
-        "http://127.0.0.1:43123", "token-1", http_client=http
-    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
     with pytest.raises(KimiServerAPIError) as caught:
         await client.get_snapshot("missing")
@@ -295,24 +344,167 @@ async def test_rest_envelope_error_is_raised() -> None:
     assert caught.value.code == 40401
 
 
-async def test_resume_session_uses_advertised_lifecycle_service() -> None:
-    http = FakeHttpClient([_envelope({"id": "session-1"})])
-    client = KimiServerClient(
-        "http://127.0.0.1:43123", "token-1", http_client=http
+async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> None:
+    approval = {"approval_id": "approval-1"}
+    question = {"question_id": "question-1", "questions": []}
+    http = FakeHttpClient(
+        [
+            _envelope({"prompt_id": "prompt-1", "status": "running"}),
+            _envelope({"steered": True, "prompt_ids": ["prompt-1"]}),
+            _envelope({"id": "session-1"}),
+            _envelope({"items": [approval]}),
+            _envelope({"resolved": True, "resolved_at": "now"}),
+            _envelope({"items": [question]}),
+            _envelope({"resolved": True, "resolved_at": "now"}),
+            _envelope({"dismissed": True, "dismissed_at": "now"}),
+        ]
     )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+    content = [
+        {"type": "text", "text": "look"},
+        {
+            "type": "image",
+            "source": {
+                "kind": "base64",
+                "media_type": "image/png",
+                "data": "aW1hZ2U=",
+            },
+        },
+    ]
 
-    await client.resume_session("session-1")
+    await client.submit_prompt(
+        "session-1", content, model="kimi-code/k3", permission_mode="manual"
+    )
+    assert await client.steer_prompts("session-1", ["prompt-1"])
+    assert (await client.update_profile("session-1", permission_mode="yolo"))[
+        "id"
+    ] == "session-1"
+    assert await client.list_approvals("session-1") == [approval]
+    assert await client.resolve_approval("session-1", "approval-1", "approved")
+    assert await client.list_questions("session-1") == [question]
+    answers = {"q1": {"kind": "single", "option_id": "one"}}
+    assert await client.resolve_question("session-1", "question-1", answers)
+    assert await client.dismiss_question("session-1", "question-1")
 
-    assert http.requests == [
+    assert [request[0:2] for request in http.requests] == [
         (
             "POST",
-            "http://127.0.0.1:43123/api/v2/sessionLifecycleService/resume",
-            {
-                "headers": {"Authorization": "Bearer token-1"},
-                "json": "session-1",
-            },
-        )
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts:steer",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/approvals",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/approvals/approval-1",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions/question-1",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions/question-1:dismiss",
+        ),
     ]
+    assert http.requests[0][2]["json"] == {
+        "content": content,
+        "model": "kimi-code/k3",
+        "permission_mode": "manual",
+    }
+    assert http.requests[1][2]["json"] == {"prompt_ids": ["prompt-1"]}
+    assert http.requests[2][2]["json"] == {"agent_config": {"permission_mode": "yolo"}}
+    assert http.requests[3][2]["params"] == {"status": "pending"}
+    assert http.requests[4][2]["json"] == {"decision": "approved"}
+    assert http.requests[5][2]["params"] == {"status": "pending"}
+    assert http.requests[6][2]["json"] == {
+        "answers": answers,
+        "method": "click",
+    }
+    assert http.requests[7][2]["json"] == {}
+
+
+async def test_no_active_turn_means_no_pending_interactions() -> None:
+    http = FakeHttpClient(
+        [
+            _envelope(None, code=40001, msg="no active turn"),
+            _envelope(None, code=40001, msg="no active turn"),
+        ]
+    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    assert await client.list_approvals("session-1") == []
+    assert await client.list_questions("session-1") == []
+
+
+async def test_server_version_mismatch_is_rejected() -> None:
+    http = FakeHttpClient([_envelope({"server_version": "0.28.0"})])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    with pytest.raises(KimiServerStartupError, match="expected 0.28.1, got 0.28.0"):
+        await client.check_server_version()
+
+
+async def test_materializes_session_before_initial_subscription() -> None:
+    actions: list[str] = []
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[_session_event(1, "epoch-1", "turn.ended")],
+    )
+    ws_connect = FakeWebSocketConnect([socket], actions=actions)
+    http = FakeHttpClient([_envelope({"busy": False})], actions=actions)
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=ws_connect,
+    )
+    events = client.subscribe_events("session-1")
+
+    assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
+    await events.aclose()
+
+    assert actions == [
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43123/api/v1/ws",
+    ]
+
+
+async def test_missing_session_fails_before_websocket_connection() -> None:
+    http = FakeHttpClient([_envelope(None, code=40401, msg="not found")])
+    ws_connect = FakeWebSocketConnect([])
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=ws_connect,
+    )
+    events = client.subscribe_events("missing")
+
+    with pytest.raises(KimiServerAPIError) as caught:
+        await asyncio.wait_for(anext(events), 1)
+    await events.aclose()
+
+    assert caught.value.code == 40401
+    assert ws_connect.calls == []
 
 
 async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
@@ -324,9 +516,7 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
             "cursors": {"session-1": {"seq": 5, "epoch": "epoch-old"}},
         },
         events=[
-            _session_event(
-                5, "epoch-old", "assistant.delta", volatile=True
-            ),
+            _session_event(5, "epoch-old", "assistant.delta", volatile=True),
             _session_event(6, "epoch-old", "assistant.delta"),
             _session_event(7, "epoch-new", "turn.started"),
         ],
@@ -343,9 +533,15 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
             _session_event(9, "epoch-new", "turn.ended"),
         ],
     )
-    ws_connect = FakeWebSocketConnect([first, second])
+    actions: list[str] = []
+    ws_connect = FakeWebSocketConnect([first, second], actions=actions)
     http = FakeHttpClient(
-        [_envelope({"as_of_seq": 8, "epoch": "epoch-new"})]
+        [
+            _envelope({"busy": True}),
+            _envelope({"as_of_seq": 8, "epoch": "epoch-new"}),
+            _envelope({"busy": True}),
+        ],
+        actions=actions,
     )
     client = KimiServerClient(
         "http://127.0.0.1:43123",
@@ -369,13 +565,28 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 9
     await events.aclose()
 
-    assert http.requests[0][0:2] == (
-        "GET",
-        "http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
-    )
-    subscribe = next(
-        frame for frame in second.sent if frame["type"] == "subscribe"
-    )
+    assert [request[0:2] for request in http.requests] == [
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+    ]
+    assert actions == [
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43123/api/v1/ws",
+    ]
+    subscribe = next(frame for frame in second.sent if frame["type"] == "subscribe")
     assert subscribe["payload"]["cursors"] == {
         "session-1": {"seq": 8, "epoch": "epoch-new"}
     }
@@ -388,14 +599,15 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
     )
 
 
-async def test_stored_session_not_loaded_after_restart_retries_from_snapshot() -> None:
+async def test_reconnect_materializes_again_on_new_supervisor_generation() -> None:
     first = FakeWebSocket(
         subscribe_payload={
-            "accepted": [],
-            "not_found": ["session-1"],
+            "accepted": ["session-1"],
+            "not_found": [],
             "resync_required": [],
             "cursors": {},
-        }
+        },
+        disconnect_after_events=True,
     )
     second = FakeWebSocket(
         subscribe_payload={
@@ -404,48 +616,83 @@ async def test_stored_session_not_loaded_after_restart_retries_from_snapshot() -
             "resync_required": [],
             "cursors": {},
         },
-        events=[_session_event(11, "epoch-new", "turn.ended")],
-        events_before_ack=True,
+        events=[_session_event(1, "epoch-new", "turn.ended")],
     )
-    ws_connect = FakeWebSocketConnect([first, second])
+    actions: list[str] = []
+    ws_connect = FakeWebSocketConnect([first, second], actions=actions)
     http = FakeHttpClient(
-        [_envelope({"as_of_seq": 10, "epoch": "epoch-new"})]
+        [_envelope({"busy": False}), _envelope({"busy": False})],
+        actions=actions,
     )
-    delays: list[float] = []
+    supervisor = FakeSupervisor(
+        [
+            ServerConnection(
+                base_url="http://127.0.0.1:43123",
+                port=43123,
+                generation=1,
+                token="token-1",
+            ),
+            ServerConnection(
+                base_url="http://127.0.0.1:43124",
+                port=43124,
+                generation=2,
+                token="token-2",
+            ),
+        ]
+    )
 
     async def fake_sleep(delay: float) -> None:
-        delays.append(delay)
+        actions.append(f"sleep:{delay}")
 
     client = KimiServerClient(
-        "http://127.0.0.1:43123",
-        "token-1",
+        supervisor=supervisor,  # type: ignore[arg-type]
         http_client=http,
         ws_connect=ws_connect,
         sleep=fake_sleep,
     )
     events = client.subscribe_events("session-1")
 
-    resync = await asyncio.wait_for(anext(events), 1)
-    assert resync["payload"]["reason"] == "session_not_loaded"
-    assert resync["snapshot"]["as_of_seq"] == 10
-    assert (await asyncio.wait_for(anext(events), 1))["seq"] == 11
+    assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
     await events.aclose()
 
-    assert delays == [0.25]
-    subscribe = next(
-        frame for frame in second.sent if frame["type"] == "subscribe"
+    assert actions == [
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "sleep:0.25",
+        "http:GET:http://127.0.0.1:43124/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43124/api/v1/ws",
+    ]
+
+
+async def test_subscription_rejects_not_found_after_materialization() -> None:
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": [],
+            "not_found": ["session-1"],
+            "resync_required": [],
+            "cursors": {},
+        }
     )
-    assert subscribe["payload"]["cursors"] == {
-        "session-1": {"seq": 10, "epoch": "epoch-new"}
-    }
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    events = client.subscribe_events("session-1")
+
+    with pytest.raises(KimiServerProtocolError, match="after public-v1 materialization"):
+        await asyncio.wait_for(anext(events), 1)
+    await events.aclose()
 
 
 async def test_supervisor_restarts_with_exponential_backoff() -> None:
     startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
+    version = FakeCompletedProcess("0.28.1\n")
     first = FakeProcess(startup)
     second = FakeProcess(startup)
     third = FakeProcess(startup)
-    factory = FakeProcessFactory([first, second, third])
+    factory = FakeProcessFactory([version, first, second, third])
     delays: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
@@ -462,25 +709,36 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     try:
         assert (await supervisor.start()).generation == 1
         first.crash(7)
-        assert (
-            await supervisor.wait_until_ready(after_generation=1)
-        ).generation == 2
+        assert (await supervisor.wait_until_ready(after_generation=1)).generation == 2
         second.crash(8)
-        assert (
-            await supervisor.wait_until_ready(after_generation=2)
-        ).generation == 3
+        assert (await supervisor.wait_until_ready(after_generation=2)).generation == 3
     finally:
         await supervisor.stop()
 
     assert delays == [0.1, 0.2]
     assert third.terminated is True
-    assert factory.calls[0][0] == (
+    assert factory.calls[0][0] == ("kimi", "--version")
+    assert factory.calls[1][0] == (
         "kimi",
-        "server",
-        "run",
-        "--foreground",
+        "web",
+        "--no-open",
+        "--host",
+        "127.0.0.1",
         "--port",
         "43123",
-        "--keep-alive",
     )
-    assert factory.calls[0][1]["start_new_session"] is True
+    assert factory.calls[1][1]["start_new_session"] is True
+    assert [call[0] for call in factory.calls].count(("kimi", "--version")) == 1
+
+
+async def test_supervisor_rejects_wrong_executable_version_before_start() -> None:
+    factory = FakeProcessFactory([FakeCompletedProcess("0.27.0\n")])
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with pytest.raises(KimiServerStartupError, match="expected 0.28.1, got 0.27.0"):
+        await supervisor.start()
+
+    assert [call[0] for call in factory.calls] == [("kimi", "--version")]

@@ -5,22 +5,38 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .base import InboundHandler, InboundMessage
+from .base import (
+    CardAction,
+    CardActionHandler,
+    InboundFile,
+    InboundHandler,
+    InboundImage,
+    InboundMessage,
+)
 
 
 LOGGER = logging.getLogger(__name__)
-UNSUPPORTED_MESSAGE = "Unsupported in v1; please send text."
+UNSUPPORTED_MESSAGE = "Unsupported message type; send text, an image, or a file."
 FEISHU_TEXT_LIMIT = 7000
 
 
 class FeishuAPIError(RuntimeError):
     """A Feishu message operation failed."""
+
+
+@dataclass(frozen=True, slots=True)
+class _DownloadedResource:
+    data: bytes
+    name: str
+    media_type: str
 
 
 class _TextTransport(Protocol):
@@ -29,6 +45,21 @@ class _TextTransport(Protocol):
     ) -> str: ...
 
     async def edit_text(self, message_id: str, text: str) -> None: ...
+
+    async def send_card(
+        self, receive_id: str, receive_id_type: str, card: dict[str, Any]
+    ) -> str: ...
+
+    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None: ...
+
+    async def download_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+        *,
+        name: str | None = None,
+    ) -> _DownloadedResource: ...
 
 
 class _WebSocketRunner(Protocol):
@@ -59,9 +90,7 @@ class _LarkTextTransport:
         )
         return self._client
 
-    async def send_text(
-        self, receive_id: str, receive_id_type: str, text: str
-    ) -> str:
+    async def send_text(self, receive_id: str, receive_id_type: str, text: str) -> str:
         from lark_oapi.api.im.v1 import (
             CreateMessageRequest,
             CreateMessageRequestBody,
@@ -110,6 +139,94 @@ class _LarkTextTransport:
         response = await client.im.v1.message.aupdate(request)
         _raise_for_response(response, "edit message")
 
+    async def send_card(
+        self, receive_id: str, receive_id_type: str, card: dict[str, Any]
+    ) -> str:
+        from lark_oapi.api.im.v1 import (
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+        )
+
+        body = (
+            CreateMessageRequestBody.builder()
+            .receive_id(receive_id)
+            .msg_type("interactive")
+            .content(json.dumps(card, ensure_ascii=False))
+            .build()
+        )
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(body)
+            .build()
+        )
+        client = self._get_client()
+        response = await client.im.v1.message.acreate(request)
+        _raise_for_response(response, "send card")
+        message_id = getattr(getattr(response, "data", None), "message_id", None)
+        if not isinstance(message_id, str) or not message_id:
+            raise FeishuAPIError("Feishu send-card response omitted message_id")
+        return message_id
+
+    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None:
+        from lark_oapi.api.im.v1 import (
+            PatchMessageRequest,
+            PatchMessageRequestBody,
+        )
+
+        body = (
+            PatchMessageRequestBody.builder()
+            .content(json.dumps(card, ensure_ascii=False))
+            .build()
+        )
+        request = (
+            PatchMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(body)
+            .build()
+        )
+        client = self._get_client()
+        response = await client.im.v1.message.apatch(request)
+        _raise_for_response(response, "edit card")
+
+    async def download_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        resource_type: str,
+        *,
+        name: str | None = None,
+    ) -> _DownloadedResource:
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(file_key)
+            .type(resource_type)
+            .build()
+        )
+        client = self._get_client()
+        response = await client.im.v1.message_resource.aget(request)
+        _raise_for_response(response, "download message resource")
+        resource_file = getattr(response, "file", None)
+        if resource_file is None:
+            raise FeishuAPIError("Feishu resource response omitted file data")
+        filename = name or getattr(response, "file_name", None) or file_key
+        headers = getattr(getattr(response, "raw", None), "headers", {}) or {}
+        content_type = headers.get("content-type") or headers.get("Content-Type")
+        if isinstance(content_type, str):
+            media_type = content_type.partition(";")[0].strip()
+        else:
+            media_type = ""
+        if not media_type:
+            media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return _DownloadedResource(
+            data=resource_file.read(),
+            name=filename,
+            media_type=media_type,
+        )
+
 
 class _LarkWebSocketRunner:
     """Run the SDK's blocking WebSocket client in a worker thread."""
@@ -118,11 +235,13 @@ class _LarkWebSocketRunner:
         self,
         app_id: str,
         app_secret: str,
-        callback: Callable[[Any], None],
+        message_callback: Callable[[Any], None],
+        card_callback: Callable[[Any], Any],
     ) -> None:
         self._app_id = app_id
         self._app_secret = app_secret
-        self._callback = callback
+        self._message_callback = message_callback
+        self._card_callback = card_callback
         self._client: Any | None = None
         self._sdk_loop: asyncio.AbstractEventLoop | None = None
         self._initialized = threading.Event()
@@ -145,14 +264,15 @@ class _LarkWebSocketRunner:
         try:
             event_handler = (
                 lark.EventDispatcherHandler.builder("", "")
-                .register_p2_im_message_receive_v1(self._callback)
+                .register_p2_im_message_receive_v1(self._message_callback)
+                .register_p2_card_action_trigger(self._card_callback)
                 .build()
             )
             self._client = lark.ws.Client(
                 self._app_id,
                 self._app_secret,
                 event_handler=event_handler,
-                log_level=lark.LogLevel.INFO,
+                log_level=lark.LogLevel.WARNING,
             )
             self._sdk_loop = sdk_loop
             self._initialized.set()
@@ -183,9 +303,7 @@ class _LarkWebSocketRunner:
                 if self._client is not None:
                     try:
                         sdk_loop.run_until_complete(
-                            asyncio.wait_for(
-                                self._client._disconnect(), timeout=2.0
-                            )
+                            asyncio.wait_for(self._client._disconnect(), timeout=2.0)
                         )
                     except Exception:
                         LOGGER.warning(
@@ -215,9 +333,7 @@ class _LarkWebSocketRunner:
 def _raise_for_response(response: Any, operation: str) -> None:
     if response.success():
         return
-    raise FeishuAPIError(
-        f"Feishu {operation} failed: {response.code} {response.msg}"
-    )
+    raise FeishuAPIError(f"Feishu {operation} failed: {response.code} {response.msg}")
 
 
 class FeishuAdapter:
@@ -233,7 +349,9 @@ class FeishuAdapter:
         *,
         message_limit: int = FEISHU_TEXT_LIMIT,
         transport: _TextTransport | None = None,
-        ws_factory: Callable[[Callable[[Any], None]], _WebSocketRunner]
+        ws_factory: Callable[
+            [Callable[[Any], None], Callable[[Any], Any]], _WebSocketRunner
+        ]
         | None = None,
     ) -> None:
         if not app_id or not app_secret:
@@ -248,6 +366,7 @@ class FeishuAdapter:
         self._ws_factory = ws_factory
 
         self._on_message: InboundHandler | None = None
+        self._on_card_action: CardActionHandler | None = None
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._ws: _WebSocketRunner | None = None
         self._ws_thread: threading.Thread | None = None
@@ -258,22 +377,28 @@ class FeishuAdapter:
         self._seen_order: deque[str] = deque()
         self._started_at_ms = 0
 
-    async def start(self, on_message: InboundHandler) -> None:
+    async def start(
+        self,
+        on_message: InboundHandler,
+        on_card_action: CardActionHandler,
+    ) -> None:
         if self._ws_thread is not None:
             return
         self._on_message = on_message
+        self._on_card_action = on_card_action
         self._main_loop = asyncio.get_running_loop()
         self._started_at_ms = int(time.time() * 1000)
         if self._transport is None:
-            self._transport = _LarkTextTransport(
-                self._app_id, self._app_secret
-            )
+            self._transport = _LarkTextTransport(self._app_id, self._app_secret)
         factory = self._ws_factory or (
-            lambda callback: _LarkWebSocketRunner(
-                self._app_id, self._app_secret, callback
+            lambda message_callback, card_callback: _LarkWebSocketRunner(
+                self._app_id,
+                self._app_secret,
+                message_callback,
+                card_callback,
             )
         )
-        self._ws = factory(self._dispatch_sdk_event)
+        self._ws = factory(self._dispatch_sdk_event, self._dispatch_sdk_card_action)
         self._ws_error = None
         ws = self._ws
 
@@ -318,14 +443,25 @@ class FeishuAdapter:
         receive_id_type = self._receive_id_types.get(
             user_id, "open_id" if user_id.startswith("ou_") else "user_id"
         )
-        return await self._transport.send_text(
-            user_id, receive_id_type, text
-        )
+        return await self._transport.send_text(user_id, receive_id_type, text)
 
     async def edit_text(self, message_id: str, text: str) -> None:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
         await self._transport.edit_text(message_id, text)
+
+    async def send_card(self, user_id: str, card: dict[str, Any]) -> str:
+        if self._transport is None:
+            raise RuntimeError("Feishu adapter is not started")
+        receive_id_type = self._receive_id_types.get(
+            user_id, "open_id" if user_id.startswith("ou_") else "user_id"
+        )
+        return await self._transport.send_card(user_id, receive_id_type, card)
+
+    async def edit_card(self, message_id: str, card: dict[str, Any]) -> None:
+        if self._transport is None:
+            raise RuntimeError("Feishu adapter is not started")
+        await self._transport.edit_card(message_id, card)
 
     async def handle_event(self, data: Any) -> None:
         """Normalize one ``im.message.receive_v1`` SDK event."""
@@ -364,13 +500,54 @@ class FeishuAdapter:
             return
         self._receive_id_types[recipient] = "open_id" if open_id else "user_id"
 
-        if message.message_type != "text":
+        chat_id = message.chat_id
+        if not isinstance(chat_id, str) or not chat_id:
+            return
+
+        content = json.loads(message.content)
+        if not isinstance(content, dict):
+            raise ValueError("Feishu message content must be an object")
+        text = ""
+        image_keys: list[str] = []
+        file_specs: list[tuple[str, str | None]] = []
+        if message.message_type == "text":
+            text_value = content.get("text")
+            if not isinstance(text_value, str):
+                raise ValueError("Feishu text message content omitted text")
+            text = text_value
+        elif message.message_type == "image":
+            image_keys = [_required_string(content, "image_key")]
+        elif message.message_type == "file":
+            file_specs = [
+                (
+                    _required_string(content, "file_key"),
+                    content.get("file_name")
+                    if isinstance(content.get("file_name"), str)
+                    else None,
+                )
+            ]
+        elif message.message_type == "post":
+            text, image_keys = _parse_post_content(content)
+        else:
             await self.send_text(recipient, UNSUPPORTED_MESSAGE)
             return
-        content = json.loads(message.content)
-        text = content.get("text")
-        if not isinstance(text, str):
-            raise ValueError("Feishu text message content omitted text")
+
+        images = tuple(
+            await asyncio.gather(
+                *(
+                    self._download_image(message_id, image_key)
+                    for image_key in image_keys
+                )
+            )
+        )
+        files = tuple(
+            await asyncio.gather(
+                *(
+                    self._download_file(message_id, file_key, filename)
+                    for file_key, filename in file_specs
+                )
+            )
+        )
         if self._on_message is None:
             raise RuntimeError("Feishu adapter is not started")
         bot_id = getattr(getattr(data, "header", None), "app_id", None)
@@ -383,8 +560,79 @@ class FeishuAdapter:
                 user_name=None,
                 text=text,
                 timestamp=create_time / 1000,
+                message_id=message_id,
+                conversation_id=chat_id,
+                images=images,
+                files=files,
             ),
         )
+
+    async def handle_card_action_event(self, data: Any) -> None:
+        """Normalize one ``card.action.trigger`` SDK callback."""
+
+        event = data.event
+        operator = event.operator
+        identities = {
+            value
+            for value in (operator.open_id, operator.user_id)
+            if isinstance(value, str) and value
+        }
+        if not identities.intersection(self._allowed_users):
+            LOGGER.info("ignored a card action from a non-allowlisted Feishu user")
+            return
+
+        header = getattr(data, "header", None)
+        event_id = getattr(header, "event_id", None)
+        if isinstance(event_id, str) and event_id:
+            if self._remember_message(f"card:{event_id}"):
+                return
+
+        recipient = operator.open_id or operator.user_id
+        if not isinstance(recipient, str) or not recipient:
+            return
+        self._receive_id_types[recipient] = "open_id" if operator.open_id else "user_id"
+        context = event.context
+        message_id = context.open_message_id
+        chat_id = context.open_chat_id
+        if not isinstance(message_id, str) or not message_id:
+            return
+        if not isinstance(chat_id, str) or not chat_id:
+            return
+        if self._on_card_action is None:
+            raise RuntimeError("Feishu adapter is not started")
+        value = event.action.value
+        form_value = event.action.form_value
+        await self._on_card_action(
+            self,
+            CardAction(
+                platform=self.name,
+                bot_id=getattr(header, "app_id", None) or self._app_id,
+                user_id=recipient,
+                conversation_id=chat_id,
+                message_id=message_id,
+                value=value if isinstance(value, dict) else {},
+                form_value=(form_value if isinstance(form_value, dict) else {}),
+                action_name=(
+                    event.action.name if isinstance(event.action.name, str) else None
+                ),
+            ),
+        )
+
+    async def _download_image(self, message_id: str, image_key: str) -> InboundImage:
+        assert self._transport is not None
+        resource = await self._transport.download_resource(
+            message_id, image_key, "image"
+        )
+        return InboundImage(resource.data, resource.media_type)
+
+    async def _download_file(
+        self, message_id: str, file_key: str, filename: str | None
+    ) -> InboundFile:
+        assert self._transport is not None
+        resource = await self._transport.download_resource(
+            message_id, file_key, "file", name=filename
+        )
+        return InboundFile(resource.data, resource.name, resource.media_type)
 
     def _dispatch_sdk_event(self, data: Any) -> None:
         loop = self._main_loop
@@ -392,9 +640,27 @@ class FeishuAdapter:
             return
         loop.call_soon_threadsafe(self._start_inbound_task, data)
 
+    def _dispatch_sdk_card_action(self, data: Any) -> Any:
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+
+        loop = self._main_loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._start_card_action_task, data)
+        return P2CardActionTriggerResponse()
+
     def _start_inbound_task(self, data: Any) -> None:
         task = asyncio.create_task(
             self.handle_event(data), name="feishu-inbound-message"
+        )
+        self._inbound_tasks.add(task)
+        task.add_done_callback(self._inbound_done)
+
+    def _start_card_action_task(self, data: Any) -> None:
+        task = asyncio.create_task(
+            self.handle_card_action_event(data),
+            name="feishu-card-action",
         )
         self._inbound_tasks.add(task)
         task.add_done_callback(self._inbound_done)
@@ -428,3 +694,37 @@ async def _join_worker(thread: threading.Thread) -> None:
     while thread.is_alive():
         await asyncio.sleep(0.05)
     thread.join()
+
+
+def _required_string(content: dict[str, Any], key: str) -> str:
+    value = content.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Feishu message content omitted {key}")
+    return value
+
+
+def _parse_post_content(content: dict[str, Any]) -> tuple[str, list[str]]:
+    blocks = content.get("content")
+    if not isinstance(blocks, list):
+        raise ValueError("Feishu post message content omitted content blocks")
+    text_parts: list[str] = []
+    title = content.get("title")
+    if isinstance(title, str) and title:
+        text_parts.append(title)
+    image_keys: list[str] = []
+    for block in blocks:
+        if not isinstance(block, list):
+            continue
+        line: list[str] = []
+        for element in block:
+            if not isinstance(element, dict):
+                continue
+            if element.get("tag") == "img":
+                image_keys.append(_required_string(element, "image_key"))
+            elif element.get("tag") in {"text", "a"}:
+                value = element.get("text")
+                if isinstance(value, str):
+                    line.append(value)
+        if line:
+            text_parts.append("".join(line))
+    return "\n".join(text_parts), image_keys

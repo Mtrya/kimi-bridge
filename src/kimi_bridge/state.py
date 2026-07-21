@@ -12,6 +12,7 @@ from typing import Any
 
 DEFAULT_STATE_PATH = Path.home() / ".kimi-bridge" / "state.json"
 STATE_VERSION = 1
+PERMISSION_MODES = frozenset({"manual", "auto", "yolo"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +21,7 @@ class ConversationBinding:
 
     session_id: str
     workspace: str
-    permission_mode: str = "auto"
+    permission_mode: str = "manual"
 
 
 @dataclass(slots=True)
@@ -59,8 +60,10 @@ class StateStore:
                 raise TypeError("binding session_id must be a non-empty string")
             if not isinstance(workspace, str) or not workspace:
                 raise TypeError("binding workspace must be a non-empty string")
-            if permission_mode != "auto":
-                raise ValueError("only permission_mode='auto' is supported")
+            if permission_mode not in PERMISSION_MODES:
+                raise ValueError(
+                    "binding permission_mode must be manual, auto, or yolo"
+                )
             bindings[conversation_key] = ConversationBinding(
                 session_id=session_id,
                 workspace=workspace,

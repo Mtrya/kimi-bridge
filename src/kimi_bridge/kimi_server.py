@@ -25,7 +25,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 
 LOGGER = logging.getLogger(__name__)
-EXPECTED_SERVER_VERSION = "0.27.0"
+EXPECTED_SERVER_VERSION = "0.28.1"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SERVER_URL_RE = re.compile(
@@ -89,8 +89,7 @@ class ServerConnection:
 def parse_server_startup_line(line: str) -> tuple[int, str] | None:
     """Extract ``(port, token)`` from a kimi-server startup line.
 
-    kimi 0.27.0 labels the URL differently depending on its output mode, so
-    the stable contract is the loopback URL and fragment rather than its human
+    The stable contract is the loopback URL and fragment rather than its human
     label. ANSI styling is ignored.
     """
 
@@ -112,7 +111,7 @@ def _pick_free_port() -> int:
 
 
 class KimiServerSupervisor:
-    """Run ``kimi server`` as a restartable child process."""
+    """Run ``kimi web`` as a restartable foreground child process."""
 
     def __init__(
         self,
@@ -180,6 +179,7 @@ class KimiServerSupervisor:
         if self._task is not None:
             return await self.wait_until_ready()
 
+        await self._check_executable_version()
         self._port = self._preferred_port or self._port_picker()
         self._stopping.clear()
         self._failure = None
@@ -226,13 +226,15 @@ class KimiServerSupervisor:
 
         async with self._state_changed:
             await self._state_changed.wait_for(
-                lambda: self._failure is not None
-                or self._stopping.is_set()
-                or (
-                    self._connection is not None
-                    and (
-                        after_generation is None
-                        or self._connection.generation > after_generation
+                lambda: (
+                    self._failure is not None
+                    or self._stopping.is_set()
+                    or (
+                        self._connection is not None
+                        and (
+                            after_generation is None
+                            or self._connection.generation > after_generation
+                        )
                     )
                 )
             )
@@ -241,6 +243,50 @@ class KimiServerSupervisor:
             if self._connection is None:
                 raise RuntimeError("kimi server supervisor is stopping")
             return self._connection
+
+    async def _check_executable_version(self) -> None:
+        try:
+            process = await self._process_factory(
+                self._executable,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError as exc:
+            raise KimiServerStartupError(
+                "kimi-code is not installed or 'kimi' is not on PATH"
+            ) from exc
+
+        try:
+            if process.stdout is None:
+                raise KimiServerStartupError("kimi --version stdout was not captured")
+            raw_output = await asyncio.wait_for(
+                process.stdout.read(), self._startup_timeout
+            )
+            returncode = await asyncio.wait_for(
+                process.wait(), self._startup_timeout
+            )
+        except TimeoutError as exc:
+            await self._terminate_process(process)
+            raise KimiServerStartupError(
+                f"kimi --version did not finish within {self._startup_timeout:g}s"
+            ) from exc
+        except BaseException:
+            await self._terminate_process(process)
+            raise
+
+        output = _redact_tokens(raw_output.decode("utf-8", errors="replace")).strip()
+        if returncode != 0:
+            raise KimiServerStartupError(
+                f"kimi --version exited with status {returncode}: "
+                f"{output or 'no output'}"
+            )
+        if output != EXPECTED_SERVER_VERSION:
+            raise KimiServerStartupError(
+                "unsupported kimi-code executable version: "
+                f"expected {EXPECTED_SERVER_VERSION}, got {output or 'no output'}"
+            )
+        LOGGER.info("kimi-code executable version: %s", output)
 
     async def _supervise(self) -> None:
         delay = self._initial_backoff
@@ -268,12 +314,12 @@ class KimiServerSupervisor:
         assert self._port is not None
         command = (
             self._executable,
-            "server",
-            "run",
-            "--foreground",
+            "web",
+            "--no-open",
+            "--host",
+            "127.0.0.1",
             "--port",
             str(self._port),
-            "--keep-alive",
         )
         try:
             process = await self._process_factory(
@@ -295,7 +341,7 @@ class KimiServerSupervisor:
                 )
             except TimeoutError as exc:
                 raise KimiServerStartupError(
-                    f"kimi server did not print its startup URL within "
+                    f"kimi web did not print its startup URL within "
                     f"{self._startup_timeout:g}s"
                 ) from exc
 
@@ -375,9 +421,7 @@ class KimiServerSupervisor:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(process.wait(), self._shutdown_timeout)
 
-    async def _publish_connection(
-        self, connection: ServerConnection | None
-    ) -> None:
+    async def _publish_connection(self, connection: ServerConnection | None) -> None:
         async with self._state_changed:
             self._connection = connection
             self._state_changed.notify_all()
@@ -472,19 +516,14 @@ class KimiServerClient:
             )
         return model
 
-    async def check_server_version(
-        self, expected: str = EXPECTED_SERVER_VERSION
-    ) -> str:
+    async def check_server_version(self) -> str:
         metadata = await self.meta()
         server_version = str(metadata["server_version"])
         LOGGER.info("kimi server version: %s", server_version)
-        if server_version != expected:
-            LOGGER.warning(
-                "UNEXPECTED KIMI SERVER VERSION: expected %s, got %s; "
-                "refresh the OpenAPI and AsyncAPI snapshots before relying on "
-                "this client",
-                expected,
-                server_version,
+        if server_version != EXPECTED_SERVER_VERSION:
+            raise KimiServerStartupError(
+                "unsupported kimi server version: "
+                f"expected {EXPECTED_SERVER_VERSION}, got {server_version}"
             )
         return server_version
 
@@ -507,22 +546,6 @@ class KimiServerClient:
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/sessions/{session_id}")
-
-    async def resume_session(self, session_id: str) -> None:
-        """Materialize a stored session in the daemon runtime.
-
-        kimi 0.27.0 advertises ``sessionLifecycleService.resume`` through its
-        ``/api/v2/channels`` catalog. Stored sessions remain visible through
-        the v1 REST API after a daemon restart, but WebSocket subscriptions are
-        rejected until this lifecycle action loads the session.
-        """
-
-        await self._request(
-            "POST",
-            "/sessionLifecycleService/resume",
-            json_body=session_id,
-            api_prefix="/api/v2",
-        )
 
     async def list_sessions(
         self,
@@ -551,11 +574,15 @@ class KimiServerClient:
         return list(data["items"])
 
     async def submit_prompt(
-        self, session_id: str, text: str, **profile: Any
+        self,
+        session_id: str,
+        content: str | list[dict[str, Any]],
+        **profile: Any,
     ) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "content": [{"type": "text", "text": text}]
-        }
+        content_items = (
+            [{"type": "text", "text": content}] if isinstance(content, str) else content
+        )
+        payload: dict[str, Any] = {"content": content_items}
         payload.update(profile)
         return await self._request(
             "POST",
@@ -563,10 +590,85 @@ class KimiServerClient:
             json_body=payload,
         )
 
-    async def abort_prompt(self, session_id: str) -> bool:
-        prompts = await self._request(
-            "GET", f"/sessions/{session_id}/prompts"
+    async def steer_prompts(self, session_id: str, prompt_ids: list[str]) -> bool:
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/prompts:steer",
+            json_body={"prompt_ids": prompt_ids},
         )
+        return bool(data["steered"])
+
+    async def update_profile(
+        self, session_id: str, **agent_config: Any
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/sessions/{session_id}/profile",
+            json_body={"agent_config": agent_config},
+        )
+
+    async def list_approvals(self, session_id: str) -> list[dict[str, Any]]:
+        try:
+            data = await self._request(
+                "GET",
+                f"/sessions/{session_id}/approvals",
+                params={"status": "pending"},
+            )
+        except KimiServerAPIError as exc:
+            if exc.code == 40001:
+                return []
+            raise
+        return list(data["items"])
+
+    async def resolve_approval(
+        self,
+        session_id: str,
+        approval_id: str,
+        decision: Literal["approved", "rejected", "cancelled"],
+    ) -> bool:
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/approvals/{approval_id}",
+            json_body={"decision": decision},
+        )
+        return bool(data["resolved"])
+
+    async def list_questions(self, session_id: str) -> list[dict[str, Any]]:
+        try:
+            data = await self._request(
+                "GET",
+                f"/sessions/{session_id}/questions",
+                params={"status": "pending"},
+            )
+        except KimiServerAPIError as exc:
+            if exc.code == 40001:
+                return []
+            raise
+        return list(data["items"])
+
+    async def resolve_question(
+        self,
+        session_id: str,
+        question_id: str,
+        answers: dict[str, dict[str, Any]],
+    ) -> bool:
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/questions/{question_id}",
+            json_body={"answers": answers, "method": "click"},
+        )
+        return bool(data["resolved"])
+
+    async def dismiss_question(self, session_id: str, question_id: str) -> bool:
+        data = await self._request(
+            "POST",
+            f"/sessions/{session_id}/questions/{question_id}:dismiss",
+            json_body={},
+        )
+        return bool(data["dismissed"])
+
+    async def abort_prompt(self, session_id: str) -> bool:
+        prompts = await self._request("GET", f"/sessions/{session_id}/prompts")
         active = prompts["active"]
         if active is None:
             return False
@@ -593,9 +695,7 @@ class KimiServerClient:
         ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
         await asyncio.wait_for(ready.wait(), timeout)
 
-    async def subscribe_events(
-        self, session_id: str
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def subscribe_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
         """Yield session events and reconnect from their cursor.
 
         Only one subscription generator may own the socket at a time. On a
@@ -617,7 +717,8 @@ class KimiServerClient:
                 connection = await self._connection_info()
                 ws_url = _websocket_url(connection.base_url)
                 try:
-                    # Confirmed against kimi 0.27.0: WebSocket auth uses the
+                    await self._materialize_session(session_id, connection)
+                    # Confirmed against kimi 0.28.1: WebSocket auth uses the
                     # same Bearer header as REST; no query token or hello field
                     # is required.
                     async with self._ws_connect(
@@ -636,27 +737,10 @@ class KimiServerClient:
                         ack_payload = subscribe_ack["payload"]
 
                         if session_id in ack_payload.get("not_found", []):
-                            # Stored sessions are REST-readable immediately
-                            # after a daemon restart but don't enter the WS
-                            # registry until the server loads them again. A
-                            # snapshot distinguishes that state from a truly
-                            # missing session and supplies the replay cursor.
-                            cursor, resync_event = await self._snapshot_resync(
-                                session_id, "session_not_loaded"
+                            raise KimiServerProtocolError(
+                                "session was not accepted after public-v1 "
+                                f"materialization: {session_id!r}"
                             )
-                            yield resync_event
-                            LOGGER.warning(
-                                "session %s is not loaded in the WebSocket "
-                                "registry yet; retrying in %.2fs",
-                                session_id,
-                                reconnect_delay,
-                            )
-                            await self._sleep(reconnect_delay)
-                            reconnect_delay = min(
-                                reconnect_delay * 2,
-                                self._reconnect_max_backoff,
-                            )
-                            continue
                         if session_id in ack_payload.get("resync_required", []):
                             cursor, resync_event = await self._snapshot_resync(
                                 session_id, "subscription_cursor_rejected"
@@ -693,7 +777,9 @@ class KimiServerClient:
                                     reason = payload.get("reason")
                                     cursor, resync_event = await self._snapshot_resync(
                                         session_id,
-                                        reason if isinstance(reason, str) else "server_requested",
+                                        reason
+                                        if isinstance(reason, str)
+                                        else "server_requested",
                                     )
                                     yield resync_event
                                     must_reconnect = True
@@ -786,9 +872,10 @@ class KimiServerClient:
         *,
         json_body: Any = None,
         params: dict[str, Any] | None = None,
-        api_prefix: str = "/api/v1",
+        connection: ServerConnection | None = None,
     ) -> Any:
-        connection = await self._connection_info()
+        if connection is None:
+            connection = await self._connection_info()
         kwargs: dict[str, Any] = {
             "headers": {"Authorization": f"Bearer {connection.token}"}
         }
@@ -797,7 +884,7 @@ class KimiServerClient:
         if params is not None:
             kwargs["params"] = params
         response = await self._http.request(
-            method, f"{connection.base_url}{api_prefix}{path}", **kwargs
+            method, f"{connection.base_url}/api/v1{path}", **kwargs
         )
         response.raise_for_status()
         envelope = response.json()
@@ -809,6 +896,17 @@ class KimiServerClient:
                 details=envelope.get("details"),
             )
         return envelope["data"]
+
+    async def _materialize_session(
+        self, session_id: str, connection: ServerConnection
+    ) -> None:
+        """Load a stored session into the current WebSocket registry."""
+
+        await self._request(
+            "GET",
+            f"/sessions/{session_id}/status",
+            connection=connection,
+        )
 
     async def _connection_info(self) -> ServerConnection:
         if self._supervisor is not None:
@@ -860,9 +958,7 @@ class KimiServerClient:
             {"type": "subscribe", "id": request_id, "payload": payload},
         )
         pending_frames: list[dict[str, Any]] = []
-        ack = await self._wait_for_ack(
-            ws, request_id, pending_frames=pending_frames
-        )
+        ack = await self._wait_for_ack(ws, request_id, pending_frames=pending_frames)
         return ack, pending_frames
 
     async def _wait_for_ack(
@@ -879,11 +975,7 @@ class KimiServerClient:
                 continue
             if frame.get("type") == "error":
                 self._raise_ws_error(frame)
-            if (
-                pending_frames is not None
-                and "seq" in frame
-                and "payload" in frame
-            ):
+            if pending_frames is not None and "seq" in frame and "payload" in frame:
                 pending_frames.append(frame)
                 continue
             if frame.get("type") != "ack" or frame.get("id") != request_id:

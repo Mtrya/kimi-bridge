@@ -4,7 +4,7 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## Project state
 
-**The managed server client and Feishu text-message bridge are implemented.** Interactive approvals, media handling, and Telegram remain future work. All major decisions are locked in README.md ("Decisions (locked)") — treat them as requirements, not suggestions; changing one requires explicit user sign-off and a README update in the same change. The few remaining open questions are listed in README.md; do not silently "fill them in" with assumptions — surface them to the user instead. The phased execution roadmap lives in `roadmap/` (local, gitignored working docs; `roadmap/reference/` holds snapshots of the kimi server OpenAPI/AsyncAPI specs). Each phase doc there is self-contained and names its own validation and exit criteria.
+**The managed server client and Feishu bridge are implemented, including interactive approvals/questions, prompt steering, and inbound media.** Telegram remains future work. All major decisions are locked in README.md ("Decisions (locked)") — treat them as requirements, not suggestions; changing one requires explicit user sign-off and a README update in the same change. The few remaining open questions are listed in README.md; do not silently "fill them in" with assumptions — surface them to the user instead. The phased execution roadmap lives in `roadmap/` (local, gitignored working docs; `roadmap/reference/` holds snapshots of the kimi server OpenAPI/AsyncAPI specs). Each phase doc there is self-contained and names its own validation and exit criteria.
 
 ## Layout
 
@@ -15,8 +15,9 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## kimi server API
 
-- Start with `kimi server run --foreground --port <p> --keep-alive`; the bearer token is printed at startup.
+- The supported runtime is exactly kimi-code 0.28.1. Start it with `kimi web --no-open --host 127.0.0.1 --port <p>`; it stays in the foreground and prints the bearer token at startup.
 - Specs are served at runtime: `GET /openapi.json` (REST) and `GET /asyncapi.json` (WebSocket). Consult them instead of guessing field names; note the API is 0.x and may shift between kimi-code releases — check `server_version` in `/api/v1/meta`.
+- Stored sessions must be materialized through `GET /api/v1/sessions/{session_id}/status` before each initial or reconnected WebSocket subscription. This lifecycle detail belongs only in `kimi_server.py`.
 - Auth: `Authorization: Bearer <token>` header on REST and WS.
 
 ## Conventions

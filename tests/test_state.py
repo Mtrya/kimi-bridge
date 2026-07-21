@@ -32,7 +32,8 @@ def test_missing_state_is_empty(tmp_path: Path) -> None:
     assert StateStore(tmp_path / "missing.json").load() == BridgeState()
 
 
-def test_non_auto_binding_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["manual", "auto", "yolo"])
+def test_all_permission_modes_round_trip(tmp_path: Path, mode: str) -> None:
     path = tmp_path / "state.json"
     path.write_text(
         json.dumps(
@@ -42,7 +43,7 @@ def test_non_auto_binding_is_rejected(tmp_path: Path) -> None:
                     "key": {
                         "session_id": "session-1",
                         "workspace": "/tmp/project",
-                        "permission_mode": "manual",
+                        "permission_mode": mode,
                     }
                 },
             }
@@ -50,5 +51,26 @@ def test_non_auto_binding_is_rejected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="permission_mode='auto'"):
+    assert StateStore(path).load().bindings["key"].permission_mode == mode
+
+
+def test_invalid_permission_mode_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "bindings": {
+                    "key": {
+                        "session_id": "session-1",
+                        "workspace": "/tmp/project",
+                        "permission_mode": "unsafe",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="manual, auto, or yolo"):
         StateStore(path).load()

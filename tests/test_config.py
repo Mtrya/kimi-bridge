@@ -31,6 +31,8 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
             [
                 f'default_workspace = "{workspace}"',
                 "edit_throttle_seconds = 2.25",
+                "interaction_timeout_seconds = 42",
+                'inbox_subdir = ".bridge-files"',
                 "",
                 "[feishu]",
                 'app_id = "cli_test"',
@@ -45,6 +47,8 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
 
     assert config.default_workspace == workspace
     assert config.edit_throttle_seconds == 2.25
+    assert config.interaction_timeout_seconds == 42
+    assert config.inbox_subdir == ".bridge-files"
     assert config.feishu == FeishuConfig(
         app_id="cli_test",
         app_secret="secret-value",
@@ -58,6 +62,14 @@ def test_rejects_partial_feishu_credentials(tmp_path: Path) -> None:
     path.write_text('[feishu]\napp_id = "cli_test"\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="must be set together"):
+        load_config(path)
+
+
+def test_rejects_inbox_path_that_escapes_workspace(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('inbox_subdir = "../outside"\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="inside the session workspace"):
         load_config(path)
 
 
