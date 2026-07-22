@@ -11,12 +11,24 @@ import tempfile
 import tomllib
 import zipfile
 from collections.abc import Sequence
+from email.parser import Parser
+from email.policy import default
 from pathlib import Path
 
 
 REQUIRED_PACKAGE_FILES = {
     "kimi_bridge/assets/video-cover.png",
     "kimi_bridge/supported-kimi-code-versions.json",
+}
+REQUIRED_SOURCE_FILES = {
+    "AGENTS.md",
+    "INSTALL.md",
+    "LICENSE",
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/COMMANDS.md",
+    "docs/CONFIGURATION.md",
+    "docs/kimi-bridge.service",
 }
 PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
     "project"
@@ -62,6 +74,11 @@ def _check_wheel(path: Path) -> None:
         ]
         if len(metadata_names) != 1:
             raise RuntimeError("wheel does not contain exactly one METADATA file")
+        license_names = [
+            name for name in names if name.endswith(".dist-info/licenses/LICENSE")
+        ]
+        if len(license_names) != 1:
+            raise RuntimeError("wheel does not contain exactly one MIT license file")
         metadata = archive.read(metadata_names[0]).decode()
     _check_metadata(metadata)
 
@@ -71,6 +88,7 @@ def _check_source(path: Path) -> None:
         names = archive.getnames()
         root = names[0].split("/", 1)[0]
         expected = {f"{root}/src/{name}" for name in REQUIRED_PACKAGE_FILES}
+        expected.update(f"{root}/{name}" for name in REQUIRED_SOURCE_FILES)
         missing = expected - set(names)
         if missing:
             raise RuntimeError(f"source distribution is missing: {sorted(missing)}")
@@ -82,14 +100,37 @@ def _check_source(path: Path) -> None:
 
 
 def _check_metadata(metadata: str) -> None:
-    required = (
-        "Name: kimi-bridge\n",
-        f"Version: {PROJECT_VERSION}\n",
-        "Requires-Python: >=3.11\n",
-    )
-    missing = [item.strip() for item in required if item not in metadata]
-    if missing:
-        raise RuntimeError(f"distribution metadata is missing: {missing}")
+    parsed = Parser(policy=default).parsestr(metadata)
+    expected = {
+        "Name": "kimi-bridge",
+        "Version": PROJECT_VERSION,
+        "Summary": "Control a local Kimi Code agent from Feishu or Telegram",
+        "Requires-Python": ">=3.11",
+        "License-Expression": "MIT",
+        "Description-Content-Type": "text/markdown",
+    }
+    mismatches = {
+        name: (parsed.get(name), value)
+        for name, value in expected.items()
+        if parsed.get(name) != value
+    }
+    if mismatches:
+        raise RuntimeError(f"distribution metadata mismatches: {mismatches}")
+    if parsed.get_all("License-File") != ["LICENSE"]:
+        raise RuntimeError("distribution metadata does not identify LICENSE")
+    if parsed.get_all("Provides-Extra") != ["feishu"]:
+        raise RuntimeError("distribution metadata does not identify the Feishu extra")
+
+    project_urls = set(parsed.get_all("Project-URL", []))
+    required_urls = {
+        "Homepage, https://github.com/Mtrya/kimi-bridge",
+        "Repository, https://github.com/Mtrya/kimi-bridge",
+        "Issues, https://github.com/Mtrya/kimi-bridge/issues",
+        "Documentation, https://github.com/Mtrya/kimi-bridge#readme",
+        "Changelog, https://github.com/Mtrya/kimi-bridge/releases",
+    }
+    if not required_urls.issubset(project_urls):
+        raise RuntimeError("distribution metadata is missing project URLs")
 
 
 def _check_tool_install(artifact: Path, *, feishu: bool) -> None:
@@ -128,7 +169,17 @@ def _check_tool_install(artifact: Path, *, feishu: bool) -> None:
         _run(["uv", "tool", "install", "--from", source, "kimi-bridge"], environment)
         executable = bin_directory / "kimi-bridge"
         _run([str(executable), "--help"], environment)
-        _run([str(executable), "--version"], environment)
+        version = subprocess.run(
+            [str(executable), "--version"],
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if version.stdout.strip() != f"kimi-bridge {PROJECT_VERSION}":
+            raise RuntimeError(
+                f"unexpected installed version: {version.stdout.strip()}"
+            )
         doctor_environment = dict(environment)
         doctor_environment["PATH"] = "/usr/bin:/bin"
         doctor = subprocess.run(
@@ -148,7 +199,16 @@ def _check_tool_install(artifact: Path, *, feishu: bool) -> None:
 
 
 def _run(command: list[str], environment: dict[str, str]) -> None:
-    subprocess.run(command, env=environment, check=True)
+    result = subprocess.run(
+        command,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise RuntimeError(f"command failed ({' '.join(command)}): {output}")
 
 
 if __name__ == "__main__":

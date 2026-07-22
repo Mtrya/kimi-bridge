@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import importlib.metadata
 import logging
 import signal
 from collections.abc import Sequence
 
+from . import __version__
 from .config import Config, load_config
 from .kimi_server import KimiServerClient, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
@@ -116,13 +116,6 @@ def _build_adapter(config: Config) -> PlatformAdapter:
     )
 
 
-def _version() -> str:
-    try:
-        return importlib.metadata.version("kimi-bridge")
-    except importlib.metadata.PackageNotFoundError:
-        return "0.0.0"
-
-
 def _argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kimi-bridge",
@@ -131,7 +124,7 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {_version()}",
+        version=f"%(prog)s {__version__}",
     )
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser(

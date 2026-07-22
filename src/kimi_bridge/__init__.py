@@ -1,3 +1,9 @@
 """kimi-bridge: connect kimi-code to IM platforms via the local kimi server."""
 
-__version__ = "0.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+
+try:
+    __version__ = version("kimi-bridge")
+except PackageNotFoundError:
+    __version__ = "unknown"

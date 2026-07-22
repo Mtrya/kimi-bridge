@@ -42,6 +42,7 @@ jobs:
       - run: uv sync --locked --all-extras --dev
       - run: uv run --locked ruff check .
       - run: git diff --check
+      - run: uv run --locked python scripts/check_docs.py
       - run: uv run --locked python scripts/check_kimi_compatibility.py contract --output /tmp/kimi-contract.json
 
   distribution:
@@ -54,6 +55,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked --all-extras --dev
       - run: uv build --no-sources
+      - run: uv run --locked twine check dist/*
       - run: uv run --locked python scripts/check_distribution.py --dist-dir dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -1,0 +1,15 @@
+[Unit]
+Description=Kimi Bridge
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.local/bin/kimi-bridge
+Environment=PATH=%h/.local/bin:%h/.kimi-code/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

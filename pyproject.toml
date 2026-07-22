@@ -4,10 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kimi-bridge"
-version = "0.0.0"
-description = "Bridge kimi-code (via the local kimi server REST/WS API) to instant messaging platforms"
+version = "0.1.0"
+description = "Control a local Kimi Code agent from Feishu or Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Mtrya" },
+]
+keywords = ["agent", "chatbot", "feishu", "kimi-code", "telegram"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: User Interfaces",
+]
 # The server client stays small. Platform SDKs remain opt-in extras.
 dependencies = [
     "httpx",
@@ -20,16 +39,27 @@ feishu = ["lark-oapi>=1.7.1,<2"]
 [project.scripts]
 kimi-bridge = "kimi_bridge.__main__:main"
 
+[project.urls]
+Homepage = "https://github.com/Mtrya/kimi-bridge"
+Repository = "https://github.com/Mtrya/kimi-bridge"
+Issues = "https://github.com/Mtrya/kimi-bridge/issues"
+Documentation = "https://github.com/Mtrya/kimi-bridge#readme"
+Changelog = "https://github.com/Mtrya/kimi-bridge/releases"
+
 [dependency-groups]
 dev = [
     "pyyaml>=6,<7",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.15,<0.16",
+    "twine>=6,<7",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kimi_bridge"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/references"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/kimi_bridge/assets/video-cover.png" = "kimi_bridge/assets/video-cover.png"

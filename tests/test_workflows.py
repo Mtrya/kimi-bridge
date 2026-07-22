@@ -22,7 +22,11 @@ def _load(name: str) -> dict[str, Any]:
 
 def test_all_workflows_parse_and_pin_third_party_actions() -> None:
     paths = sorted(WORKFLOW_DIRECTORY.glob("*.yml"))
-    assert {path.name for path in paths} == {"ci.yml", "kimi-drift.yml"}
+    assert {path.name for path in paths} == {
+        "ci.yml",
+        "kimi-drift.yml",
+        "release.yml",
+    }
     for path in paths:
         document = _load(path.name)
         assert isinstance(document["jobs"], dict)
@@ -50,16 +54,16 @@ def test_ci_has_locked_fake_test_matrix_quality_and_distribution_jobs() -> None:
         "3.13",
     ]
     commands = "\n".join(
-        step.get("run", "")
-        for job in jobs.values()
-        for step in job["steps"]
+        step.get("run", "") for job in jobs.values() for step in job["steps"]
     )
     for required in (
         "uv sync --locked",
         "pytest -q",
         "ruff check .",
         "git diff --check",
+        "scripts/check_docs.py",
         "uv build --no-sources",
+        "twine check",
         "scripts/check_distribution.py",
     ):
         assert required in commands
@@ -72,9 +76,7 @@ def test_drift_workflow_is_daily_manual_credential_free_and_write_scoped() -> No
     assert set(workflow["on"]) == {"schedule", "workflow_dispatch"}
     assert workflow["on"]["schedule"] == [{"cron": "17 19 * * *"}]
     assert workflow["permissions"] == {"contents": "read"}
-    assert workflow["jobs"]["canary"]["if"] == (
-        "github.ref == 'refs/heads/main'"
-    )
+    assert workflow["jobs"]["canary"]["if"] == ("github.ref == 'refs/heads/main'")
     assert "permissions" not in workflow["jobs"]["canary"]
     assert workflow["jobs"]["synchronize"]["permissions"] == {
         "actions": "write",
@@ -89,3 +91,44 @@ def test_drift_workflow_is_daily_manual_credential_free_and_write_scoped() -> No
     assert "APP_SECRET" not in rendered
     assert "FEISHU" not in rendered
     assert "TELEGRAM" not in rendered
+
+
+def test_release_is_published_release_only_and_uses_trusted_publishing() -> None:
+    workflow = _load("release.yml")
+
+    assert workflow["on"] == {"release": {"types": ["published"]}}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "release-assets", "pypi-publish"}
+    assert jobs["release-assets"]["permissions"] == {
+        "actions": "read",
+        "contents": "write",
+    }
+    publish = jobs["pypi-publish"]
+    assert publish["permissions"] == {
+        "actions": "read",
+        "id-token": "write",
+    }
+    assert publish["environment"] == {
+        "name": "pypi",
+        "url": "https://pypi.org/p/kimi-bridge",
+    }
+    rendered = (WORKFLOW_DIRECTORY / "release.yml").read_text()
+    for required in (
+        "scripts/check_release.py",
+        "pytest -q",
+        "ruff check .",
+        "git diff --check",
+        "scripts/check_docs.py",
+        "uv build --no-sources",
+        "twine check",
+        "scripts/check_distribution.py",
+        "sha256sum --check",
+        "gh release upload",
+        '--repo "$GITHUB_REPOSITORY"',
+        "pypa/gh-action-pypi-publish@",
+    ):
+        assert required in rendered
+    assert "password:" not in rendered
+    assert "secrets." not in rendered
