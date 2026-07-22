@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from kimi_bridge.interactions import (
+    ApprovalDecision,
     ApprovalPrompt,
     ApprovalRequest,
     ApprovalResponse,
@@ -32,13 +33,16 @@ from kimi_bridge.platforms.base import (
     InboundInteraction,
     InboundMessage,
     MessageRef,
+    OutboundFile,
 )
 from kimi_bridge.platforms.feishu import (
+    FeishuAPIError,
     FeishuAdapter,
     UNSUPPORTED_MESSAGE,
     _DownloadedResource,
-    _LarkTextTransport,
+    _LarkTransport,
     _LarkWebSocketRunner,
+    _load_video_cover,
 )
 from kimi_bridge.platforms.feishu_cards import (
     decode_interaction_response,
@@ -55,6 +59,9 @@ class FakeTransport:
         self.edited_cards: list[tuple[str, dict[str, Any]]] = []
         self.downloads: list[tuple[str, str, str, str | None]] = []
         self.resources: dict[str, _DownloadedResource] = {}
+        self.uploaded_images: list[OutboundFile] = []
+        self.uploaded_files: list[tuple[OutboundFile, str]] = []
+        self.sent_media: list[tuple[str, str, str, dict[str, str]]] = []
 
     async def send_text(self, receive_id: str, receive_id_type: str, text: str) -> str:
         self.sent.append((receive_id, receive_id_type, text))
@@ -62,6 +69,26 @@ class FakeTransport:
 
     async def edit_text(self, message_id: str, text: str) -> None:
         self.edited.append((message_id, text))
+
+    async def upload_image(self, file: OutboundFile) -> str:
+        self.uploaded_images.append(file)
+        return f"img-{len(self.uploaded_images)}"
+
+    async def upload_file(self, file: OutboundFile, file_type: str) -> str:
+        self.uploaded_files.append((file, file_type))
+        return f"file-{len(self.uploaded_files)}"
+
+    async def send_media(
+        self,
+        receive_id: str,
+        receive_id_type: str,
+        message_type: str,
+        content: dict[str, str],
+    ) -> str:
+        self.sent_media.append(
+            (receive_id, receive_id_type, message_type, content)
+        )
+        return f"media-{len(self.sent_media)}"
 
     async def send_card(
         self,
@@ -210,6 +237,126 @@ def test_cancelled_outcome_renders_a_terminal_neutral_card() -> None:
     assert card["header"]["text_tag_list"][0]["color"] == "neutral"
 
 
+@pytest.mark.parametrize(
+    ("decision", "template", "tag_color"),
+    [
+        ("approved", "green", "green"),
+        ("rejected", "red", "red"),
+        ("cancelled", "grey", "neutral"),
+    ],
+)
+
+
+def test_approval_outcome_uses_semantic_decision_color(
+    decision: ApprovalDecision, template: str, tag_color: str
+) -> None:
+    card = render_outcome(
+        InteractionOutcome(
+            state="completed",
+            detail=decision.title(),
+            approval_decision=decision,
+        )
+    )
+
+    assert card["header"]["template"] == template
+    assert card["header"]["text_tag_list"][0]["color"] == tag_color
+    status_blocks = card["body"]["elements"]
+    assert len(status_blocks) == 1
+    status_lines = status_blocks[0]["columns"][0]["elements"]
+    assert [line["text"]["content"] for line in status_lines] == [
+        f"Interaction status: {decision.title()}"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("input_display", "section"),
+    [
+        ({"command": "printf hello"}, "Command"),
+        ({"path": "src/app.py"}, "Path"),
+        ({"path": "src/app.py", "content": "new text"}, "File write"),
+        ({"path": "src/app.py", "diff": "- old\n+ new"}, "Diff"),
+        (
+            {
+                "kind": "file_io",
+                "operation": "edit",
+                "path": "src/app.py",
+                "before": "old text\n",
+                "after": "new text\n",
+            },
+            "Diff",
+        ),
+        ({"unfamiliar": {"nested": True}}, "Input"),
+    ],
+)
+def test_approval_card_has_semantic_bounded_preview_and_stable_callbacks(
+    input_display: object, section: str
+) -> None:
+    prompt = _approval_prompt()
+    prompt = ApprovalPrompt(
+        interaction_id=prompt.interaction_id,
+        request=ApprovalRequest(
+            id=prompt.request.id,
+            session_id=prompt.request.session_id,
+            tool_name=prompt.request.tool_name,
+            action=prompt.request.action,
+            input_display=input_display,
+        ),
+        session_title=prompt.session_title,
+        workspace="/tmp/workspace/project",
+    )
+
+    card = render_interaction(prompt)
+    serialized = json.dumps(card, ensure_ascii=False)
+
+    assert card["schema"] == "2.0"
+    assert card["header"]["subtitle"]["content"] == "Test session"
+    assert len(card["body"]["elements"]) == 3
+    assert "/tmp/workspace/project" in serialized
+    assert section in serialized
+    callbacks = [
+        column["elements"][0]["behaviors"][0]["value"]
+        for column in card["body"]["elements"][-1]["columns"]
+    ]
+    assert {item["decision"] for item in callbacks} == {
+        "approved",
+        "rejected",
+        "cancelled",
+    }
+    assert {item["interaction_id"] for item in callbacks} == {
+        "interaction-1"
+    }
+    if (
+        section == "Diff"
+        and isinstance(input_display, dict)
+        and "before" in input_display
+    ):
+        assert "-old text" in serialized
+        assert "+new text" in serialized
+
+
+def test_approval_preview_truncates_dynamic_content() -> None:
+    prompt = _approval_prompt()
+    prompt = ApprovalPrompt(
+        interaction_id=prompt.interaction_id,
+        request=ApprovalRequest(
+            id=prompt.request.id,
+            session_id=prompt.request.session_id,
+            tool_name="WriteFile",
+            action="Write file",
+            input_display={"path": "notes.txt", "content": "x" * 5000},
+        ),
+        session_title=prompt.session_title,
+        workspace=prompt.workspace,
+    )
+
+    card = render_interaction(prompt)
+    preview = card["body"]["elements"][1]["columns"][0]["elements"][-1]
+
+    assert preview["tag"] == "markdown"
+    assert len(preview["content"]) < 1700
+    assert "…" in preview["content"]
+
+
 async def test_allowlisted_p2p_text_is_normalized_once() -> None:
     transport = FakeTransport()
     runners: list[FakeWebSocketRunner] = []
@@ -256,7 +403,11 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
         )
         await adapter.finish_interaction(
             card_message,
-            InteractionOutcome(state="completed", detail="Approved"),
+            InteractionOutcome(
+                state="completed",
+                detail="Approved",
+                approval_decision="approved",
+            ),
         )
         assert transport.sent == [("oc_direct", "chat_id", "reply")]
         assert transport.edited == [("message-1", "updated")]
@@ -268,6 +419,74 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
         await adapter.stop()
 
     assert len(runners) == 1
+
+
+async def test_outbound_files_use_native_image_media_and_file_messages() -> None:
+    transport = FakeTransport()
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+    )
+    conversation = ConversationRef("feishu", "cli_event", "oc_direct")
+
+    image_message = await adapter.send_file(
+        conversation, OutboundFile("photo.png", b"png", "image/png")
+    )
+    video_message = await adapter.send_file(
+        conversation, OutboundFile("demo.mp4", b"mp4", "video/mp4")
+    )
+    file_message = await adapter.send_file(
+        conversation, OutboundFile("notes.txt", b"text", "text/plain")
+    )
+
+    assert [message.message_id for message in (
+        image_message,
+        video_message,
+        file_message,
+    )] == ["media-1", "media-2", "media-3"]
+    assert transport.uploaded_images[0] == OutboundFile(
+        "photo.png", b"png", "image/png"
+    )
+    cover = transport.uploaded_images[1]
+    assert cover.name == "video-cover.png"
+    assert cover.media_type == "image/png"
+    assert cover.data == _load_video_cover()
+    assert cover.data.startswith(b"\x89PNG\r\n\x1a\n")
+    assert [(item.name, file_type) for item, file_type in transport.uploaded_files] == [
+        ("demo.mp4", "mp4"),
+        ("notes.txt", "stream"),
+    ]
+    assert transport.sent_media == [
+        ("oc_direct", "chat_id", "image", {"image_key": "img-1"}),
+        (
+            "oc_direct",
+            "chat_id",
+            "media",
+            {"file_key": "file-1", "image_key": "img-2"},
+        ),
+        ("oc_direct", "chat_id", "file", {"file_key": "file-2"}),
+    ]
+
+
+async def test_outbound_native_upload_error_is_not_silently_remapped() -> None:
+    class FailingTransport(FakeTransport):
+        async def upload_image(self, file: OutboundFile) -> str:
+            raise FeishuAPIError(f"unsupported image: {file.name}")
+
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=FailingTransport(),
+    )
+
+    with pytest.raises(FeishuAPIError, match="unsupported image"):
+        await adapter.send_file(
+            ConversationRef("feishu", "cli_event", "oc_direct"),
+            OutboundFile("photo.png", b"png", "image/png"),
+        )
 
 
 def test_sdk_websocket_owns_a_worker_event_loop(monkeypatch: Any) -> None:
@@ -339,10 +558,31 @@ async def test_sdk_transport_builds_message_card_and_resource_requests() -> None
                 raw=SimpleNamespace(headers={"content-type": "image/png"}),
             )
 
-    transport = _LarkTextTransport("cli_test", "secret")
+    class ImageAPI:
+        async def acreate(self, request: Any) -> Any:
+            requests.append(("image", request))
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(image_key="img_uploaded"),
+            )
+
+    class FileAPI:
+        async def acreate(self, request: Any) -> Any:
+            requests.append(("file", request))
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(file_key="file_uploaded"),
+            )
+
+    transport = _LarkTransport("cli_test", "secret")
     transport._client = SimpleNamespace(
         im=SimpleNamespace(
-            v1=SimpleNamespace(message=MessageAPI(), message_resource=ResourceAPI())
+            v1=SimpleNamespace(
+                message=MessageAPI(),
+                message_resource=ResourceAPI(),
+                image=ImageAPI(),
+                file=FileAPI(),
+            )
         )
     )
 
@@ -352,16 +592,30 @@ async def test_sdk_transport_builds_message_card_and_resource_requests() -> None
     assert await transport.send_card("ou_user", "open_id", card) == "om_reply"
     await transport.edit_card("om_reply", card)
     resource = await transport.download_resource("om_source", "img_key", "image")
+    image = OutboundFile("photo.png", b"png", "image/png")
+    document = OutboundFile("notes.txt", b"notes", "text/plain")
+    assert await transport.upload_image(image) == "img_uploaded"
+    assert await transport.upload_file(document, "stream") == "file_uploaded"
+    assert (
+        await transport.send_media(
+            "ou_user", "open_id", "file", {"file_key": "file_uploaded"}
+        )
+        == "om_reply"
+    )
 
     create_text = requests[0][1]
     assert create_text.receive_id_type == "open_id"
     assert create_text.request_body.receive_id == "ou_user"
-    assert create_text.request_body.msg_type == "text"
-    assert json.loads(create_text.request_body.content) == {"text": "hello"}
+    assert create_text.request_body.msg_type == "post"
+    assert json.loads(create_text.request_body.content) == {
+        "zh_cn": {"content": [[{"tag": "md", "text": "hello"}]]}
+    }
     update_text = requests[1][1]
     assert update_text.message_id == "om_reply"
-    assert update_text.request_body.msg_type == "text"
-    assert json.loads(update_text.request_body.content) == {"text": "updated"}
+    assert update_text.request_body.msg_type == "post"
+    assert json.loads(update_text.request_body.content) == {
+        "zh_cn": {"content": [[{"tag": "md", "text": "updated"}]]}
+    }
     assert requests[2][1].request_body.msg_type == "interactive"
     assert json.loads(requests[2][1].request_body.content) == card
     assert requests[3][0] == "patch"
@@ -375,6 +629,20 @@ async def test_sdk_transport_builds_message_card_and_resource_requests() -> None
         "image",
     )
     assert resource == _DownloadedResource(b"image-data", "photo.png", "image/png")
+    image_request = requests[5][1].request_body
+    assert image_request.image_type == "message"
+    assert image_request.image.read() == b"png"
+    file_request = requests[6][1].request_body
+    assert (file_request.file_type, file_request.file_name) == (
+        "stream",
+        "notes.txt",
+    )
+    assert file_request.file.read() == b"notes"
+    native_message = requests[7][1]
+    assert native_message.request_body.msg_type == "file"
+    assert json.loads(native_message.request_body.content) == {
+        "file_key": "file_uploaded"
+    }
 
 
 async def test_groups_bots_and_non_allowlisted_users_are_silent() -> None:
@@ -479,7 +747,7 @@ def test_approval_card_rendering_and_callback_decoding() -> None:
     card = render_interaction(prompt)
 
     assert card["schema"] == "2.0"
-    button_columns = card["body"]["elements"][1]["columns"]
+    button_columns = card["body"]["elements"][-1]["columns"]
     values = [
         column["elements"][0]["behaviors"][0]["value"]
         for column in button_columns

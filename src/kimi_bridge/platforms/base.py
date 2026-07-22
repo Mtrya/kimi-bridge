@@ -46,6 +46,15 @@ class InboundFile:
 
 
 @dataclass(frozen=True, slots=True)
+class OutboundFile:
+    """One platform-neutral file selected for outbound delivery."""
+
+    name: str
+    data: bytes
+    media_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class InboundMessage:
     conversation: ConversationRef
     actor: ActorRef
@@ -94,6 +103,9 @@ class PlatformAdapter(Protocol):
         self, conversation: ConversationRef, text: str
     ) -> MessageRef: ...
     async def edit_text(self, message: MessageRef, text: str) -> None: ...
+    async def send_file(
+        self, conversation: ConversationRef, file: OutboundFile
+    ) -> MessageRef: ...
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
     ) -> MessageRef: ...

@@ -30,6 +30,7 @@ from kimi_bridge.platforms.base import (
     ConversationRef,
     InboundInteraction,
     InboundMessage,
+    OutboundFile,
 )
 from kimi_bridge.platforms.telegram import (
     TELEGRAM_FILE_LIMIT,
@@ -50,6 +51,9 @@ class FakeTelegramAPI:
         self.files: dict[str, bytes] = {}
         self.file_requests: list[tuple[str, int | None]] = []
         self.sent_message_ids: list[int] = []
+        self.uploads: list[
+            tuple[str, dict[str, tuple[str, bytes, str]]]
+        ] = []
         self.closed = False
         self.edit_error: TelegramAPIError | None = None
         self.poll_waiting = asyncio.Event()
@@ -62,11 +66,14 @@ class FakeTelegramAPI:
         method: str,
         payload: dict[str, Any] | None = None,
         *,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
         timeout: float | None = None,
     ) -> Any:
         request_payload = dict(payload or {})
         self.requests.append((method, request_payload, timeout))
         self.events.append(f"api:{method}")
+        if files is not None:
+            self.uploads.append((method, files))
         if method == "getMe":
             return {"id": 999, "is_bot": True, "first_name": "Bridge"}
         if method == "deleteWebhook":
@@ -81,6 +88,13 @@ class FakeTelegramAPI:
             message_id = self._next_message_id
             self._next_message_id += 1
             self.sent_message_ids.append(message_id)
+            return {
+                "message_id": message_id,
+                "chat": {"id": request_payload["chat_id"], "type": "private"},
+            }
+        if method in {"sendPhoto", "sendDocument"}:
+            message_id = self._next_message_id
+            self._next_message_id += 1
             return {
                 "message_id": message_id,
                 "chat": {"id": request_payload["chat_id"], "type": "private"},
@@ -346,6 +360,60 @@ async def test_bot_api_retries_429_and_never_logs_token(
     assert secret not in caplog.text
 
 
+async def test_bot_api_retries_multipart_upload_without_logging_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "123456:multipart-secret"
+    attempts = 0
+    bodies: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        bodies.append(request.content)
+        assert request.headers["content-type"].startswith("multipart/form-data;")
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "retry",
+                    "parameters": {"retry_after": 0},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"message_id": 7}},
+        )
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    api = TelegramBotAPI(
+        secret,
+        http_client=http,
+        sleep=no_sleep,
+        max_retries=1,
+    )
+    caplog.set_level(logging.INFO)
+    try:
+        result = await api.request(
+            "sendDocument",
+            {"chat_id": 111, "caption": "notes.txt"},
+            files={"document": ("notes.txt", b"contents", "text/plain")},
+        )
+    finally:
+        await api.close()
+        await http.aclose()
+
+    assert result == {"message_id": 7}
+    assert attempts == 2
+    assert all(b"notes.txt" in body and b"contents" in body for body in bodies)
+    assert secret not in caplog.text
+
+
 async def test_bot_api_invalid_token_bubbles_without_secret() -> None:
     secret = "123456:very-secret-token"
 
@@ -560,6 +628,73 @@ async def test_send_and_edit_are_plain_persistent_messages() -> None:
         "message_id": 100,
         "text": "updated",
     }
+
+
+async def test_outbound_image_is_photo_and_everything_else_is_document() -> None:
+    api = FakeTelegramAPI()
+    adapter = await _start_adapter(api)
+    conversation = ConversationRef("telegram", "999", "111")
+    try:
+        photo = await adapter.send_file(
+            conversation, OutboundFile("photo.png", b"png", "image/png")
+        )
+        video = await adapter.send_file(
+            conversation, OutboundFile("demo.mp4", b"mp4", "video/mp4")
+        )
+        document = await adapter.send_file(
+            conversation, OutboundFile("notes.txt", b"notes", "text/plain")
+        )
+    finally:
+        await adapter.stop()
+
+    assert [photo.message_id, video.message_id, document.message_id] == [
+        "100",
+        "101",
+        "102",
+    ]
+    assert api.uploads == [
+        ("sendPhoto", {"photo": ("photo.png", b"png", "image/png")}),
+        (
+            "sendDocument",
+            {"document": ("demo.mp4", b"mp4", "video/mp4")},
+        ),
+        (
+            "sendDocument",
+            {"document": ("notes.txt", b"notes", "text/plain")},
+        ),
+    ]
+    assert _requests(api, "sendPhoto") == [
+        {"chat_id": 111, "caption": "photo.png"}
+    ]
+    assert [item["caption"] for item in _requests(api, "sendDocument")] == [
+        "demo.mp4",
+        "notes.txt",
+    ]
+
+
+async def test_outbound_upload_limits_are_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(telegram_module, "TELEGRAM_PHOTO_UPLOAD_LIMIT", 3)
+    monkeypatch.setattr(telegram_module, "TELEGRAM_DOCUMENT_UPLOAD_LIMIT", 4)
+    api = FakeTelegramAPI()
+    adapter = await _start_adapter(api)
+    conversation = ConversationRef("telegram", "999", "111")
+    try:
+        with pytest.raises(TelegramFileTooLarge, match="photos"):
+            await adapter.send_file(
+                conversation,
+                OutboundFile("photo.png", b"four", "image/png"),
+            )
+        with pytest.raises(TelegramFileTooLarge, match="documents"):
+            await adapter.send_file(
+                conversation,
+                OutboundFile("notes.txt", b"12345", "text/plain"),
+            )
+    finally:
+        await adapter.stop()
+
+    assert api.uploads == []
 
 
 async def test_photo_document_and_unsupported_media_normalization() -> None:

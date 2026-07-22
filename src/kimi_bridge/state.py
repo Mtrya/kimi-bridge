@@ -11,7 +11,8 @@ from typing import Any
 
 
 DEFAULT_STATE_PATH = Path.home() / ".kimi-bridge" / "state.json"
-STATE_VERSION = 1
+STATE_VERSION = 2
+MIGRATABLE_STATE_VERSIONS = frozenset({1, STATE_VERSION})
 PERMISSION_MODES = frozenset({"manual", "auto", "yolo"})
 
 
@@ -22,6 +23,7 @@ class ConversationBinding:
     session_id: str
     workspace: str
     permission_mode: str = "manual"
+    render_thinking: bool = False
 
 
 @dataclass(slots=True)
@@ -43,7 +45,14 @@ class StateStore:
 
         with self.path.open(encoding="utf-8") as state_file:
             raw = json.load(state_file)
-        if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
+        if not isinstance(raw, dict):
+            raise ValueError("unsupported bridge state format")
+        version = raw.get("version")
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version not in MIGRATABLE_STATE_VERSIONS
+        ):
             raise ValueError("unsupported bridge state format")
         bindings_raw = raw.get("bindings")
         if not isinstance(bindings_raw, dict):
@@ -56,6 +65,11 @@ class StateStore:
             session_id = value.get("session_id")
             workspace = value.get("workspace")
             permission_mode = value.get("permission_mode")
+            render_thinking = (
+                value.get("render_thinking", False)
+                if version == STATE_VERSION
+                else False
+            )
             if not isinstance(session_id, str) or not session_id:
                 raise TypeError("binding session_id must be a non-empty string")
             if not isinstance(workspace, str) or not workspace:
@@ -64,10 +78,13 @@ class StateStore:
                 raise ValueError(
                     "binding permission_mode must be manual, auto, or yolo"
                 )
+            if not isinstance(render_thinking, bool):
+                raise TypeError("binding render_thinking must be a boolean")
             bindings[conversation_key] = ConversationBinding(
                 session_id=session_id,
                 workspace=workspace,
                 permission_mode=permission_mode,
+                render_thinking=render_thinking,
             )
         return BridgeState(bindings=bindings)
 
@@ -80,6 +97,7 @@ class StateStore:
                     "session_id": binding.session_id,
                     "workspace": binding.workspace,
                     "permission_mode": binding.permission_mode,
+                    "render_thinking": binding.render_thinking,
                 }
                 for key, binding in sorted(state.bindings.items())
             },

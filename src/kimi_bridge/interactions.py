@@ -120,3 +120,4 @@ InteractionState: TypeAlias = Literal["completed", "timed_out", "stale", "cancel
 class InteractionOutcome:
     state: InteractionState
     detail: str
+    approval_decision: ApprovalDecision | None = None

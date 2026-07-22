@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import mimetypes
@@ -11,6 +12,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib.resources import files
 from typing import Any, Protocol
 
 from ..interactions import InteractionOutcome, InteractionPrompt
@@ -24,6 +26,7 @@ from .base import (
     InboundMessage,
     InteractionHandler,
     MessageRef,
+    OutboundFile,
 )
 from .feishu_cards import (
     decode_interaction_response,
@@ -36,6 +39,20 @@ from .feishu_cards import (
 LOGGER = logging.getLogger(__name__)
 UNSUPPORTED_MESSAGE = "Unsupported message type; send text, an image, or a file."
 FEISHU_TEXT_LIMIT = 7000
+FEISHU_IMAGE_MEDIA_TYPES = frozenset(
+    {
+        "image/bmp",
+        "image/gif",
+        "image/heic",
+        "image/jpeg",
+        "image/png",
+        "image/tiff",
+        "image/vnd.microsoft.icon",
+        "image/webp",
+        "image/x-icon",
+    }
+)
+VIDEO_COVER_NAME = "video-cover.png"
 
 
 class FeishuAPIError(RuntimeError):
@@ -49,12 +66,24 @@ class _DownloadedResource:
     media_type: str
 
 
-class _TextTransport(Protocol):
+class _FeishuTransport(Protocol):
     async def send_text(
         self, receive_id: str, receive_id_type: str, text: str
     ) -> str: ...
 
     async def edit_text(self, message_id: str, text: str) -> None: ...
+
+    async def upload_image(self, file: OutboundFile) -> str: ...
+
+    async def upload_file(self, file: OutboundFile, file_type: str) -> str: ...
+
+    async def send_media(
+        self,
+        receive_id: str,
+        receive_id_type: str,
+        message_type: str,
+        content: dict[str, str],
+    ) -> str: ...
 
     async def send_card(
         self, receive_id: str, receive_id_type: str, card: dict[str, Any]
@@ -77,7 +106,7 @@ class _WebSocketRunner(Protocol):
     def stop(self) -> None: ...
 
 
-class _LarkTextTransport:
+class _LarkTransport:
     def __init__(self, app_id: str, app_secret: str) -> None:
         self._app_id = app_id
         self._app_secret = app_secret
@@ -101,6 +130,20 @@ class _LarkTextTransport:
         return self._client
 
     async def send_text(self, receive_id: str, receive_id_type: str, text: str) -> str:
+        return await self._send_message(
+            receive_id,
+            receive_id_type,
+            "post",
+            _post_content(text),
+        )
+
+    async def _send_message(
+        self,
+        receive_id: str,
+        receive_id_type: str,
+        message_type: str,
+        content: dict[str, Any],
+    ) -> str:
         from lark_oapi.api.im.v1 import (
             CreateMessageRequest,
             CreateMessageRequestBody,
@@ -109,8 +152,8 @@ class _LarkTextTransport:
         body = (
             CreateMessageRequestBody.builder()
             .receive_id(receive_id)
-            .msg_type("text")
-            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .msg_type(message_type)
+            .content(json.dumps(content, ensure_ascii=False))
             .build()
         )
         request = (
@@ -135,8 +178,8 @@ class _LarkTextTransport:
 
         body = (
             UpdateMessageRequestBody.builder()
-            .msg_type("text")
-            .content(json.dumps({"text": text}, ensure_ascii=False))
+            .msg_type("post")
+            .content(json.dumps(_post_content(text), ensure_ascii=False))
             .build()
         )
         request = (
@@ -148,6 +191,63 @@ class _LarkTextTransport:
         client = self._get_client()
         response = await client.im.v1.message.aupdate(request)
         _raise_for_response(response, "edit message")
+
+    async def upload_image(self, file: OutboundFile) -> str:
+        from lark_oapi.api.im.v1 import (
+            CreateImageRequest,
+            CreateImageRequestBody,
+        )
+
+        body = (
+            CreateImageRequestBody.builder()
+            .image_type("message")
+            .image(io.BytesIO(file.data))
+            .build()
+        )
+        request = CreateImageRequest.builder().request_body(body).build()
+        client = self._get_client()
+        response = await client.im.v1.image.acreate(request)
+        _raise_for_response(response, "upload image")
+        image_key = getattr(getattr(response, "data", None), "image_key", None)
+        if not isinstance(image_key, str) or not image_key:
+            raise FeishuAPIError("Feishu image-upload response omitted image_key")
+        return image_key
+
+    async def upload_file(self, file: OutboundFile, file_type: str) -> str:
+        from lark_oapi.api.im.v1 import (
+            CreateFileRequest,
+            CreateFileRequestBody,
+        )
+
+        body = (
+            CreateFileRequestBody.builder()
+            .file_type(file_type)
+            .file_name(file.name)
+            .file(io.BytesIO(file.data))
+            .build()
+        )
+        request = CreateFileRequest.builder().request_body(body).build()
+        client = self._get_client()
+        response = await client.im.v1.file.acreate(request)
+        _raise_for_response(response, "upload file")
+        file_key = getattr(getattr(response, "data", None), "file_key", None)
+        if not isinstance(file_key, str) or not file_key:
+            raise FeishuAPIError("Feishu file-upload response omitted file_key")
+        return file_key
+
+    async def send_media(
+        self,
+        receive_id: str,
+        receive_id_type: str,
+        message_type: str,
+        content: dict[str, str],
+    ) -> str:
+        return await self._send_message(
+            receive_id,
+            receive_id_type,
+            message_type,
+            content,
+        )
 
     async def send_card(
         self, receive_id: str, receive_id_type: str, card: dict[str, Any]
@@ -358,7 +458,7 @@ class FeishuAdapter:
         allowed_users: set[str] | frozenset[str],
         *,
         message_limit: int = FEISHU_TEXT_LIMIT,
-        transport: _TextTransport | None = None,
+        transport: _FeishuTransport | None = None,
         ws_factory: Callable[
             [Callable[[Any], None], Callable[[Any], Any]], _WebSocketRunner
         ]
@@ -399,7 +499,7 @@ class FeishuAdapter:
         self._main_loop = asyncio.get_running_loop()
         self._started_at_ms = int(time.time() * 1000)
         if self._transport is None:
-            self._transport = _LarkTextTransport(self._app_id, self._app_secret)
+            self._transport = _LarkTransport(self._app_id, self._app_secret)
         factory = self._ws_factory or (
             lambda message_callback, card_callback: _LarkWebSocketRunner(
                 self._app_id,
@@ -463,6 +563,46 @@ class FeishuAdapter:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")
         await self._transport.edit_text(message.message_id, text)
+
+    async def send_file(
+        self, conversation: ConversationRef, file: OutboundFile
+    ) -> MessageRef:
+        if self._transport is None:
+            raise RuntimeError("Feishu adapter is not started")
+        receive_id = conversation.conversation_id
+        if file.media_type in FEISHU_IMAGE_MEDIA_TYPES:
+            image_key = await self._transport.upload_image(file)
+            message_id = await self._transport.send_media(
+                receive_id,
+                "chat_id",
+                "image",
+                {"image_key": image_key},
+            )
+        elif file.media_type == "video/mp4":
+            file_key = await self._transport.upload_file(file, "mp4")
+            cover = OutboundFile(
+                name=VIDEO_COVER_NAME,
+                data=_load_video_cover(),
+                media_type="image/png",
+            )
+            image_key = await self._transport.upload_image(cover)
+            message_id = await self._transport.send_media(
+                receive_id,
+                "chat_id",
+                "media",
+                {"file_key": file_key, "image_key": image_key},
+            )
+        else:
+            file_key = await self._transport.upload_file(
+                file, _feishu_file_type(file.name)
+            )
+            message_id = await self._transport.send_media(
+                receive_id,
+                "chat_id",
+                "file",
+                {"file_key": file_key},
+            )
+        return MessageRef(conversation, message_id)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
@@ -728,6 +868,38 @@ class FeishuAdapter:
         if error is not None:
             self._ws_error = None
             raise error
+
+
+def _post_content(text: str) -> dict[str, Any]:
+    return {
+        "zh_cn": {
+            "content": [[{"tag": "md", "text": text}]],
+        }
+    }
+
+
+def _load_video_cover() -> bytes:
+    return (
+        files("kimi_bridge")
+        .joinpath("assets")
+        .joinpath(VIDEO_COVER_NAME)
+        .read_bytes()
+    )
+
+
+def _feishu_file_type(filename: str) -> str:
+    suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    return {
+        "doc": "doc",
+        "docx": "doc",
+        "mp4": "mp4",
+        "opus": "opus",
+        "pdf": "pdf",
+        "ppt": "ppt",
+        "pptx": "ppt",
+        "xls": "xls",
+        "xlsx": "xls",
+    }.get(suffix, "stream")
 
 
 async def _join_worker(thread: threading.Thread) -> None:

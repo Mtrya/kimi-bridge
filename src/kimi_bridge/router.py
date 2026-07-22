@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import mimetypes
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from .interactions import (
+    ApprovalDecision,
     ApprovalPrompt,
     ApprovalRequest,
     ApprovalResponse,
@@ -51,6 +53,7 @@ from .platforms.base import (
     InboundInteraction,
     InboundMessage,
     MessageRef,
+    OutboundFile,
     PlatformAdapter,
 )
 from .state import (
@@ -75,38 +78,52 @@ STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
     "if you still need it."
 )
+THINKING_LABEL = "Thinking\n\n"
 PERMISSION_MODE_DESCRIPTIONS = {
     "manual": "Approvals and questions can be answered in chat.",
     "auto": "Fully autonomous; the agent never asks questions.",
     "yolo": "Regular tools are auto-approved; the agent may still ask questions.",
 }
 
-HELP_TEXT = """Commands:
-/new [cwd] — create and bind a session
-/sessions — list recent sessions
-/switch <n|id> — bind a listed or explicit session
-/mode <manual|auto|yolo> — manual uses chat interactions; auto never asks; yolo may ask questions
-/model [alias] — show or set the exact session model
-/effort [effort] — show or set thinking effort for the current model
-/plan [on|off] — show or explicitly set plan mode
-/status — show bound session and runtime state
-/title [text] — show or rename the session
-/usage — show live session token totals and context usage
-/tasks [running|completed|failed|cancelled] — list tasks
-/tasks show <id> — inspect a task with an 8 KiB output tail
-/tasks cancel <id> — cancel a task
-/skills — list skills available to the session
-/skills run <name> [args] — activate an exact skill
-/mcp — list session-derived MCP tools
-/compact — compact session context and report event metrics
-/undo [count] — undo one or more history steps
-/goal [status|pause|resume|cancel|-- <objective>|<objective>] — inspect or control a goal
-/stop — abort the active prompt
-/help — show this help"""
+HELP_TEXT = """**Commands**
+
+**Sessions**
+- **/new [cwd]** — create and bind a session
+- **/sessions** — list recent sessions
+- **/switch <n|id>** — bind a listed or explicit session
+- **/status** — show bound session and runtime state
+- **/title [text]** — show or rename the session
+- **/usage** — show live session token totals and context usage
+- **/compact** — compact session context and report event metrics
+- **/undo [count]** — undo one or more history steps
+
+**Control**
+- **/mode <manual|auto|yolo>** — manual uses chat interactions; auto never asks; yolo may ask questions
+- **/model [alias]** — show or set the exact session model
+- **/effort [effort]** — show or set thinking effort for the current model
+- **/plan [on|off]** — show or explicitly set plan mode
+- **/goal [status|pause|resume|cancel|-- <objective>|<objective>]** — inspect or control a goal
+- **/stop** — abort the active prompt
+
+**Tasks and tools**
+- **/tasks [running|completed|failed|cancelled]** — list tasks
+- **/tasks show <id>** — inspect a task with an 8 KiB output tail
+- **/tasks cancel <id>** — cancel a task
+- **/skills** — list skills available to the session
+- **/skills run <name> [args]** — activate an exact skill
+- **/mcp** — list session-derived MCP tools
+
+**Output**
+- **/send <path>** — send one file from the bound workspace
+- **/render-thinking [on|off]** — show or set separate thinking output
+
+**General**
+- **/help** — show this help"""
 
 
 @dataclass(slots=True)
 class _RenderState:
+    prefix: str = ""
     text: str = ""
     messages: list[MessageRef] = field(default_factory=list)
     rendered_chunks: list[str] = field(default_factory=list)
@@ -124,6 +141,10 @@ class _ActiveStream:
     conversation: ConversationRef
     actor: ActorRef
     render: _RenderState = field(default_factory=_RenderState)
+    thinking: _RenderState = field(
+        default_factory=lambda: _RenderState(prefix=THINKING_LABEL)
+    )
+    step: int | None = None
     task: asyncio.Task[None] | None = None
     interaction_task: asyncio.Task[None] | None = None
 
@@ -323,9 +344,13 @@ class ChatRouter:
                 )
                 return
 
+            approval_decision: ApprovalDecision | None = None
             try:
                 if pending.kind == "approval":
-                    outcome = await self._resolve_approval_action(pending, action)
+                    approval_decision = await self._resolve_approval_action(
+                        pending, action
+                    )
+                    outcome = approval_decision.capitalize()
                 else:
                     outcome = await self._resolve_question_action(pending, action)
                     if outcome is None:
@@ -342,7 +367,11 @@ class ChatRouter:
             await self._clear_pending(pending)
             await adapter.finish_interaction(
                 pending.message,
-                InteractionOutcome(state="completed", detail=outcome),
+                InteractionOutcome(
+                    state="completed",
+                    detail=outcome,
+                    approval_decision=approval_decision,
+                ),
             )
 
     async def dispatch_event(self, session_key: str, event: dict[str, Any]) -> None:
@@ -368,19 +397,59 @@ class ChatRouter:
         if event_type == "turn.started":
             await self._reset_render(active)
             return
+        if event_type == "turn.step.started":
+            step = payload.get("step")
+            if not isinstance(step, int) or isinstance(step, bool):
+                return
+            if active.step is not None and step != active.step:
+                await self._advance_render_step(active)
+            elif active.step is None and step > 1 and (
+                active.render.text or active.thinking.text
+            ):
+                await self._advance_render_step(active)
+            active.step = step
+            return
         if event_type == "assistant.delta":
             delta = payload.get("delta")
             if not isinstance(delta, str):
                 return
-            await self._apply_delta(active, event.get("offset"), delta)
-            await self._maybe_flush(active)
+            await self._apply_delta(
+                active,
+                active.render,
+                "assistant_text",
+                event.get("offset"),
+                delta,
+            )
+            await self._maybe_flush(active, active.render)
+            return
+        if event_type == "thinking.delta":
+            if not self._thinking_enabled(active):
+                return
+            delta = payload.get("delta")
+            if not isinstance(delta, str):
+                return
+            await self._apply_delta(
+                active,
+                active.thinking,
+                "thinking_text",
+                event.get("offset"),
+                delta,
+            )
+            await self._maybe_flush(active, active.thinking)
             return
         if event_type == "turn.ended":
-            snapshot_text = await self._snapshot_assistant_text(active.session_id)
-            if snapshot_text is not None:
-                active.render.text = snapshot_text
-            await self._flush(active)
+            snapshot = await self._client.get_snapshot(active.session_id)
+            answer_text = _assistant_text_from_snapshot(snapshot)
+            if answer_text is not None:
+                active.render.text = answer_text
+            await self._flush(active, active.render)
             active.render.turn_active = False
+            if self._thinking_enabled(active):
+                thinking_text = _thinking_text_from_snapshot(snapshot)
+                if thinking_text is not None:
+                    active.thinking.text = thinking_text
+                await self._flush(active, active.thinking)
+            active.thinking.turn_active = False
 
     async def _handle_command(
         self,
@@ -440,7 +509,13 @@ class ChatRouter:
                     adapter, conversation, f"Session not found: {argument}"
                 )
                 return
-            binding = self._binding_from_session(session)
+            current = self._state.bindings.get(conversation_key)
+            binding = self._binding_from_session(
+                session,
+                render_thinking=(
+                    current.render_thinking if current is not None else False
+                ),
+            )
             try:
                 await self._ensure_active_stream(
                     conversation_key,
@@ -541,6 +616,20 @@ class ChatRouter:
                 argument,
             )
             return
+        if command == "/send":
+            await self._handle_send(
+                conversation_key, adapter, conversation, argument
+            )
+            return
+        if command == "/render-thinking":
+            await self._handle_render_thinking(
+                conversation_key,
+                adapter,
+                conversation,
+                actor,
+                argument,
+            )
+            return
         if command == "/mode":
             if argument not in PERMISSION_MODES:
                 await self._send_chunked(
@@ -561,6 +650,7 @@ class ChatRouter:
                 session_id=binding.session_id,
                 workspace=binding.workspace,
                 permission_mode=argument,
+                render_thinking=binding.render_thinking,
             )
             self._state.bindings[conversation_key] = updated
             self._state_store.save(self._state)
@@ -831,6 +921,91 @@ class ChatRouter:
         usage = await self._client.get_session_usage(binding.session_id)
         await self._send_chunked(
             adapter, conversation, _format_usage(usage)
+        )
+
+    async def _handle_send(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        if not argument:
+            await self._send_chunked(adapter, conversation, "Usage: /send <path>")
+            return
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        try:
+            outbound = _load_outbound_file(Path(binding.workspace), argument)
+        except (OSError, ValueError) as exc:
+            await self._send_chunked(adapter, conversation, str(exc))
+            return
+        try:
+            await adapter.send_file(conversation, outbound)
+        except Exception as exc:
+            await self._send_chunked(
+                adapter, conversation, f"File send failed: {exc}"
+            )
+
+    async def _handle_render_thinking(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
+        argument: str,
+    ) -> None:
+        if argument not in {"", "on", "off"}:
+            await self._send_chunked(
+                adapter, conversation, "Usage: /render-thinking [on|off]"
+            )
+            return
+        binding = await self._require_binding(
+            conversation_key, adapter, conversation
+        )
+        if binding is None:
+            return
+        if not argument:
+            state = "on" if binding.render_thinking else "off"
+            await self._send_chunked(
+                adapter, conversation, f"Thinking rendering: {state}"
+            )
+            return
+
+        enabled = argument == "on"
+        changed = binding.render_thinking != enabled
+        if changed:
+            binding = ConversationBinding(
+                session_id=binding.session_id,
+                workspace=binding.workspace,
+                permission_mode=binding.permission_mode,
+                render_thinking=enabled,
+            )
+            self._state.bindings[conversation_key] = binding
+            self._state_store.save(self._state)
+
+        if enabled:
+            await self._ensure_active_stream(
+                conversation_key,
+                binding.session_id,
+                adapter,
+                conversation,
+                actor,
+            )
+            await self._backfill_thinking(self._active)
+        else:
+            active = self._active
+            if active is not None and active.conversation_key == conversation_key:
+                await self._cancel_delayed_flush(active.thinking)
+
+        qualifier = "" if changed else " already"
+        await self._send_chunked(
+            adapter,
+            conversation,
+            f"Thinking rendering{qualifier}: {argument}",
         )
 
     async def _handle_tasks(
@@ -1258,16 +1433,25 @@ class ChatRouter:
             model=self._model,
             permission_mode=DEFAULT_PERMISSION_MODE,
         )
+        current = self._state.bindings.get(conversation_key)
         binding = ConversationBinding(
             session_id=session_id,
             workspace=str(workspace),
             permission_mode=DEFAULT_PERMISSION_MODE,
+            render_thinking=(
+                current.render_thinking if current is not None else False
+            ),
         )
         self._state.bindings[conversation_key] = binding
         self._state_store.save(self._state)
         return binding
 
-    def _binding_from_session(self, session: dict[str, Any]) -> ConversationBinding:
+    def _binding_from_session(
+        self,
+        session: dict[str, Any],
+        *,
+        render_thinking: bool,
+    ) -> ConversationBinding:
         workspace = str(session["metadata"]["cwd"])
         agent_config = session.get("agent_config")
         mode = (
@@ -1281,6 +1465,7 @@ class ChatRouter:
             session_id=str(session["id"]),
             workspace=workspace,
             permission_mode=mode,
+            render_thinking=render_thinking,
         )
         return binding
 
@@ -1368,11 +1553,8 @@ class ChatRouter:
         self._active = None
         if active is None:
             return
-        delayed = active.render.delayed_flush
-        if delayed is not None:
-            delayed.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await delayed
+        await self._cancel_delayed_flush(active.render)
+        await self._cancel_delayed_flush(active.thinking)
         if active.interaction_task is not None:
             active.interaction_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1586,13 +1768,10 @@ class ChatRouter:
                     raise
                 detail = "Expired after it had already been resolved."
             await self._clear_pending(pending)
-            try:
-                await pending.adapter.finish_interaction(
-                    pending.message,
-                    InteractionOutcome(state="timed_out", detail=detail),
-                )
-            finally:
-                await pending.adapter.send_text(pending.conversation, detail)
+            await pending.adapter.finish_interaction(
+                pending.message,
+                InteractionOutcome(state="timed_out", detail=detail),
+            )
 
     async def _clear_pending(self, pending: _PendingInteraction) -> None:
         if self._pending.get(pending.conversation_key) is pending:
@@ -1605,7 +1784,7 @@ class ChatRouter:
 
     async def _resolve_approval_action(
         self, pending: _PendingInteraction, action: InboundInteraction
-    ) -> str:
+    ) -> ApprovalDecision:
         if not isinstance(pending.request, ApprovalRequest):
             raise TypeError("approval interaction has a question request")
         if not isinstance(action.response, ApprovalResponse):
@@ -1616,11 +1795,7 @@ class ChatRouter:
             pending.request_id,
             decision,
         )
-        return {
-            "approved": "Approved",
-            "rejected": "Rejected",
-            "cancelled": "Cancelled",
-        }[decision]
+        return decision
 
     async def _resolve_question_action(
         self, pending: _PendingInteraction, action: InboundInteraction
@@ -1672,23 +1847,56 @@ class ChatRouter:
         return content
 
     async def _reset_render(self, active: _ActiveStream) -> None:
-        delayed = active.render.delayed_flush
-        if delayed is not None:
-            delayed.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await delayed
+        await self._cancel_delayed_flush(active.render)
+        await self._cancel_delayed_flush(active.thinking)
+        active.step = None
         active.render = _RenderState(turn_active=True)
+        active.thinking = _RenderState(
+            prefix=THINKING_LABEL,
+            turn_active=True,
+        )
+
+    async def _advance_render_step(self, active: _ActiveStream) -> None:
+        await self._cancel_delayed_flush(active.render)
+        await self._flush(active, active.render)
+        active.render.turn_active = False
+
+        await self._cancel_delayed_flush(active.thinking)
+        if self._thinking_enabled(active):
+            await self._flush(active, active.thinking)
+        active.thinking.turn_active = False
+
+        active.render = _RenderState(turn_active=True)
+        active.thinking = _RenderState(
+            prefix=THINKING_LABEL,
+            turn_active=True,
+        )
+
+    async def _cancel_delayed_flush(self, render: _RenderState) -> None:
+        delayed = render.delayed_flush
+        if delayed is None:
+            return
+        delayed.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await delayed
+        render.delayed_flush = None
 
     async def _apply_delta(
-        self, active: _ActiveStream, offset: Any, delta: str
+        self,
+        active: _ActiveStream,
+        render: _RenderState,
+        snapshot_field: Literal["assistant_text", "thinking_text"],
+        offset: Any,
+        delta: str,
     ) -> None:
-        render = active.render
         render.turn_active = True
         if isinstance(offset, int) and not isinstance(offset, bool):
             if render.text[offset : offset + len(delta)] == delta:
                 return
             if offset != len(render.text):
-                snapshot_text = await self._snapshot_assistant_text(active.session_id)
+                snapshot_text = await self._snapshot_stream_text(
+                    active.session_id, snapshot_field
+                )
                 if snapshot_text is not None:
                     render.text = snapshot_text
                     if render.text[offset : offset + len(delta)] == delta:
@@ -1698,37 +1906,53 @@ class ChatRouter:
                 return
         render.text += delta
 
-    async def _maybe_flush(self, active: _ActiveStream) -> None:
-        render = active.render
+    async def _maybe_flush(
+        self, active: _ActiveStream, render: _RenderState
+    ) -> None:
         now = self._clock()
         if not render.messages or render.last_flush is None:
-            await self._flush(active)
+            await self._flush(active, render)
             return
         elapsed = now - render.last_flush
         if elapsed >= self._edit_throttle_seconds:
-            await self._flush(active)
+            await self._flush(active, render)
             return
         if render.delayed_flush is None or render.delayed_flush.done():
             render.delayed_flush = asyncio.create_task(
-                self._flush_after(active, self._edit_throttle_seconds - elapsed),
-                name="throttled-message-edit",
+                self._flush_after(
+                    active,
+                    render,
+                    self._edit_throttle_seconds - elapsed,
+                ),
+                name=(
+                    "throttled-thinking-edit"
+                    if render.prefix
+                    else "throttled-message-edit"
+                ),
             )
 
-    async def _flush_after(self, active: _ActiveStream, delay: float) -> None:
+    async def _flush_after(
+        self, active: _ActiveStream, render: _RenderState, delay: float
+    ) -> None:
         try:
             await self._sleep(delay)
-            if self._active is active:
-                await self._flush(active)
+            if self._active is active and (
+                active.render is render or active.thinking is render
+            ):
+                await self._flush(active, render)
         finally:
-            if active.render.delayed_flush is asyncio.current_task():
-                active.render.delayed_flush = None
+            if render.delayed_flush is asyncio.current_task():
+                render.delayed_flush = None
 
-    async def _flush(self, active: _ActiveStream) -> None:
-        render = active.render
+    async def _flush(
+        self, active: _ActiveStream, render: _RenderState
+    ) -> None:
         if not render.text:
             return
         async with render.lock:
-            chunks = _chunk_text(render.text, active.adapter.message_limit)
+            chunks = _chunk_text(
+                f"{render.prefix}{render.text}", active.adapter.message_limit
+            )
             for index, chunk in enumerate(chunks):
                 if index >= len(render.messages):
                     message = await active.adapter.send_text(
@@ -1743,31 +1967,72 @@ class ChatRouter:
             render.rendered_chunks = chunks
             render.last_flush = self._clock()
 
-    async def _snapshot_assistant_text(self, session_id: str) -> str | None:
+    async def _snapshot_stream_text(
+        self,
+        session_id: str,
+        field: Literal["assistant_text", "thinking_text"],
+    ) -> str | None:
         snapshot = await self._client.get_snapshot(session_id)
-        return _assistant_text_from_snapshot(snapshot)
+        if field == "assistant_text":
+            return _assistant_text_from_snapshot(snapshot)
+        return _thinking_text_from_snapshot(snapshot)
+
+    async def _backfill_thinking(
+        self, active: _ActiveStream | None
+    ) -> None:
+        if active is None or not self._thinking_enabled(active):
+            return
+        snapshot = await self._client.get_snapshot(active.session_id)
+        in_flight = snapshot.get("in_flight_turn")
+        if not isinstance(in_flight, dict):
+            return
+        text = in_flight.get("thinking_text")
+        if not isinstance(text, str):
+            return
+        active.thinking.turn_active = True
+        active.thinking.text = text
+        await self._flush(active, active.thinking)
+
+    def _thinking_enabled(self, active: _ActiveStream) -> bool:
+        binding = self._state.bindings.get(active.conversation_key)
+        return (
+            binding is not None
+            and binding.session_id == active.session_id
+            and binding.render_thinking
+        )
 
     async def _render_resync_snapshot(
         self, active: _ActiveStream, snapshot: dict[str, Any]
     ) -> None:
         in_flight = snapshot.get("in_flight_turn")
         if isinstance(in_flight, dict):
-            text = in_flight.get("assistant_text")
-            if not isinstance(text, str):
+            answer_text = in_flight.get("assistant_text")
+            thinking_text = in_flight.get("thinking_text")
+            if not isinstance(answer_text, str):
                 return
             if not active.render.turn_active:
                 await self._reset_render(active)
-            active.render.text = text
-            await self._flush(active)
+            active.render.text = answer_text
+            await self._flush(active, active.render)
+            if self._thinking_enabled(active) and isinstance(thinking_text, str):
+                active.thinking.text = thinking_text
+                active.thinking.turn_active = True
+                await self._flush(active, active.thinking)
             return
 
-        if not active.render.turn_active:
+        if not active.render.turn_active and not active.thinking.turn_active:
             return
-        text = _assistant_text_from_snapshot(snapshot)
-        if text is not None:
-            active.render.text = text
-            await self._flush(active)
+        answer_text = _assistant_text_from_snapshot(snapshot)
+        if answer_text is not None:
+            active.render.text = answer_text
+            await self._flush(active, active.render)
         active.render.turn_active = False
+        if self._thinking_enabled(active):
+            thinking_text = _thinking_text_from_snapshot(snapshot)
+            if thinking_text is not None:
+                active.thinking.text = thinking_text
+            await self._flush(active, active.thinking)
+        active.thinking.turn_active = False
 
     async def _send_chunked(
         self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
@@ -2068,6 +2333,48 @@ def _assistant_text_from_snapshot(snapshot: dict[str, Any]) -> str | None:
         ]
         return "".join(str(part) for part in parts)
     return None
+
+
+def _thinking_text_from_snapshot(snapshot: dict[str, Any]) -> str | None:
+    in_flight = snapshot.get("in_flight_turn")
+    if isinstance(in_flight, dict):
+        text = in_flight.get("thinking_text")
+        if isinstance(text, str):
+            return text
+
+    messages = snapshot.get("messages")
+    items = messages.get("items", []) if isinstance(messages, dict) else []
+    for message in reversed(items):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content", [])
+        parts = [
+            part.get("thinking", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "thinking"
+        ]
+        if parts:
+            return "".join(str(part) for part in parts)
+    return None
+
+
+def _load_outbound_file(workspace: Path, argument: str) -> OutboundFile:
+    workspace = workspace.expanduser().resolve()
+    requested = Path(argument).expanduser()
+    candidate = requested if requested.is_absolute() else workspace / requested
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(workspace):
+        raise ValueError("File must stay inside the bound workspace.")
+    if not resolved.exists():
+        raise ValueError(f"File not found: {argument}")
+    if not resolved.is_file():
+        raise ValueError(f"Not a regular file: {argument}")
+    media_type = mimetypes.guess_type(resolved.name)[0]
+    return OutboundFile(
+        name=resolved.name,
+        data=resolved.read_bytes(),
+        media_type=media_type or "application/octet-stream",
+    )
 
 
 def _save_inbound_files(

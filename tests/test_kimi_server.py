@@ -284,7 +284,12 @@ def _session_event(
         "epoch": epoch,
         "session_id": "session-1",
         "timestamp": "now",
-        "payload": {"type": event_type, "delta": event_type},
+        "payload": {
+            "type": event_type,
+            "delta": event_type,
+            "agentId": "main",
+            "sessionId": "session-1",
+        },
     }
     if volatile:
         event.update({"volatile": True, "offset": 0})
@@ -921,6 +926,35 @@ async def test_materializes_session_before_initial_subscription() -> None:
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
     ]
+    subscribe = next(frame for frame in socket.sent if frame["type"] == "subscribe")
+    assert subscribe["payload"]["agent_filter"] == {"session-1": ["main"]}
+
+
+async def test_main_agent_filter_allows_global_sequence_gaps() -> None:
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[
+            _session_event(1, "epoch-1", "turn.started"),
+            _session_event(4, "epoch-1", "turn.ended"),
+        ],
+    )
+    http = FakeHttpClient([_envelope({"busy": False})])
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    events = client.subscribe_events("session-1")
+
+    assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
+    assert (await asyncio.wait_for(anext(events), 1))["seq"] == 4
+    await events.aclose()
 
 
 async def test_live_usage_event_feeds_inspection_and_reconnect_invalidates_it() -> None:

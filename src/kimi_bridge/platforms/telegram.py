@@ -40,12 +40,16 @@ from .base import (
     InboundMessage,
     InteractionHandler,
     MessageRef,
+    OutboundFile,
 )
 
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_FILE_LIMIT = 20 * 1024 * 1024
+TELEGRAM_PHOTO_UPLOAD_LIMIT = 10 * 1024 * 1024
+TELEGRAM_DOCUMENT_UPLOAD_LIMIT = 50 * 1024 * 1024
+TELEGRAM_PHOTO_MEDIA_TYPES = frozenset({"image/jpeg", "image/png"})
 TELEGRAM_POLL_TIMEOUT = 30
 _ALLOWED_UPDATES = ["message", "callback_query"]
 _MAX_INTERACTION_TEXT = 3800
@@ -127,6 +131,7 @@ class TelegramAPI(Protocol):
         method: str,
         payload: dict[str, Any] | None = None,
         *,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
         timeout: float | None = None,
     ) -> Any: ...
 
@@ -177,6 +182,7 @@ class TelegramBotAPI:
         method: str,
         payload: dict[str, Any] | None = None,
         *,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
         timeout: float | None = None,
     ) -> Any:
         """Call one Bot API method and return its result."""
@@ -187,10 +193,18 @@ class TelegramBotAPI:
         attempt = 0
         while True:
             try:
+                request_kwargs: dict[str, Any]
+                if files is None:
+                    request_kwargs = {"json": payload or {}}
+                else:
+                    request_kwargs = {
+                        "data": payload or {},
+                        "files": files,
+                    }
                 response = await self._http.post(
                     f"{self._method_base_url}/{method}",
-                    json=payload or {},
                     timeout=request_timeout,
+                    **request_kwargs,
                 )
             except asyncio.CancelledError:
                 raise
@@ -454,6 +468,34 @@ class TelegramAdapter:
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self._validate_conversation(message.conversation)
         await self._edit_message(message, _message_text(text))
+
+    async def send_file(
+        self, conversation: ConversationRef, file: OutboundFile
+    ) -> MessageRef:
+        self._validate_conversation(conversation)
+        if file.media_type in TELEGRAM_PHOTO_MEDIA_TYPES:
+            if len(file.data) > TELEGRAM_PHOTO_UPLOAD_LIMIT:
+                raise TelegramFileTooLarge(
+                    "Telegram photos must be 10 MB or smaller"
+                )
+            method = "sendPhoto"
+            field = "photo"
+        else:
+            if len(file.data) > TELEGRAM_DOCUMENT_UPLOAD_LIMIT:
+                raise TelegramFileTooLarge(
+                    "Telegram documents must be 50 MB or smaller"
+                )
+            method = "sendDocument"
+            field = "document"
+        result = await self._api.request(
+            method,
+            {
+                "chat_id": _chat_id(conversation),
+                "caption": file.name,
+            },
+            files={field: (file.name, file.data, file.media_type)},
+        )
+        return _message_ref(conversation, result, method)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt

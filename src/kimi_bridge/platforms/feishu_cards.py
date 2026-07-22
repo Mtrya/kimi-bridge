@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from difflib import unified_diff
 from typing import Any
 
 from ..interactions import (
@@ -23,6 +24,8 @@ from ..interactions import (
 
 
 INTERACTION_SUMMARY_LIMIT = 1200
+APPROVAL_PREVIEW_LIMIT = 1600
+APPROVAL_PATH_LIMIT = 400
 
 
 def render_interaction(prompt: InteractionPrompt) -> dict[str, Any]:
@@ -32,6 +35,13 @@ def render_interaction(prompt: InteractionPrompt) -> dict[str, Any]:
 
 
 def render_outcome(outcome: InteractionOutcome) -> dict[str, Any]:
+    if outcome.state == "completed" and outcome.approval_decision is not None:
+        title, template = {
+            "approved": ("Approval approved", "green"),
+            "rejected": ("Approval rejected", "red"),
+            "cancelled": ("Approval cancelled", "grey"),
+        }[outcome.approval_decision]
+        return _status_card(title, outcome.detail, template=template)
     title, template = {
         "completed": ("Interaction complete", "green"),
         "timed_out": ("Interaction timed out", "red"),
@@ -136,11 +146,6 @@ def _context_block(*lines: str) -> dict[str, Any]:
 
 def _approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
     request = prompt.request
-    summary = (
-        _summarize(request.input_display)
-        if request.input_display is not None
-        else ""
-    )
     buttons = [
         ("Approve", "approved", "primary_filled"),
         ("Reject", "rejected", "danger"),
@@ -182,15 +187,178 @@ def _approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
         tag_text="Pending",
         tag_color="yellow",
         elements=[
-            _context_block(
-                f"Tool: {request.tool_name}",
-                f"Action: {request.action}",
-                f"Workspace: {prompt.workspace}",
-                summary,
-            ),
+            _approval_context(prompt),
+            _approval_preview(request.input_display),
             button_block,
         ],
     )
+
+
+def _approval_context(prompt: ApprovalPrompt) -> dict[str, Any]:
+    workspace_name = prompt.workspace.rstrip("/").rsplit("/", 1)[-1] or "/"
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "background_style": "grey-50",
+                "padding": "12px",
+                "vertical_spacing": "4px",
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            "<text_tag color='neutral'>cwd</text_tag> "
+                            f"**{_escape_markdown(workspace_name)}**"
+                        ),
+                    },
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": _bounded(
+                                prompt.workspace, APPROVAL_PATH_LIMIT
+                            ),
+                            "lines": 4,
+                        },
+                    },
+                    {
+                        "tag": "div",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": (
+                                f"{prompt.request.tool_name} · "
+                                f"{prompt.request.action}"
+                            ),
+                            "lines": 3,
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _approval_preview(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        command = _first_string(value, "command", "cmd")
+        if command is not None:
+            return _preview_block("Command", command, language="shell")
+
+        path = _first_string(
+            value,
+            "path",
+            "file_path",
+            "target_path",
+            "filename",
+        )
+        before = _first_string(value, "before", "old_string", "old_text")
+        after = _first_string(value, "after", "new_string", "new_text")
+        if before is not None and after is not None:
+            return _preview_block(
+                "Diff",
+                _replacement_diff(before, after, path),
+                language="diff",
+                path=path,
+            )
+        diff = _first_string(value, "diff", "patch")
+        if diff is not None:
+            return _preview_block("Diff", diff, language="diff", path=path)
+
+        content = _first_string(
+            value,
+            "content",
+            "file_content",
+            "new_content",
+            "text",
+        )
+        if content is not None:
+            return _preview_block(
+                "File write" if path else "Content",
+                content,
+                path=path,
+            )
+        if path is not None:
+            return _preview_block("Path", path)
+
+    return _preview_block("Input", _summarize(value), language="json")
+
+
+def _replacement_diff(before: str, after: str, path: str | None) -> str:
+    label = path or "content"
+    return "\n".join(
+        unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=label,
+            tofile=label,
+            lineterm="",
+        )
+    )
+
+
+def _preview_block(
+    title: str,
+    preview: str,
+    *,
+    language: str = "",
+    path: str | None = None,
+) -> dict[str, Any]:
+    elements: list[dict[str, Any]] = [
+        {
+            "tag": "markdown",
+            "content": f"**{title}**",
+        }
+    ]
+    if path:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": _bounded(path, APPROVAL_PATH_LIMIT),
+                    "lines": 4,
+                },
+            }
+        )
+    bounded = _bounded(preview, APPROVAL_PREVIEW_LIMIT)
+    if title == "Path" and path is None:
+        elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "plain_text",
+                    "content": bounded,
+                    "lines": 8,
+                },
+            }
+        )
+    else:
+        safe_preview = bounded.replace("```", "`` `")
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"```{language}\n{safe_preview}\n```",
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "none",
+        "columns": [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "background_style": "grey-50",
+                "padding": "12px",
+                "vertical_spacing": "4px",
+                "elements": elements,
+            }
+        ],
+    }
 
 
 def _question_card(prompt: QuestionPrompt) -> dict[str, Any]:
@@ -463,9 +631,28 @@ def _summarize(value: object) -> str:
         text = value
     else:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    if len(text) > INTERACTION_SUMMARY_LIMIT:
-        return text[: INTERACTION_SUMMARY_LIMIT - 1] + "…"
+    return _bounded(text, INTERACTION_SUMMARY_LIMIT)
+
+
+def _first_string(value: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, str):
+            return candidate
+    return None
+
+
+def _bounded(text: str, limit: int) -> str:
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
     return text
+
+
+def _escape_markdown(text: str) -> str:
+    escaped = text.replace("\\", "\\\\")
+    for character in "*~><[]()#:_`":
+        escaped = escaped.replace(character, f"\\{character}")
+    return escaped
 
 
 def _status_card(title: str, detail: str, *, template: str) -> dict[str, Any]:
@@ -481,8 +668,5 @@ def _status_card(title: str, detail: str, *, template: str) -> dict[str, Any]:
         icon_token="notice_colorful",
         tag_text=title,
         tag_color=tag_color,
-        elements=[
-            _context_block("Interaction status"),
-            _context_block(detail),
-        ],
+        elements=[_context_block(f"Interaction status: {detail}")],
     )

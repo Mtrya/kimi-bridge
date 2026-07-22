@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
+import importlib.metadata
 import logging
 import signal
+from collections.abc import Sequence
 
 from .config import Config, load_config
 from .kimi_server import KimiServerClient, KimiServerSupervisor
@@ -113,7 +116,28 @@ def _build_adapter(config: Config) -> PlatformAdapter:
     )
 
 
-def main() -> None:
+def _version() -> str:
+    try:
+        return importlib.metadata.version("kimi-bridge")
+    except importlib.metadata.PackageNotFoundError:
+        return "0.0.0"
+
+
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="kimi-bridge",
+        description="Bridge a local kimi-code server to one configured chat adapter.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_version()}",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    _argument_parser().parse_args(argv)
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

@@ -40,6 +40,7 @@ from .interactions import (
 
 LOGGER = logging.getLogger(__name__)
 EXPECTED_SERVER_VERSION = "0.28.1"
+_MAIN_AGENT_ID = "main"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SERVER_URL_RE = re.compile(
@@ -1140,7 +1141,13 @@ class KimiServerClient:
                                 yield frame
                                 continue
 
-                            disposition = _advance_cursor(cursor, frame)
+                            # This subscription intentionally receives only
+                            # main-agent events. Sequence numbers are global to
+                            # the session, so events from filtered subagents
+                            # leave legitimate gaps in the delivered stream.
+                            disposition = _advance_cursor(
+                                cursor, frame, allow_sequence_gaps=True
+                            )
                             if disposition == "duplicate":
                                 continue
                             if disposition == "resync":
@@ -1272,7 +1279,10 @@ class KimiServerClient:
         self, ws: Any, session_id: str, cursor: _EventCursor | None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         request_id = uuid.uuid4().hex
-        payload: dict[str, Any] = {"session_ids": [session_id]}
+        payload: dict[str, Any] = {
+            "session_ids": [session_id],
+            "agent_filter": {session_id: [_MAIN_AGENT_ID]},
+        }
         if cursor is not None:
             cursor_payload: dict[str, Any] = {"seq": cursor.seq}
             if cursor.epoch is not None:
@@ -1658,7 +1668,10 @@ def _cursor_from_mapping(value: Any) -> _EventCursor:
 
 
 def _advance_cursor(
-    cursor: _EventCursor | None, frame: dict[str, Any]
+    cursor: _EventCursor | None,
+    frame: dict[str, Any],
+    *,
+    allow_sequence_gaps: bool = False,
 ) -> Literal["accept", "duplicate", "resync"]:
     seq = frame.get("seq")
     if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
@@ -1671,6 +1684,6 @@ def _advance_cursor(
         return "resync"
     if seq <= cursor.seq:
         return "duplicate"
-    if seq != cursor.seq + 1:
+    if not allow_sequence_gaps and seq != cursor.seq + 1:
         return "resync"
     return "accept"

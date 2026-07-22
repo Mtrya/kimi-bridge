@@ -46,3 +46,26 @@ def test_selected_platform_requires_its_own_credentials() -> None:
 
     with pytest.raises(RuntimeError, match="Feishu credentials"):
         main_module._build_adapter(Config(platform="feishu"))
+
+
+@pytest.mark.parametrize("argument", ["--help", "--version"])
+def test_metadata_flags_do_not_start_runtime(
+    argument: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    started = False
+
+    async def forbidden_run() -> None:
+        nonlocal started
+        started = True
+
+    monkeypatch.setattr(main_module, "run", forbidden_run)
+
+    with pytest.raises(SystemExit) as caught:
+        main_module.main([argument])
+
+    assert caught.value.code == 0
+    assert not started
+    output = capsys.readouterr().out
+    assert "kimi-bridge" in output
