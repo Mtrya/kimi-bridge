@@ -13,6 +13,10 @@ import httpx
 import pytest
 
 from kimi_bridge import compatibility_check as checker
+from kimi_bridge.compatibility import (
+    SUPPORTED_KIMI_CODE_VERSIONS,
+    kimi_code_version_sort_key,
+)
 from kimi_bridge.compatibility_check import (
     AUTOMATION_BRANCH,
     ArtifactMetadata,
@@ -424,7 +428,10 @@ class FakeGitHub:
         self.branch_exists = False
         self.branch_content = {
             "schema_version": 1,
-            "versions": ["0.28.1"],
+            "versions": sorted(
+                SUPPORTED_KIMI_CODE_VERSIONS,
+                key=kimi_code_version_sort_key,
+            ),
         }
         self.pulls: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
@@ -506,7 +513,9 @@ class FakeGitHub:
         return httpx.Response(status, json=value)
 
 
-def test_github_promotion_drift_dedup_and_recovery() -> None:
+def test_github_promotion_drift_dedup_and_recovery(
+    unlisted_kimi_code_version: str,
+) -> None:
     fake = FakeGitHub()
     client = httpx.Client(
         base_url="https://api.github.test",
@@ -527,7 +536,7 @@ def test_github_promotion_drift_dedup_and_recovery() -> None:
     compatible_unknown = build_report(
         mode="live",
         product="kimi-code",
-        version="0.29.0",
+        version=unlisted_kimi_code_version,
         checks=(_passing_check(),),
     )
 
@@ -536,7 +545,10 @@ def test_github_promotion_drift_dedup_and_recovery() -> None:
     )
     assert AUTOMATION_BRANCH == "automation/kimi-code-compatibility"
     assert len(fake.pulls) == 1
-    assert fake.branch_content["versions"] == ["0.28.1", "0.29.0"]
+    assert fake.branch_content["versions"] == sorted(
+        {*SUPPORTED_KIMI_CODE_VERSIONS, unlisted_kimi_code_version},
+        key=kimi_code_version_sort_key,
+    )
     assert fake.ci_dispatches == 1
     assert synchronize_report(compatible_unknown, automation) == (
         "unchanged-promotion-pr",

@@ -137,6 +137,7 @@ def test_valid_feishu_config_and_supported_kimi_are_secret_safe(
 
 def test_valid_telegram_config_and_unknown_kimi_warn_but_pass(
     tmp_path: Path,
+    unlisted_kimi_code_version: str,
 ) -> None:
     config_path = tmp_path / "config.toml"
     secrets = _write_telegram_config(config_path, tmp_path / "workspace")
@@ -144,14 +145,14 @@ def test_valid_telegram_config_and_unknown_kimi_warn_but_pass(
     report = _diagnose(
         config_path,
         tmp_path / "state.json",
-        _runner(version="0.29.0\n"),
+        _runner(version=f"{unlisted_kimi_code_version}\n"),
     )
     rendered = report.render()
 
     assert report.exit_code == 0
     assert _status(report, "adapter") is CheckStatus.OK
     assert _status(report, "kimi") is CheckStatus.WARNING
-    assert "UNTESTED KIMI CODE VERSION 0.29.0" in rendered
+    assert f"UNTESTED KIMI CODE VERSION {unlisted_kimi_code_version}" in rendered
     assert all(secret not in rendered for secret in secrets)
 
 
