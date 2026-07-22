@@ -1,6 +1,6 @@
 # kimi-bridge
 
-Bridge [Kimi Code CLI](https://github.com/MoonshotAI/kimi-cli) to instant messaging platforms so you can drive a full kimi-code agent from a chat window.
+Bridge [Kimi Code](https://github.com/MoonshotAI/kimi-code) to instant messaging platforms so you can drive a full kimi-code agent from a chat window.
 
 **Status: the Feishu bridge is implemented and live-validated. The experimental Telegram adapter is implementation-complete and fake-tested; live Telegram validation remains pending. Both adapters support durable session bindings, streamed edit-in-place answers and optional thinking, approvals/questions, prompt steering, inbound media, outbound files, session control and inspection, and bridge commands through platform-neutral core contracts.** All major design decisions below are locked; remaining open questions are listed at the bottom.
 
@@ -25,7 +25,7 @@ The router deals only in platform-neutral conversation, actor, message, prompt, 
 - **Language**: Python ≥ 3.11, asyncio throughout, typed.
 - **Backend**: local kimi-code server REST + WebSocket — not ACP — specifically to keep harness-specific features.
 - **Deployment**: always-on host, single user, authZ via a chat-user allowlist. Designed so multi-user could be added later, but not built.
-- **Server lifecycle**: the bridge supports exactly kimi-code 0.28.1, verifies both `kimi --version` and `/api/v1/meta`, then supervises `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child process. It parses the bearer token from startup output, restarts the child on crash, and rejects version mismatches because the API is 0.x.
+- **Server lifecycle**: tested kimi-code versions are tracked in the package compatibility manifest, initially 0.28.1. The bridge verifies the official product fingerprint and executable version before supervising `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child process, then requires `/api/v1/meta` to report the same version. An unlisted official version receives a loud warning and a live protocol attempt; an executable/server mismatch or the legacy Python kimi-cli remains fatal. The bridge parses the bearer token from startup output and restarts the child on crash.
 - **Platforms**: Feishu is implemented with the official `lark-oapi` SDK and a WebSocket long connection, so no public endpoint is needed. The runtime enables one adapter per process, selected by top-level configuration that defaults to Feishu; both platform credential tables may coexist, but only the selected one is validated and constructed. WeChat is out of scope.
 - **Telegram**: the experimental adapter uses a narrow handwritten `httpx` Bot API client with private-chat long polling, stable numeric user-ID allowlisting, and no Telegram SDK. Startup discards queued updates instead of replaying instructions received while the bridge was offline. Text streams through one persistent message plus edits. Approvals use inline keyboards; questions use a sequential one-message wizard with immediate single choice, toggle-and-Done multi-select, per-question Skip, and explicit `ForceReply` for custom answers. Wizard state is memory-only, so old callbacks become stale after restart. The implementation is fake-tested; credentials are currently unavailable for live validation.
 - **Sessions**: the shared kimi session store is fully exposed. Commands cover creation/switching, permission mode, model and thinking effort, plan mode, status/title/usage, background tasks, skill activation, read-only session-derived MCP inspection, context compaction, counted undo, the public goal lifecycle, outbound files, and per-conversation thinking display. Anything not starting with `/` goes to the bound session. Handoff between chat and terminal CLI (same session store, `kimi -S <id>`) is an advertised feature.
@@ -50,10 +50,11 @@ The router deals only in platform-neutral conversation, actor, message, prompt, 
 
 ## Development
 
-Python 3.11 or newer and an authenticated kimi-code 0.28.1 installation are required. Run `kimi doctor` before starting the bridge, and ensure kimi-code's `config.toml` defines `default_model`. Other kimi-code versions are rejected because the managed-server command and 0.x API can change. Use `uv sync` for the core and experimental Telegram adapter, or `uv sync --extra feishu` when running Feishu. For an isolated command installed from a source checkout, see [INSTALL.md](INSTALL.md).
+Python 3.11 or newer and an authenticated official kimi-code installation are required. Run `kimi doctor config` and `uv run kimi-bridge doctor` before starting the bridge, and ensure kimi-code's `config.toml` defines `default_model`. Versions in the package compatibility manifest are tested; an unlisted official version warns and continues to the live contract, while the legacy Python kimi-cli is incompatible. Use `uv sync` for the core and experimental Telegram adapter, or `uv sync --extra feishu` when running Feishu. For an isolated command installed from a source checkout, see [INSTALL.md](INSTALL.md).
 
 ```bash
 uv run pytest
+uv run kimi-bridge doctor
 uv run python scripts/smoke_server.py
 ```
 

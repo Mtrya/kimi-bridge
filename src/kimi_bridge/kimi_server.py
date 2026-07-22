@@ -23,6 +23,17 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from .compatibility import (
+    KimiExecutableIdentity,
+    KimiProduct,
+    KimiProductFingerprintError,
+    VersionSupport,
+    classify_kimi_code_version,
+    identify_kimi_executable,
+    legacy_product_message,
+    normalize_kimi_code_version,
+    unknown_version_warning,
+)
 from .interactions import (
     ApprovalDecision,
     ApprovalRequest,
@@ -39,7 +50,6 @@ from .interactions import (
 
 
 LOGGER = logging.getLogger(__name__)
-EXPECTED_SERVER_VERSION = "0.28.1"
 _MAIN_AGENT_ID = "main"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -302,6 +312,7 @@ class KimiServerSupervisor:
         self._connection: ServerConnection | None = None
         self._failure: BaseException | None = None
         self._generation = 0
+        self._executable_identity: KimiExecutableIdentity | None = None
 
     @property
     def connection(self) -> ServerConnection:
@@ -317,6 +328,14 @@ class KimiServerSupervisor:
 
         return self._process
 
+    @property
+    def executable_identity(self) -> KimiExecutableIdentity:
+        """Return the official Kimi executable identity established at preflight."""
+
+        if self._executable_identity is None:
+            raise RuntimeError("kimi executable preflight has not completed")
+        return self._executable_identity
+
     async def __aenter__(self) -> KimiServerSupervisor:
         await self.start()
         return self
@@ -330,7 +349,7 @@ class KimiServerSupervisor:
         if self._task is not None:
             return await self.wait_until_ready()
 
-        await self._check_executable_version()
+        await self._check_executable_identity()
         self._port = self._preferred_port or self._port_picker()
         self._stopping.clear()
         self._failure = None
@@ -395,11 +414,31 @@ class KimiServerSupervisor:
                 raise RuntimeError("kimi server supervisor is stopping")
             return self._connection
 
-    async def _check_executable_version(self) -> None:
+    async def _check_executable_identity(self) -> None:
+        version_output = await self._run_cli_probe("--version")
+        help_output = await self._run_cli_probe("--help")
+        try:
+            identity = identify_kimi_executable(version_output, help_output)
+        except KimiProductFingerprintError as exc:
+            raise KimiServerStartupError(str(exc)) from exc
+
+        if identity.product is KimiProduct.LEGACY_KIMI_CLI:
+            message = legacy_product_message(identity.version)
+            LOGGER.warning("INCOMPATIBLE KIMI PRODUCT: %s", message)
+            raise KimiServerStartupError(message)
+
+        self._executable_identity = identity
+        if identity.support is VersionSupport.SUPPORTED:
+            LOGGER.info("kimi-code executable version: %s", identity.version)
+        else:
+            LOGGER.warning("%s", unknown_version_warning(identity.version))
+
+    async def _run_cli_probe(self, *arguments: str) -> str:
+        command_text = " ".join(("kimi", *arguments))
         try:
             process = await self._process_factory(
                 self._executable,
-                "--version",
+                *arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -410,7 +449,9 @@ class KimiServerSupervisor:
 
         try:
             if process.stdout is None:
-                raise KimiServerStartupError("kimi --version stdout was not captured")
+                raise KimiServerStartupError(
+                    f"{command_text} stdout was not captured"
+                )
             raw_output = await asyncio.wait_for(
                 process.stdout.read(), self._startup_timeout
             )
@@ -420,24 +461,21 @@ class KimiServerSupervisor:
         except TimeoutError as exc:
             await self._terminate_process(process)
             raise KimiServerStartupError(
-                f"kimi --version did not finish within {self._startup_timeout:g}s"
+                f"{command_text} did not finish within {self._startup_timeout:g}s"
             ) from exc
         except BaseException:
             await self._terminate_process(process)
             raise
 
-        output = _redact_tokens(raw_output.decode("utf-8", errors="replace")).strip()
+        output = _redact_tokens(
+            raw_output.decode("utf-8", errors="replace")
+        ).strip()
         if returncode != 0:
             raise KimiServerStartupError(
-                f"kimi --version exited with status {returncode}: "
+                f"{command_text} exited with status {returncode}: "
                 f"{output or 'no output'}"
             )
-        if output != EXPECTED_SERVER_VERSION:
-            raise KimiServerStartupError(
-                "unsupported kimi-code executable version: "
-                f"expected {EXPECTED_SERVER_VERSION}, got {output or 'no output'}"
-            )
-        LOGGER.info("kimi-code executable version: %s", output)
+        return output
 
     async def _supervise(self) -> None:
         delay = self._initial_backoff
@@ -679,13 +717,39 @@ class KimiServerClient:
             )
         return server_version
 
-    async def check_server_version(self) -> str:
-        server_version = await self.get_server_version()
-        LOGGER.info("kimi server version: %s", server_version)
-        if server_version != EXPECTED_SERVER_VERSION:
+    async def check_server_version(
+        self, *, executable_version: str | None = None
+    ) -> str:
+        reported_version = await self.get_server_version()
+        try:
+            server_version = normalize_kimi_code_version(reported_version)
+        except ValueError as exc:
             raise KimiServerStartupError(
-                "unsupported kimi server version: "
-                f"expected {EXPECTED_SERVER_VERSION}, got {server_version}"
+                "kimi server reported a malformed version"
+            ) from exc
+
+        if executable_version is None and self._supervisor is not None:
+            executable_version = self._supervisor.executable_identity.version
+        if executable_version is not None:
+            normalized_executable_version = normalize_kimi_code_version(
+                executable_version
+            )
+            if server_version != normalized_executable_version:
+                raise KimiServerStartupError(
+                    "kimi-code executable/server version mismatch: "
+                    f"executable {normalized_executable_version}, "
+                    f"server {server_version}"
+                )
+
+        support = classify_kimi_code_version(server_version)
+        if support is VersionSupport.SUPPORTED:
+            LOGGER.info("kimi server version: %s (supported)", server_version)
+        elif self._supervisor is None:
+            LOGGER.warning("%s", unknown_version_warning(server_version))
+        else:
+            LOGGER.info(
+                "kimi server version: %s (matches untested executable)",
+                server_version,
             )
         return server_version
 

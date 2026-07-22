@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from kimi_bridge.compatibility import KimiExecutableIdentity, KimiProduct
 from kimi_bridge.interactions import (
     ApprovalRequest,
     MultipleChoiceAnswer,
@@ -35,6 +36,20 @@ from kimi_bridge.kimi_server import (
     ToolInfo,
     parse_server_startup_line,
 )
+
+
+KIMI_CODE_HELP = """Usage: kimi [options] [command]
+The Starting Point for Next-Gen Agents
+web [options]  Run the local Kimi server and open the web UI.
+doctor  Validate Kimi Code configuration files.
+migrate  Migrate data from a legacy kimi-cli installation into kimi-code.
+"""
+
+LEGACY_KIMI_CLI_HELP = """Usage: kimi [OPTIONS] COMMAND [ARGS]...
+Kimi, your next CLI agent.
+--mcp-config-file PATH
+Documentation: https://moonshotai.github.io/kimi-cli/
+"""
 
 
 def _envelope(data: Any, *, code: int = 0, msg: str = "success") -> dict[str, Any]:
@@ -273,6 +288,17 @@ class FakeSupervisor:
 
     async def wait_until_ready(self) -> ServerConnection:
         return next(self._connections)
+
+
+class FakeVersionedSupervisor(FakeSupervisor):
+    def __init__(
+        self, connections: Iterable[ServerConnection], *, version: str
+    ) -> None:
+        super().__init__(connections)
+        self.executable_identity = KimiExecutableIdentity(
+            product=KimiProduct.KIMI_CODE,
+            version=version,
+        )
 
 
 def _session_event(
@@ -890,11 +916,54 @@ async def test_no_active_turn_means_no_pending_interactions() -> None:
     assert await client.list_questions("session-1") == []
 
 
-async def test_server_version_mismatch_is_rejected() -> None:
+async def test_unknown_server_version_warns_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     http = FakeHttpClient([_envelope({"server_version": "0.28.0"})])
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
-    with pytest.raises(KimiServerStartupError, match="expected 0.28.1, got 0.28.0"):
+    with caplog.at_level("WARNING"):
+        assert await client.check_server_version() == "0.28.0"
+
+    assert "UNTESTED KIMI CODE VERSION 0.28.0" in caplog.text
+
+
+async def test_executable_server_version_mismatch_is_rejected() -> None:
+    http = FakeHttpClient([_envelope({"server_version": "0.28.0"})])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    with pytest.raises(
+        KimiServerStartupError,
+        match="executable 0.28.1, server 0.28.0",
+    ):
+        await client.check_server_version(executable_version="0.28.1")
+
+
+async def test_supervised_client_uses_preflight_version_for_mismatch() -> None:
+    connection = ServerConnection(
+        base_url="http://127.0.0.1:43123",
+        port=43123,
+        generation=1,
+        token="secret",
+    )
+    supervisor = FakeVersionedSupervisor([connection], version="0.28.1")
+    client = KimiServerClient(
+        supervisor=supervisor,  # type: ignore[arg-type]
+        http_client=FakeHttpClient([_envelope({"server_version": "0.29.0"})]),
+    )
+
+    with pytest.raises(
+        KimiServerStartupError,
+        match="executable 0.28.1, server 0.29.0",
+    ):
+        await client.check_server_version()
+
+
+async def test_malformed_server_version_is_rejected() -> None:
+    http = FakeHttpClient([_envelope({"server_version": "version unknown"})])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    with pytest.raises(KimiServerStartupError, match="malformed version"):
         await client.check_server_version()
 
 
@@ -1233,10 +1302,11 @@ async def test_subscription_rejects_not_found_after_materialization() -> None:
 async def test_supervisor_restarts_with_exponential_backoff() -> None:
     startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
     version = FakeCompletedProcess("0.28.1\n")
+    help_output = FakeCompletedProcess(KIMI_CODE_HELP)
     first = FakeProcess(startup)
     second = FakeProcess(startup)
     third = FakeProcess(startup)
-    factory = FakeProcessFactory([version, first, second, third])
+    factory = FakeProcessFactory([version, help_output, first, second, third])
     delays: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
@@ -1262,7 +1332,8 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     assert delays == [0.1, 0.2]
     assert third.terminated is True
     assert factory.calls[0][0] == ("kimi", "--version")
-    assert factory.calls[1][0] == (
+    assert factory.calls[1][0] == ("kimi", "--help")
+    assert factory.calls[2][0] == (
         "kimi",
         "web",
         "--no-open",
@@ -1271,18 +1342,93 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
         "--port",
         "43123",
     )
-    assert factory.calls[1][1]["start_new_session"] is True
+    assert factory.calls[2][1]["start_new_session"] is True
     assert [call[0] for call in factory.calls].count(("kimi", "--version")) == 1
+    assert [call[0] for call in factory.calls].count(("kimi", "--help")) == 1
 
 
-async def test_supervisor_rejects_wrong_executable_version_before_start() -> None:
-    factory = FakeProcessFactory([FakeCompletedProcess("0.27.0\n")])
+async def test_supervisor_warns_for_unknown_official_version_and_starts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
+    child = FakeProcess(startup)
+    factory = FakeProcessFactory(
+        [FakeCompletedProcess("0.29.0\n"), FakeCompletedProcess(KIMI_CODE_HELP), child]
+    )
     supervisor = KimiServerSupervisor(
         preferred_port=43123,
         process_factory=factory,
     )
 
-    with pytest.raises(KimiServerStartupError, match="expected 0.28.1, got 0.27.0"):
+    try:
+        with caplog.at_level("WARNING"):
+            await supervisor.start()
+    finally:
+        await supervisor.stop()
+
+    assert supervisor.executable_identity.version == "0.29.0"
+    assert "UNTESTED KIMI CODE VERSION 0.29.0" in caplog.text
+    assert [call[0] for call in factory.calls[:2]] == [
+        ("kimi", "--version"),
+        ("kimi", "--help"),
+    ]
+
+
+async def test_supervisor_rejects_legacy_product_before_start(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("kimi, version 1.49.0\n"),
+            FakeCompletedProcess(LEGACY_KIMI_CLI_HELP),
+        ]
+    )
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with caplog.at_level("WARNING"), pytest.raises(
+        KimiServerStartupError, match="legacy Python kimi-cli 1.49.0"
+    ):
         await supervisor.start()
 
-    assert [call[0] for call in factory.calls] == [("kimi", "--version")]
+    assert "INCOMPATIBLE KIMI PRODUCT" in caplog.text
+    assert [call[0] for call in factory.calls] == [
+        ("kimi", "--version"),
+        ("kimi", "--help"),
+    ]
+
+
+async def test_supervisor_rejects_unrecognized_product_fingerprint() -> None:
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("0.28.1\n"),
+            FakeCompletedProcess("Usage: kimi [options]\n"),
+        ]
+    )
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with pytest.raises(KimiServerStartupError, match="product fingerprint"):
+        await supervisor.start()
+
+    assert [call[0] for call in factory.calls] == [
+        ("kimi", "--version"),
+        ("kimi", "--help"),
+    ]
+
+
+async def test_supervisor_reports_missing_kimi_before_start() -> None:
+    async def missing_process(*_args: Any, **_kwargs: Any) -> Any:
+        raise FileNotFoundError
+
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=missing_process,
+    )
+
+    with pytest.raises(KimiServerStartupError, match="not installed"):
+        await supervisor.start()

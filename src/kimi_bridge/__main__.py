@@ -133,16 +133,27 @@ def _argument_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {_version()}",
     )
+    subcommands = parser.add_subparsers(dest="command")
+    subcommands.add_parser(
+        "doctor",
+        help="validate local configuration without starting services",
+        description="Validate bridge and Kimi Code configuration without starting services.",
+    )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> None:
-    _argument_parser().parse_args(argv)
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = _argument_parser().parse_args(argv)
+    if arguments.command == "doctor":
+        from .doctor import run_doctor
+
+        return run_doctor()
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
         pass
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

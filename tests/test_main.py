@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from kimi_bridge import __main__ as main_module
+from kimi_bridge import doctor as doctor_module
 from kimi_bridge.config import Config, FeishuConfig, TelegramConfig
 
 
@@ -69,3 +70,34 @@ def test_metadata_flags_do_not_start_runtime(
     assert not started
     output = capsys.readouterr().out
     assert "kimi-bridge" in output
+
+
+def test_doctor_dispatch_does_not_start_runtime_or_build_an_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_started = False
+    adapter_built = False
+    doctor_called = False
+
+    async def forbidden_run() -> None:
+        nonlocal runtime_started
+        runtime_started = True
+
+    def forbidden_adapter(_config: Config) -> _Adapter:
+        nonlocal adapter_built
+        adapter_built = True
+        return _Adapter()
+
+    def fake_doctor() -> int:
+        nonlocal doctor_called
+        doctor_called = True
+        return 1
+
+    monkeypatch.setattr(main_module, "run", forbidden_run)
+    monkeypatch.setattr(main_module, "_build_adapter", forbidden_adapter)
+    monkeypatch.setattr(doctor_module, "run_doctor", fake_doctor)
+
+    assert main_module.main(["doctor"]) == 1
+    assert doctor_called
+    assert not runtime_started
+    assert not adapter_built

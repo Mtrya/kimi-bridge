@@ -1,6 +1,6 @@
 # Install from source
 
-kimi-bridge requires Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), and an authenticated kimi-code 0.28.1 installation. Run `kimi doctor` first and confirm `kimi --version` reports exactly `0.28.1`.
+kimi-bridge requires Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), and an authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started) installation. Run `kimi doctor config` first. Tested versions are tracked inside kimi-bridge; an unlisted official version produces a warning and attempts the live contract, while the legacy Python kimi-cli is incompatible.
 
 ## Install the command
 
@@ -37,6 +37,14 @@ kimi-bridge --version
 ## Configure and run
 
 Create `~/.kimi-bridge/config.toml`, select exactly one platform with the top-level `platform` field, and configure that platform's credentials and allowlist. See the [Feishu setup](README.md#feishu-app-setup) or [experimental Telegram setup](README.md#telegram-bot-setup-experimental) for complete examples and required platform settings.
+
+Then run the non-starting diagnostic. It validates configuration, permissions, paths, the Kimi product and version, and Kimi's own configuration without connecting an adapter or starting `kimi web`:
+
+```bash
+kimi-bridge doctor
+```
+
+Warnings return success; blocking errors return a nonzero status. The diagnostic reports credential presence and allowlist counts but never prints credential or allowlist values.
 
 Start the installed command with:
 
