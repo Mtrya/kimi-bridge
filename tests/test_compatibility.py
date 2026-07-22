@@ -10,6 +10,7 @@ from kimi_bridge.compatibility import (
     VersionSupport,
     classify_kimi_code_version,
     identify_kimi_executable,
+    kimi_code_version_sort_key,
     legacy_product_message,
     unknown_version_warning,
 )
@@ -36,6 +37,13 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 
 def test_manifest_contains_the_verified_baseline_and_is_immutable() -> None:
     assert SUPPORTED_KIMI_CODE_VERSIONS == frozenset({"0.28.1"})
+
+
+def test_manifest_version_order_is_semantic() -> None:
+    assert sorted(
+        ["0.100.0", "0.29.0", "0.29.0-beta"],
+        key=kimi_code_version_sort_key,
+    ) == ["0.29.0-beta", "0.29.0", "0.100.0"]
 
 
 def test_identifies_supported_official_kimi_code() -> None:

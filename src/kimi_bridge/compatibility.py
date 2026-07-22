@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from importlib.resources import files
 
 
 KIMI_CODE_INSTALL_URL = (
     "https://moonshotai.github.io/kimi-code/en/guides/getting-started"
 )
-SUPPORTED_KIMI_CODE_VERSIONS = frozenset({"0.28.1"})
+SUPPORTED_VERSION_MANIFEST_RESOURCE = "supported-kimi-code-versions.json"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _VERSION_PATTERN = (
@@ -35,6 +37,24 @@ _LEGACY_KIMI_CLI_HELP_MARKERS = (
     "--mcp-config-file",
     "moonshotai.github.io/kimi-cli/",
 )
+
+
+def _load_supported_versions() -> frozenset[str]:
+    raw = files("kimi_bridge").joinpath(
+        SUPPORTED_VERSION_MANIFEST_RESOURCE
+    ).read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    if payload.get("schema_version") != 1:
+        raise RuntimeError("unsupported Kimi compatibility manifest version")
+    versions = payload.get("versions")
+    if not isinstance(versions, list) or not versions:
+        raise RuntimeError("Kimi compatibility manifest has no versions")
+    normalized = tuple(normalize_kimi_code_version(item) for item in versions)
+    if list(normalized) != sorted(set(normalized), key=kimi_code_version_sort_key):
+        raise RuntimeError(
+            "Kimi compatibility manifest versions must be unique and sorted"
+        )
+    return frozenset(normalized)
 
 
 class KimiProduct(str, Enum):
@@ -116,6 +136,16 @@ def normalize_kimi_code_version(version: str) -> str:
     return match.group("version")
 
 
+def kimi_code_version_sort_key(version: str) -> tuple[int, int, int, int, str]:
+    """Return a deterministic semantic ordering key for manifest updates."""
+
+    normalized = normalize_kimi_code_version(version)
+    without_build = normalized.split("+", 1)[0]
+    core, separator, prerelease = without_build.partition("-")
+    major, minor, patch = (int(item) for item in core.split("."))
+    return major, minor, patch, 0 if separator else 1, prerelease
+
+
 def classify_kimi_code_version(version: str) -> VersionSupport:
     """Classify one normalized official Kimi Code version."""
 
@@ -152,3 +182,6 @@ def _plain(value: str) -> str:
 
 def _has_markers(text: str, markers: tuple[str, ...]) -> bool:
     return all(marker in text for marker in markers)
+
+
+SUPPORTED_KIMI_CODE_VERSIONS = _load_supported_versions()

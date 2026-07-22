@@ -1,0 +1,63 @@
+name: Kimi compatibility
+
+on:
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kimi-code-compatibility
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - name: Run isolated credential-free canary
+        id: canary
+        continue-on-error: true
+        run: uv run --locked python scripts/check_kimi_compatibility.py check --report "$RUNNER_TEMP/kimi-compatibility/report.json" --artifacts "$RUNNER_TEMP/kimi-compatibility/artifacts"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: kimi-compatibility-report
+          path: ${{ runner.temp }}/kimi-compatibility/
+          if-no-files-found: error
+          retention-days: 14
+
+  synchronize:
+    needs: canary
+    if: always() && needs.canary.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: kimi-compatibility-report
+          path: ${{ runner.temp }}/kimi-compatibility
+      - run: uv sync --locked --dev
+      - name: Synchronize promotion or rolling drift issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_DEFAULT_BRANCH: main
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: uv run --locked python scripts/check_kimi_compatibility.py sync --report "$RUNNER_TEMP/kimi-compatibility/report.json"

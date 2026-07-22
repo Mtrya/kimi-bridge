@@ -22,8 +22,10 @@ kimi-bridge = "kimi_bridge.__main__:main"
 
 [dependency-groups]
 dev = [
+    "pyyaml>=6,<7",
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "ruff>=0.15,<0.16",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -31,6 +33,7 @@ packages = ["src/kimi_bridge"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/kimi_bridge/assets/video-cover.png" = "kimi_bridge/assets/video-cover.png"
+"src/kimi_bridge/supported-kimi-code-versions.json" = "kimi_bridge/supported-kimi-code-versions.json"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

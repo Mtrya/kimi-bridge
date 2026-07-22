@@ -44,6 +44,11 @@ web [options]  Run the local Kimi server and open the web UI.
 doctor  Validate Kimi Code configuration files.
 migrate  Migrate data from a legacy kimi-cli installation into kimi-code.
 """
+KIMI_WEB_HELP = """Usage: kimi web [options]
+--no-open
+--host <host>
+--port <port>
+"""
 
 LEGACY_KIMI_CLI_HELP = """Usage: kimi [OPTIONS] COMMAND [ARGS]...
 Kimi, your next CLI agent.
@@ -762,7 +767,7 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         },
         "method": "click",
     }
-    assert http.requests[7][2]["json"] == {}
+    assert "json" not in http.requests[7][2]
 
 
 async def test_stateful_session_methods_use_public_v1_shapes() -> None:
@@ -1299,6 +1304,65 @@ async def test_subscription_rejects_not_found_after_materialization() -> None:
     await events.aclose()
 
 
+async def test_document_fetch_and_probe_subscription_stay_inside_client_boundary() -> None:
+    openapi = {"openapi": "3.0.3", "info": {"title": "REST"}}
+    asyncapi = {"asyncapi": "3.1.0", "info": {"title": "WebSocket"}}
+    http = FakeHttpClient(
+        [
+            openapi,
+            asyncapi,
+            _envelope({"busy": False}),
+            _envelope({"busy": False}),
+        ]
+    )
+    sockets = [
+        FakeWebSocket(
+            subscribe_payload={
+                "accepted": ["session-1"],
+                "not_found": [],
+                "resync_required": [],
+                "cursors": {},
+            }
+        )
+        for _ in range(2)
+    ]
+    ws_connect = FakeWebSocketConnect(sockets)
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=ws_connect,
+    )
+
+    assert await client.get_openapi_document() == openapi
+    assert await client.get_asyncapi_document() == asyncapi
+    await client.probe_subscription("session-1")
+    await client.probe_subscription("session-1")
+
+    assert [request[:2] for request in http.requests] == [
+        ("GET", "http://127.0.0.1:43123/openapi.json"),
+        ("GET", "http://127.0.0.1:43123/asyncapi.json"),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+    ]
+    assert all(
+        request[2]["headers"] == {"Authorization": "Bearer token-1"}
+        for request in http.requests
+    )
+    assert len(ws_connect.calls) == 2
+    assert all(
+        call[1]["additional_headers"]
+        == {"Authorization": "Bearer token-1"}
+        for call in ws_connect.calls
+    )
+
+
 async def test_supervisor_restarts_with_exponential_backoff() -> None:
     startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
     version = FakeCompletedProcess("0.28.1\n")
@@ -1306,7 +1370,10 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     first = FakeProcess(startup)
     second = FakeProcess(startup)
     third = FakeProcess(startup)
-    factory = FakeProcessFactory([version, help_output, first, second, third])
+    web_help = FakeCompletedProcess(KIMI_WEB_HELP)
+    factory = FakeProcessFactory(
+        [version, help_output, web_help, first, second, third]
+    )
     delays: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
@@ -1333,7 +1400,8 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     assert third.terminated is True
     assert factory.calls[0][0] == ("kimi", "--version")
     assert factory.calls[1][0] == ("kimi", "--help")
-    assert factory.calls[2][0] == (
+    assert factory.calls[2][0] == ("kimi", "web", "--help")
+    assert factory.calls[3][0] == (
         "kimi",
         "web",
         "--no-open",
@@ -1342,7 +1410,7 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
         "--port",
         "43123",
     )
-    assert factory.calls[2][1]["start_new_session"] is True
+    assert factory.calls[3][1]["start_new_session"] is True
     assert [call[0] for call in factory.calls].count(("kimi", "--version")) == 1
     assert [call[0] for call in factory.calls].count(("kimi", "--help")) == 1
 
@@ -1353,7 +1421,12 @@ async def test_supervisor_warns_for_unknown_official_version_and_starts(
     startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
     child = FakeProcess(startup)
     factory = FakeProcessFactory(
-        [FakeCompletedProcess("0.29.0\n"), FakeCompletedProcess(KIMI_CODE_HELP), child]
+        [
+            FakeCompletedProcess("0.29.0\n"),
+            FakeCompletedProcess(KIMI_CODE_HELP),
+            FakeCompletedProcess(KIMI_WEB_HELP),
+            child,
+        ]
     )
     supervisor = KimiServerSupervisor(
         preferred_port=43123,
@@ -1368,9 +1441,33 @@ async def test_supervisor_warns_for_unknown_official_version_and_starts(
 
     assert supervisor.executable_identity.version == "0.29.0"
     assert "UNTESTED KIMI CODE VERSION 0.29.0" in caplog.text
-    assert [call[0] for call in factory.calls[:2]] == [
+    assert [call[0] for call in factory.calls[:3]] == [
         ("kimi", "--version"),
         ("kimi", "--help"),
+        ("kimi", "web", "--help"),
+    ]
+
+
+async def test_supervisor_rejects_missing_managed_web_flag_before_start() -> None:
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("0.28.1\n"),
+            FakeCompletedProcess(KIMI_CODE_HELP),
+            FakeCompletedProcess("--no-open --host"),
+        ]
+    )
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with pytest.raises(KimiServerStartupError, match="--port"):
+        await supervisor.start()
+
+    assert [call[0] for call in factory.calls] == [
+        ("kimi", "--version"),
+        ("kimi", "--help"),
+        ("kimi", "web", "--help"),
     ]
 
 

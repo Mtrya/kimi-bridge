@@ -8,7 +8,7 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## Layout
 
-- `src/kimi_bridge/kimi_server.py` — the ONLY module that talks to kimi-code. Platform adapters and the router must stay free of kimi-server API details.
+- `src/kimi_bridge/kimi_server/` — the ONLY package that talks to kimi-code. Its facade, client, supervisor, types, wire/event helpers, probe, and semantic-contract modules form one boundary; platform adapters, automation, and the router must stay free of kimi-server API details.
 - `src/kimi_bridge/interactions.py` — platform-neutral approval/question prompts, answers, responses, and outcomes.
 - `src/kimi_bridge/router.py` — IM-conversation ↔ kimi-session mapping, workspace-contained outbound-file authorization, interaction lifecycle, and independent answer/thinking event rendering. It must not construct platform UI payloads or choose native media types.
 - `src/kimi_bridge/platforms/` — one adapter per IM platform, behind the semantic `PlatformAdapter` protocol in `base.py`. Native text/file rendering, uploads, and callback decoding stay inside the platform package.
@@ -19,9 +19,9 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## kimi server API
 
-- Tested runtime versions are the immutable manifest in `src/kimi_bridge/compatibility.py`, initially kimi-code 0.28.1. Unknown official kimi-code versions warn and attempt the live contract; executable/server version mismatches and the legacy Python kimi-cli fail. Start the server with `kimi web --no-open --host 127.0.0.1 --port <p>`; it stays in the foreground and prints the bearer token at startup.
+- Tested runtime versions are the immutable `src/kimi_bridge/supported-kimi-code-versions.json` manifest loaded by `compatibility.py`, initially kimi-code 0.28.1. Unknown official kimi-code versions warn and attempt the live contract; executable/server version mismatches and the legacy Python kimi-cli fail. Start the server with `kimi web --no-open --host 127.0.0.1 --port <p>`; it stays in the foreground and prints the bearer token at startup.
 - Specs are served at runtime: `GET /openapi.json` (REST) and `GET /asyncapi.json` (WebSocket). Consult them instead of guessing field names; note the API is 0.x and may shift between kimi-code releases — check `server_version` in `/api/v1/meta`.
-- Stored sessions must be materialized through `GET /api/v1/sessions/{session_id}/status` before each initial or reconnected WebSocket subscription. This lifecycle detail belongs only in `kimi_server.py`.
+- Stored sessions must be materialized through `GET /api/v1/sessions/{session_id}/status` before each initial or reconnected WebSocket subscription. This lifecycle detail belongs only in the `kimi_server` package.
 - Auth: `Authorization: Bearer <token>` header on REST and WS.
 
 ## Conventions
