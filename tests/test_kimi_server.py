@@ -1417,12 +1417,13 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
 
 async def test_supervisor_warns_for_unknown_official_version_and_starts(
     caplog: pytest.LogCaptureFixture,
+    unlisted_kimi_code_version: str,
 ) -> None:
     startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
     child = FakeProcess(startup)
     factory = FakeProcessFactory(
         [
-            FakeCompletedProcess("0.29.0\n"),
+            FakeCompletedProcess(f"{unlisted_kimi_code_version}\n"),
             FakeCompletedProcess(KIMI_CODE_HELP),
             FakeCompletedProcess(KIMI_WEB_HELP),
             child,
@@ -1439,8 +1440,8 @@ async def test_supervisor_warns_for_unknown_official_version_and_starts(
     finally:
         await supervisor.stop()
 
-    assert supervisor.executable_identity.version == "0.29.0"
-    assert "UNTESTED KIMI CODE VERSION 0.29.0" in caplog.text
+    assert supervisor.executable_identity.version == unlisted_kimi_code_version
+    assert f"UNTESTED KIMI CODE VERSION {unlisted_kimi_code_version}" in caplog.text
     assert [call[0] for call in factory.calls[:3]] == [
         ("kimi", "--version"),
         ("kimi", "--help"),

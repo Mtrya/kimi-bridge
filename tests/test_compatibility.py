@@ -36,7 +36,8 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 
 
 def test_manifest_contains_the_verified_baseline_and_is_immutable() -> None:
-    assert SUPPORTED_KIMI_CODE_VERSIONS == frozenset({"0.28.1"})
+    assert isinstance(SUPPORTED_KIMI_CODE_VERSIONS, frozenset)
+    assert "0.28.1" in SUPPORTED_KIMI_CODE_VERSIONS
 
 
 def test_manifest_version_order_is_semantic() -> None:
@@ -54,14 +55,18 @@ def test_identifies_supported_official_kimi_code() -> None:
     assert identity.support is VersionSupport.SUPPORTED
 
 
-def test_identifies_unknown_official_kimi_code_without_accepting_version_alone() -> None:
-    identity = identify_kimi_executable("0.29.0\n", KIMI_CODE_HELP)
+def test_identifies_unknown_official_kimi_code_without_accepting_version_alone(
+    unlisted_kimi_code_version: str,
+) -> None:
+    version_output = f"{unlisted_kimi_code_version}\n"
+    identity = identify_kimi_executable(version_output, KIMI_CODE_HELP)
 
     assert identity.product is KimiProduct.KIMI_CODE
+    assert identity.version == unlisted_kimi_code_version
     assert identity.support is VersionSupport.UNKNOWN
 
     with pytest.raises(KimiProductFingerprintError):
-        identify_kimi_executable("0.29.0\n", "Usage: kimi [options]")
+        identify_kimi_executable(version_output, "Usage: kimi [options]")
 
 
 def test_identifies_legacy_python_kimi_cli_from_structural_fixture() -> None:
@@ -83,9 +88,11 @@ def test_rejects_malformed_version_evidence(version: str) -> None:
         classify_kimi_code_version(version)
 
 
-def test_unknown_warning_is_prominent_and_actionable() -> None:
-    warning = unknown_version_warning("0.29.0")
+def test_unknown_warning_is_prominent_and_actionable(
+    unlisted_kimi_code_version: str,
+) -> None:
+    warning = unknown_version_warning(unlisted_kimi_code_version)
 
     assert "UNTESTED KIMI CODE VERSION" in warning
-    assert "0.29.0" in warning
+    assert unlisted_kimi_code_version in warning
     assert KIMI_CODE_INSTALL_URL in warning
