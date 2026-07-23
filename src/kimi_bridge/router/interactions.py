@@ -120,6 +120,7 @@ class _InteractionMixin:
         session_id: str,
         *,
         detail: str,
+        session_wide: bool = False,
     ) -> tuple[bool, bool]:
         async with self._interaction_lock:
             pending = self._pending.get(conversation_key)
@@ -130,7 +131,11 @@ class _InteractionMixin:
                 session_ids.append(session_id)
             aborted = False
             for target_session_id in session_ids:
-                aborted = await self._client.abort_prompt(target_session_id) or aborted
+                if session_wide:
+                    cancelled = await self._client.abort_session(target_session_id)
+                else:
+                    cancelled = await self._client.abort_prompt(target_session_id)
+                aborted = cancelled or aborted
             if pending is not None:
                 await self._clear_pending(pending)
                 await pending.adapter.finish_interaction(

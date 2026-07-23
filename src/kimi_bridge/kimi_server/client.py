@@ -535,7 +535,36 @@ class KimiServerClient:
         active = prompts["active"]
         if active is None:
             return False
-        prompt_id = str(active["prompt_id"])
+        return await self._abort_prompt_by_id(
+            session_id, str(active["prompt_id"])
+        )
+
+    async def abort_session(self, session_id: str) -> bool:
+        """Abort the main turn after discarding prompt work queued behind it."""
+
+        prompts = await self._request_operation(
+            "list_prompts", path_parameters={"session_id": session_id}
+        )
+        queued = prompts["queued"]
+        for prompt in queued:
+            await self._abort_prompt_by_id(
+                session_id, str(prompt["prompt_id"])
+            )
+        active = prompts["active"]
+        if active is not None:
+            await self._abort_prompt_by_id(
+                session_id, str(active["prompt_id"])
+            )
+        await self._request_operation(
+            "abort_session",
+            path_parameters={"session_id": session_id},
+            json_body={},
+        )
+        return True
+
+    async def _abort_prompt_by_id(
+        self, session_id: str, prompt_id: str
+    ) -> bool:
         try:
             data = await self._request_operation(
                 "abort_prompt",

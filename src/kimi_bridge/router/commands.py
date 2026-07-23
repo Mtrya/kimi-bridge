@@ -62,7 +62,7 @@ HELP_TEXT = """**Commands**
 - **/effort [effort]** — show or set thinking effort for the current model
 - **/plan [on|off]** — show or explicitly set plan mode
 - **/goal [status|pause|resume|cancel|-- <objective>|<objective>]** — inspect or control a goal
-- **/stop** — abort the active prompt
+- **/stop** — stop the active turn and discard queued prompts
 
 **Tasks and tools**
 - **/tasks [running|completed|failed|cancelled]** — list tasks
@@ -274,15 +274,13 @@ class _CommandMixin:
             )
             if binding is None:
                 return
-            aborted, cancelled_interaction = await self._cancel_active_work(
+            await self._cancel_active_work(
                 conversation_key,
                 binding.session_id,
                 detail="Cancelled by /stop.",
+                session_wide=True,
             )
-            result = (
-                "Stopped." if aborted or cancelled_interaction else "No active prompt."
-            )
-            await self._send_chunked(adapter, conversation, result)
+            await self._send_chunked(adapter, conversation, "Stopped.")
             return
 
         await self._send_chunked(

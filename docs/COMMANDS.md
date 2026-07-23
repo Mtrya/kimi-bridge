@@ -25,7 +25,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/goal pause` | Pause the current goal and cancel its active prompt/interaction. |
 | `/goal resume` | Reactivate a paused or blocked goal. |
 | `/goal cancel` | Cancel the current goal and its active prompt/interaction. |
-| `/stop` | Abort the active prompt and cancel its pending interaction. |
+| `/stop` | Abort the active main-agent turn, discard active and queued prompts, and cancel its pending interaction. Detached tasks continue. |
 | `/tasks [running\|completed\|failed\|cancelled]` | List all tasks or filter by status. |
 | `/tasks show <id>` | Inspect a task with at most the last 8 KiB of output. |
 | `/tasks cancel <id>` | Cancel a task. |
@@ -50,6 +50,8 @@ Goal replacement and goal queues are not exposed. A blocked goal remains blocked
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is a nudge, not an immediate interrupt; an in-flight tool call can finish. `/new` and `/switch` move the conversation binding without aborting work already running in the previous Kimi session.
 
 Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` close the relevant interaction as cancelled.
+
+`/stop` discards queued prompts before aborting the active prompt and main-agent turn, so a queued follow-up cannot start immediately after cancellation. It also works when the turn was started outside the prompt service. The command is idempotent and reports `Stopped.` after Kimi accepts the session abort, including when the session is already idle. Detached tasks are not cancelled and remain available through `/tasks`.
 
 ## Permission modes and interactions
 
