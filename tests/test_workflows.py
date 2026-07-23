@@ -51,7 +51,9 @@ def test_ci_has_locked_fake_test_matrix_quality_and_distribution_jobs() -> None:
     assert set(jobs) == {"tests", "quality", "distribution"}
     assert jobs["tests"]["strategy"]["matrix"]["python-version"] == [
         "3.11",
+        "3.12",
         "3.13",
+        "3.14",
     ]
     commands = "\n".join(
         step.get("run", "") for job in jobs.values() for step in job["steps"]
