@@ -24,10 +24,19 @@ class _RenderState:
     text: str = ""
     messages: list[MessageRef] = field(default_factory=list)
     rendered_chunks: list[str] = field(default_factory=list)
+    turn_id: int | None = None
+    prompt_id: str | None = None
     turn_active: bool = False
     last_flush: float | None = None
     delayed_flush: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass(slots=True)
+class _PendingFinalization:
+    answer: _RenderState
+    thinking: _RenderState
+    turn_end_seq: int | None
 
 
 @dataclass(slots=True)
@@ -42,6 +51,7 @@ class _ActiveStream:
         default_factory=lambda: _RenderState(prefix=THINKING_LABEL)
     )
     step: int | None = None
+    pending_finalization: _PendingFinalization | None = None
     task: asyncio.Task[None] | None = None
     interaction_task: asyncio.Task[None] | None = None
 

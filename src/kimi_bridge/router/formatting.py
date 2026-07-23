@@ -285,46 +285,98 @@ def _session_recency_key(session: dict[str, Any]) -> str:
     return str(updated_at) if updated_at is not None else ""
 
 
-def _assistant_text_from_snapshot(snapshot: dict[str, Any]) -> str | None:
+def _in_flight_assistant_text(
+    snapshot: dict[str, Any], *, turn_id: int | None = None
+) -> str | None:
     in_flight = snapshot.get("in_flight_turn")
-    if isinstance(in_flight, dict):
-        text = in_flight.get("assistant_text")
-        if isinstance(text, str):
-            return text
+    if not isinstance(in_flight, dict) or not _matches_snapshot_turn(
+        in_flight, turn_id
+    ):
+        return None
+    text = in_flight.get("assistant_text")
+    return text if isinstance(text, str) else None
 
+
+def _persisted_assistant_text(
+    snapshot: dict[str, Any], *, prompt_id: str | None = None
+) -> str | None:
+    message = _persisted_assistant_message(snapshot, prompt_id=prompt_id)
+    if message is None:
+        return None
+    content = message.get("content", [])
+    parts = [
+        part.get("text", "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "text"
+    ]
+    return "".join(str(part) for part in parts)
+
+
+def _in_flight_thinking_text(
+    snapshot: dict[str, Any], *, turn_id: int | None = None
+) -> str | None:
+    in_flight = snapshot.get("in_flight_turn")
+    if not isinstance(in_flight, dict) or not _matches_snapshot_turn(
+        in_flight, turn_id
+    ):
+        return None
+    text = in_flight.get("thinking_text")
+    return text if isinstance(text, str) else None
+
+
+def _persisted_thinking_text(
+    snapshot: dict[str, Any], *, prompt_id: str | None = None
+) -> str | None:
+    message = _persisted_assistant_message(snapshot, prompt_id=prompt_id)
+    if message is None:
+        return None
+    content = message.get("content", [])
+    parts = [
+        part.get("thinking", "")
+        for part in content
+        if isinstance(part, dict) and part.get("type") == "thinking"
+    ]
+    return "".join(str(part) for part in parts) if parts else None
+
+
+def _snapshot_prompt_id(
+    snapshot: dict[str, Any], *, turn_id: int | None = None
+) -> str | None:
+    in_flight = snapshot.get("in_flight_turn")
+    if not isinstance(in_flight, dict) or not _matches_snapshot_turn(
+        in_flight, turn_id
+    ):
+        return None
+    prompt_id = in_flight.get("current_prompt_id")
+    return prompt_id if isinstance(prompt_id, str) and prompt_id else None
+
+
+def _matches_snapshot_turn(in_flight: dict[str, Any], turn_id: int | None) -> bool:
+    if turn_id is None:
+        return True
+    snapshot_turn_id = in_flight.get("turn_id")
+    return snapshot_turn_id is None or snapshot_turn_id == turn_id
+
+
+def _persisted_assistant_message(
+    snapshot: dict[str, Any], *, prompt_id: str | None
+) -> dict[str, Any] | None:
     messages = snapshot.get("messages")
     items = messages.get("items", []) if isinstance(messages, dict) else []
-    for message in reversed(items):
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        content = message.get("content", [])
-        parts = [
-            part.get("text", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "text"
-        ]
-        return "".join(str(part) for part in parts)
-    return None
-
-
-def _thinking_text_from_snapshot(snapshot: dict[str, Any]) -> str | None:
-    in_flight = snapshot.get("in_flight_turn")
-    if isinstance(in_flight, dict):
-        text = in_flight.get("thinking_text")
-        if isinstance(text, str):
-            return text
-
-    messages = snapshot.get("messages")
-    items = messages.get("items", []) if isinstance(messages, dict) else []
-    for message in reversed(items):
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        content = message.get("content", [])
-        parts = [
-            part.get("thinking", "")
-            for part in content
-            if isinstance(part, dict) and part.get("type") == "thinking"
-        ]
-        if parts:
-            return "".join(str(part) for part in parts)
+    assistant_messages = [
+        message
+        for message in items
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    if prompt_id is not None:
+        for message in reversed(assistant_messages):
+            if message.get("prompt_id") == prompt_id:
+                return message
+        if any(
+            isinstance(message.get("prompt_id"), str)
+            for message in assistant_messages
+        ):
+            return None
+    if assistant_messages:
+        return assistant_messages[-1]
     return None

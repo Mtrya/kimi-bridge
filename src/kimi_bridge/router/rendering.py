@@ -4,15 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any, Literal
 
 from ..platforms.base import ConversationRef, PlatformAdapter
 from .formatting import (
-    _assistant_text_from_snapshot,
     _chunk_text,
-    _thinking_text_from_snapshot,
+    _in_flight_assistant_text,
+    _in_flight_thinking_text,
+    _persisted_assistant_text,
+    _persisted_thinking_text,
+    _snapshot_prompt_id,
 )
-from .models import THINKING_LABEL, _ActiveStream, _RenderState
+from .models import (
+    THINKING_LABEL,
+    _ActiveStream,
+    _PendingFinalization,
+    _RenderState,
+)
+
+
+LOGGER = logging.getLogger(__name__)
+FINAL_SNAPSHOT_RETRY_DELAYS = (0.05, 0.15, 0.5)
 
 
 class _RenderingMixin:
@@ -37,7 +50,10 @@ class _RenderingMixin:
                 await self._render_resync_snapshot(active, snapshot)
             return
         if event_type == "turn.started":
-            await self._reset_render(active)
+            await self._reset_render(
+                active,
+                turn_id=_optional_int(payload.get("turnId")),
+            )
             return
         if event_type == "turn.step.started":
             step = payload.get("step")
@@ -82,26 +98,22 @@ class _RenderingMixin:
             await self._maybe_flush(active, active.thinking)
             return
         if event_type == "turn.ended":
-            snapshot = await self._client.get_snapshot(active.session_id)
-            answer_text = _assistant_text_from_snapshot(snapshot)
-            if answer_text is not None:
-                active.render.text = answer_text
-            await self._flush(active, active.render)
-            active.render.turn_active = False
-            if self._thinking_enabled(active):
-                thinking_text = _thinking_text_from_snapshot(snapshot)
-                if thinking_text is not None:
-                    active.thinking.text = thinking_text
-                await self._flush(active, active.thinking)
-            active.thinking.turn_active = False
+            await self._finish_turn(active, event, payload)
+            return
+        if event_type == "prompt.completed":
+            await self._reconcile_completed_prompt(active, event, payload)
 
-    async def _reset_render(self, active: _ActiveStream) -> None:
+    async def _reset_render(
+        self, active: _ActiveStream, *, turn_id: int | None = None
+    ) -> None:
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
+        active.pending_finalization = None
         active.step = None
-        active.render = _RenderState(turn_active=True)
+        active.render = _RenderState(turn_id=turn_id, turn_active=True)
         active.thinking = _RenderState(
             prefix=THINKING_LABEL,
+            turn_id=turn_id,
             turn_active=True,
         )
 
@@ -115,9 +127,17 @@ class _RenderingMixin:
             await self._flush(active, active.thinking)
         active.thinking.turn_active = False
 
-        active.render = _RenderState(turn_active=True)
+        turn_id = active.render.turn_id
+        prompt_id = active.render.prompt_id
+        active.render = _RenderState(
+            turn_id=turn_id,
+            prompt_id=prompt_id,
+            turn_active=True,
+        )
         active.thinking = _RenderState(
             prefix=THINKING_LABEL,
+            turn_id=turn_id,
+            prompt_id=prompt_id,
             turn_active=True,
         )
 
@@ -217,8 +237,119 @@ class _RenderingMixin:
     ) -> str | None:
         snapshot = await self._client.get_snapshot(session_id)
         if field == "assistant_text":
-            return _assistant_text_from_snapshot(snapshot)
-        return _thinking_text_from_snapshot(snapshot)
+            text = _in_flight_assistant_text(snapshot)
+            return (
+                text
+                if text is not None
+                else _persisted_assistant_text(snapshot)
+            )
+        text = _in_flight_thinking_text(snapshot)
+        return (
+            text
+            if text is not None
+            else _persisted_thinking_text(snapshot)
+        )
+
+    async def _finish_turn(
+        self,
+        active: _ActiveStream,
+        event: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        answer = active.render
+        thinking = active.thinking
+        await self._cancel_delayed_flush(answer)
+        await self._cancel_delayed_flush(thinking)
+
+        turn_id = _optional_int(payload.get("turnId"))
+        if turn_id is None:
+            turn_id = answer.turn_id
+        answer.turn_id = turn_id
+        thinking.turn_id = turn_id
+
+        snapshot = await self._client.get_snapshot(active.session_id)
+        prompt_id = _snapshot_prompt_id(snapshot, turn_id=turn_id)
+        answer.prompt_id = prompt_id
+        thinking.prompt_id = prompt_id
+        turn_end_seq = _optional_int(event.get("seq"))
+
+        answer_text = _in_flight_assistant_text(snapshot, turn_id=turn_id)
+        if answer_text is None:
+            answer_text = _persisted_assistant_text(snapshot)
+        thinking_text = _in_flight_thinking_text(snapshot, turn_id=turn_id)
+        if thinking_text is None:
+            thinking_text = _persisted_thinking_text(snapshot)
+        _extend_provisional_text(answer, answer_text)
+        _extend_provisional_text(thinking, thinking_text)
+        active.pending_finalization = _PendingFinalization(
+            answer=answer,
+            thinking=thinking,
+            turn_end_seq=turn_end_seq,
+        )
+
+        await self._flush(active, answer)
+        answer.turn_active = False
+        if self._thinking_enabled(active):
+            await self._flush(active, thinking)
+        thinking.turn_active = False
+
+    async def _reconcile_completed_prompt(
+        self,
+        active: _ActiveStream,
+        event: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        pending = active.pending_finalization
+        prompt_id = payload.get("promptId")
+        if (
+            pending is None
+            or not isinstance(prompt_id, str)
+            or not prompt_id
+            or (
+                pending.answer.prompt_id is not None
+                and pending.answer.prompt_id != prompt_id
+            )
+        ):
+            return
+
+        pending.answer.prompt_id = prompt_id
+        pending.thinking.prompt_id = prompt_id
+        required_seq = _max_seq(
+            pending.turn_end_seq,
+            _optional_int(event.get("seq")),
+        )
+        for delay in (0.0, *FINAL_SNAPSHOT_RETRY_DELAYS):
+            if delay:
+                await self._poll_sleep(delay)
+            if active.pending_finalization is not pending:
+                return
+            snapshot = await self._client.get_snapshot(active.session_id)
+            if not _snapshot_is_final(snapshot, required_seq=required_seq):
+                continue
+            answer_text = _persisted_assistant_text(
+                snapshot, prompt_id=prompt_id
+            )
+            if answer_text is None and pending.answer.text:
+                continue
+            if answer_text is not None:
+                pending.answer.text = answer_text
+                await self._flush(active, pending.answer)
+            if self._thinking_enabled(active):
+                thinking_text = _persisted_thinking_text(
+                    snapshot, prompt_id=prompt_id
+                )
+                if thinking_text is not None:
+                    pending.thinking.text = thinking_text
+                await self._flush(active, pending.thinking)
+            active.pending_finalization = None
+            return
+
+        LOGGER.warning(
+            "final snapshot did not catch up for session %s prompt %s; "
+            "keeping provisional output",
+            active.session_id,
+            prompt_id,
+        )
 
     async def _backfill_thinking(self, active: _ActiveStream | None) -> None:
         if active is None or not self._thinking_enabled(active):
@@ -247,12 +378,13 @@ class _RenderingMixin:
     ) -> None:
         in_flight = snapshot.get("in_flight_turn")
         if isinstance(in_flight, dict):
-            answer_text = in_flight.get("assistant_text")
-            thinking_text = in_flight.get("thinking_text")
+            turn_id = _optional_int(in_flight.get("turn_id"))
+            answer_text = _in_flight_assistant_text(snapshot, turn_id=turn_id)
+            thinking_text = _in_flight_thinking_text(snapshot, turn_id=turn_id)
             if not isinstance(answer_text, str):
                 return
             if not active.render.turn_active:
-                await self._reset_render(active)
+                await self._reset_render(active, turn_id=turn_id)
             active.render.text = answer_text
             await self._flush(active, active.render)
             if self._thinking_enabled(active) and isinstance(thinking_text, str):
@@ -263,13 +395,13 @@ class _RenderingMixin:
 
         if not active.render.turn_active and not active.thinking.turn_active:
             return
-        answer_text = _assistant_text_from_snapshot(snapshot)
+        answer_text = _persisted_assistant_text(snapshot)
         if answer_text is not None:
             active.render.text = answer_text
             await self._flush(active, active.render)
         active.render.turn_active = False
         if self._thinking_enabled(active):
-            thinking_text = _thinking_text_from_snapshot(snapshot)
+            thinking_text = _persisted_thinking_text(snapshot)
             if thinking_text is not None:
                 active.thinking.text = thinking_text
             await self._flush(active, active.thinking)
@@ -280,3 +412,28 @@ class _RenderingMixin:
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
             await adapter.send_text(conversation, chunk)
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _snapshot_is_final(
+    snapshot: dict[str, Any], *, required_seq: int | None
+) -> bool:
+    if isinstance(snapshot.get("in_flight_turn"), dict):
+        return False
+    if required_seq is None:
+        return True
+    as_of_seq = _optional_int(snapshot.get("as_of_seq"))
+    return as_of_seq is not None and as_of_seq >= required_seq
+
+
+def _max_seq(first: int | None, second: int | None) -> int | None:
+    values = [value for value in (first, second) if value is not None]
+    return max(values) if values else None
+
+
+def _extend_provisional_text(render: _RenderState, candidate: str | None) -> None:
+    if candidate is not None and candidate.startswith(render.text):
+        render.text = candidate
