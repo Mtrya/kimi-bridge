@@ -36,19 +36,29 @@ def render_interaction(prompt: InteractionPrompt) -> dict[str, Any]:
 
 def render_outcome(outcome: InteractionOutcome) -> dict[str, Any]:
     if outcome.state == "completed" and outcome.approval_decision is not None:
-        title, template = {
-            "approved": ("Approval approved", "green"),
-            "rejected": ("Approval rejected", "red"),
-            "cancelled": ("Approval cancelled", "grey"),
+        title, template, icon_token = {
+            "approved": ("Approval approved", "green", "check_outlined"),
+            "rejected": ("Approval rejected", "red", "close_outlined"),
+            "cancelled": ("Approval cancelled", "grey", "close_outlined"),
         }[outcome.approval_decision]
-        return _status_card(title, outcome.detail, template=template)
-    title, template = {
-        "completed": ("Interaction complete", "green"),
-        "timed_out": ("Interaction timed out", "red"),
-        "stale": ("Interaction expired", "grey"),
-        "cancelled": ("Interaction cancelled", "grey"),
+        return _status_card(
+            title,
+            outcome.detail,
+            template=template,
+            icon_token=icon_token,
+        )
+    title, template, icon_token = {
+        "completed": ("Interaction complete", "green", "check_outlined"),
+        "timed_out": ("Interaction timed out", "red", "time_outlined"),
+        "stale": ("Interaction expired", "grey", "warning_outlined"),
+        "cancelled": ("Interaction cancelled", "grey", "close_outlined"),
     }[outcome.state]
-    return _status_card(title, outcome.detail, template=template)
+    return _status_card(
+        title,
+        outcome.detail,
+        template=template,
+        icon_token=icon_token,
+    )
 
 
 def interaction_id_from_value(value: object) -> str | None:
@@ -86,10 +96,14 @@ def _card_shell(
     *,
     template: str,
     icon_token: str,
+    icon_color: str | None = None,
     tag_text: str,
     tag_color: str,
     elements: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    icon = {"tag": "standard_icon", "token": icon_token}
+    if icon_color is not None:
+        icon["color"] = icon_color
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "width_mode": "default"},
@@ -97,7 +111,7 @@ def _card_shell(
             "title": {"tag": "plain_text", "content": title},
             "subtitle": {"tag": "plain_text", "content": subtitle},
             "template": template,
-            "icon": {"tag": "standard_icon", "token": icon_token},
+            "icon": icon,
             "text_tag_list": [
                 {
                     "tag": "text_tag",
@@ -183,7 +197,7 @@ def _approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
         "Approval required",
         prompt.session_title,
         template="default",
-        icon_token="approve_colorful",
+        icon_token="approval_colorful",
         tag_text="Pending",
         tag_color="yellow",
         elements=[
@@ -655,17 +669,24 @@ def _escape_markdown(text: str) -> str:
     return escaped
 
 
-def _status_card(title: str, detail: str, *, template: str) -> dict[str, Any]:
-    tag_color = {
-        "green": "green",
-        "red": "red",
-        "grey": "neutral",
-    }.get(template, "blue")
+def _status_card(
+    title: str,
+    detail: str,
+    *,
+    template: str,
+    icon_token: str,
+) -> dict[str, Any]:
+    tag_color, icon_color = {
+        "green": ("green", "green"),
+        "red": ("red", "red"),
+        "grey": ("neutral", "grey"),
+    }.get(template, ("blue", "blue"))
     return _card_shell(
         title,
         "Kimi bridge",
         template=template,
-        icon_token="notice_colorful",
+        icon_token=icon_token,
+        icon_color=icon_color,
         tag_text=title,
         tag_color=tag_color,
         elements=[_context_block(f"Interaction status: {detail}")],
