@@ -1021,11 +1021,11 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
         id="task-running",
         session_id="session-control",
         kind="bash",
-        description="Long command",
+        description="Bash: sleep 60",
         status="running",
         command="sleep 60",
-        created_at="created",
-        started_at="started",
+        created_at="2026-07-23T10:55:54.937Z",
+        started_at="2026-07-23T10:55:54.937Z",
         output_preview="last output",
         output_bytes=10000,
     )
@@ -1036,8 +1036,11 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
         description="Finished helper",
         status="completed",
         command=None,
-        created_at="created",
-        completed_at="completed",
+        created_at="2026-07-23T10:54:54.937Z",
+        started_at="2026-07-23T10:54:54.937Z",
+        completed_at="2026-07-23T10:55:54.956Z",
+        output_preview="\n",
+        output_bytes=1,
     )
     client.tasks["session-control"] = [running, completed]
     client.task_details[("session-control", "task-running")] = running
@@ -1072,11 +1075,61 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
     ]
     assert client.cancelled_tasks == [("session-control", "task-running")]
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    assert any("task-running [running] bash" in text for text in texts)
-    assert any("task-complete [completed] subagent" in text for text in texts)
-    assert any("Output tail:\nlast output" in text for text in texts)
+    task_list = texts[0]
+    assert "**Tasks · 2**" in task_list
+    assert task_list.index("🟡 **Running**") < task_list.index("✅ **Completed**")
+    assert "Command · `sleep 60`" in task_list
+    assert "`task-running`" in task_list
+    assert "`task-complete`" in task_list
+    assert "**Running tasks · 1**" in texts[1]
+    detail = texts[2]
+    assert "**Command**\n`sleep 60`" in detail
+    assert "**Output tail · 9.8 KiB**\nlast output" in detail
+    assert "Started 2026-07-23 10:55:54 UTC" in detail
     assert any(text == "Cancelled task task-running" for text in texts)
     assert any("Usage: /tasks" in text for text in texts)
+
+
+async def test_task_detail_humanizes_duration_and_blank_output(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    task = TaskInfo(
+        id="bash-finished",
+        session_id="session-control",
+        kind="bash",
+        description="Bash: printf '\\n'",
+        status="completed",
+        command="printf '\\n'",
+        created_at="2026-07-23T10:55:54.937Z",
+        started_at="2026-07-23T10:55:54.937Z",
+        completed_at="2026-07-23T10:56:54.956Z",
+        output_preview="\n",
+        output_bytes=1,
+    )
+    client.task_details[("session-control", task.id)] = task
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message(f"/tasks show {task.id}")
+        )
+    finally:
+        await router.close()
+
+    detail = adapter.sent[0][2]
+    assert "✅ **Completed** · bash" in detail
+    assert "Ran 1 min · finished 2026-07-23 10:56:54 UTC" in detail
+    assert "**Output tail · 1 B**\nNo visible output." in detail
+    assert task.description not in detail
 
 
 async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(

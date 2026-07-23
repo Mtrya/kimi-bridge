@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from ..kimi_server import (
@@ -20,6 +21,14 @@ from ..platforms.base import InboundInteraction, InboundMessage
 
 
 SESSION_TITLE_LIMIT = 80
+TASK_DESCRIPTION_LIMIT = 100
+TASK_COMMAND_LIMIT = 500
+_TASK_STATUS_DISPLAY: dict[TaskStatus, tuple[int, str, str]] = {
+    "running": (0, "🟡", "Running"),
+    "failed": (1, "❌", "Failed"),
+    "cancelled": (2, "⏹️", "Cancelled"),
+    "completed": (3, "✅", "Completed"),
+}
 
 
 def _conversation_key(message: InboundMessage | InboundInteraction) -> str:
@@ -150,33 +159,129 @@ def _format_tasks(tasks: list[TaskInfo], status: TaskStatus | None) -> str:
     if not tasks:
         suffix = f" with status {status}" if status is not None else ""
         return f"No tasks found{suffix}."
-    lines: list[str] = []
-    for task in tasks:
-        lines.append(f"{task.id} [{task.status}] {task.kind}\n{task.description}")
-    return "\n\n".join(lines)
+    heading = "Tasks" if status is None else f"{_task_status_label(status)} tasks"
+    blocks = [f"**{heading} · {len(tasks)}**"]
+    for task in sorted(
+        tasks, key=lambda item: _TASK_STATUS_DISPLAY[item.status][0]
+    ):
+        _, icon, label = _TASK_STATUS_DISPLAY[task.status]
+        blocks.append(
+            "\n".join(
+                (
+                    f"{icon} **{label}** · {task.kind}",
+                    _task_summary(task),
+                    f"`{task.id}`",
+                )
+            )
+        )
+    return "\n\n".join(blocks)
 
 
 def _format_task_detail(task: TaskInfo) -> str:
-    lines = [
-        f"Task: {task.id}",
-        f"Status: {task.status}",
-        f"Kind: {task.kind}",
-        f"Description: {task.description}",
-    ]
+    _, icon, label = _TASK_STATUS_DISPLAY[task.status]
+    lines = [f"{icon} **{label}** · {task.kind}", f"`{task.id}`"]
+    if not _is_command_description(task):
+        lines.extend(("", _truncate(_one_line(task.description), TASK_DESCRIPTION_LIMIT)))
     if task.command is not None:
-        lines.append(f"Command: {task.command}")
-    lines.append(f"Created: {task.created_at}")
-    if task.started_at is not None:
-        lines.append(f"Started: {task.started_at}")
-    if task.completed_at is not None:
-        lines.append(f"Completed: {task.completed_at}")
+        command = _truncate(_one_line(task.command), TASK_COMMAND_LIMIT)
+        lines.extend(("", "**Command**", _inline_code(command)))
+
+    lines.extend(("", "**Timing**", _format_task_timing(task)))
+
+    output_heading = "**Output tail"
     if task.output_bytes is not None:
-        lines.append(f"Output bytes: {task.output_bytes}")
-    if task.output_preview is not None:
-        lines.extend(("Output tail:", task.output_preview))
+        output_heading += f" · {_format_bytes(task.output_bytes)}"
+    output_heading += "**"
+    if task.output_preview is None:
+        output = "Output unavailable."
+    elif not task.output_preview.strip():
+        output = "No visible output."
     else:
-        lines.append("Output tail: unavailable")
+        output = task.output_preview.rstrip()
+    lines.extend(("", output_heading, output))
     return "\n".join(lines)
+
+
+def _task_status_label(status: TaskStatus) -> str:
+    return _TASK_STATUS_DISPLAY[status][2]
+
+
+def _task_summary(task: TaskInfo) -> str:
+    if _is_command_description(task):
+        assert task.command is not None
+        command = _truncate(_one_line(task.command), TASK_DESCRIPTION_LIMIT)
+        return f"Command · {_inline_code(command)}"
+    description = _one_line(task.description) or "No description."
+    return _truncate(description, TASK_DESCRIPTION_LIMIT)
+
+
+def _is_command_description(task: TaskInfo) -> bool:
+    if task.kind != "bash" or task.command is None:
+        return False
+    return _one_line(task.description).startswith("Bash:")
+
+
+def _one_line(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _truncate(value: str, limit: int) -> str:
+    return value if len(value) <= limit else value[: limit - 1].rstrip() + "…"
+
+
+def _inline_code(value: str) -> str:
+    return f"`{value.replace('`', 'ˋ')}`"
+
+
+def _format_task_timing(task: TaskInfo) -> str:
+    started = _parse_timestamp(task.started_at)
+    completed = _parse_timestamp(task.completed_at)
+    if started is not None and completed is not None and completed >= started:
+        elapsed_ms = round((completed - started).total_seconds()) * 1000
+        return (
+            f"Ran {_format_milliseconds(elapsed_ms)} · "
+            f"finished {_format_timestamp(completed)}"
+        )
+    if task.started_at is not None and task.completed_at is not None:
+        return (
+            f"Started {_format_timestamp(task.started_at)} · "
+            f"finished {_format_timestamp(task.completed_at)}"
+        )
+    if task.started_at is not None:
+        return f"Started {_format_timestamp(task.started_at)}"
+    if task.completed_at is not None:
+        return f"Finished {_format_timestamp(task.completed_at)}"
+    return f"Created {_format_timestamp(task.created_at)}"
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _format_timestamp(value: Any) -> str:
+    parsed = value if isinstance(value, datetime) else _parse_timestamp(value)
+    if parsed is None:
+        return str(value)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if amount < 1024 or unit == "GiB":
+            return f"{amount:g} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    raise AssertionError("unreachable")
 
 
 def _format_goal(goal: GoalInfo | None) -> str:
