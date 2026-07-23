@@ -433,6 +433,78 @@ async def test_rest_envelope_error_is_raised() -> None:
     assert caught.value.code == 40401
 
 
+async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> None:
+    http = FakeHttpClient(
+        [
+            _envelope(
+                {
+                    "active": {"prompt_id": "prompt-active"},
+                    "queued": [
+                        {"prompt_id": "prompt-next"},
+                        {"prompt_id": "prompt-last"},
+                    ],
+                }
+            ),
+            _envelope({"aborted": True}),
+            _envelope({"aborted": True}),
+            _envelope({"aborted": True}),
+            _envelope({"aborted": True}),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    assert await client.abort_session("session-1") is True
+    assert [request[0:2] for request in http.requests] == [
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts/prompt-next:abort",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts/prompt-last:abort",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts/prompt-active:abort",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:abort",
+        ),
+    ]
+    assert http.requests[-1][2]["json"] == {}
+
+
+async def test_abort_session_stops_promptless_main_turn() -> None:
+    http = FakeHttpClient(
+        [
+            _envelope({"active": None, "queued": []}),
+            _envelope({"aborted": True}),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    assert await client.abort_session("session-1") is True
+    assert [request[0:2] for request in http.requests] == [
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
+        ),
+        (
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:abort",
+        ),
+    ]
+
+
 async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     model = {
         "provider": "kimi-code",
