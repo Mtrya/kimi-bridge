@@ -16,6 +16,7 @@ from kimi_bridge.interactions import (
     ApprovalRequest,
     ApprovalResponse,
     InteractionOutcome,
+    InteractionState,
     MultipleChoiceAnswer,
     MultipleChoiceWithOtherAnswer,
     OtherAnswer,
@@ -230,25 +231,47 @@ def _question_prompt() -> QuestionPrompt:
     )
 
 
-def test_cancelled_outcome_renders_a_terminal_neutral_card() -> None:
-    card = render_outcome(InteractionOutcome(state="cancelled", detail="Stopped"))
+@pytest.mark.parametrize(
+    ("state", "template", "tag_color", "icon_token", "icon_color"),
+    [
+        ("completed", "green", "green", "check_outlined", "green"),
+        ("timed_out", "red", "red", "time_outlined", "red"),
+        ("stale", "grey", "neutral", "warning_outlined", "grey"),
+        ("cancelled", "grey", "neutral", "close_outlined", "grey"),
+    ],
+)
+def test_interaction_outcome_uses_semantic_header(
+    state: InteractionState,
+    template: str,
+    tag_color: str,
+    icon_token: str,
+    icon_color: str,
+) -> None:
+    card = render_outcome(InteractionOutcome(state=state, detail="Finished"))
 
-    assert card["header"]["template"] == "grey"
-    assert card["header"]["text_tag_list"][0]["color"] == "neutral"
+    assert card["header"]["template"] == template
+    assert card["header"]["text_tag_list"][0]["color"] == tag_color
+    assert card["header"]["icon"] == {
+        "tag": "standard_icon",
+        "token": icon_token,
+        "color": icon_color,
+    }
 
 
 @pytest.mark.parametrize(
-    ("decision", "template", "tag_color"),
+    ("decision", "template", "tag_color", "icon_token", "icon_color"),
     [
-        ("approved", "green", "green"),
-        ("rejected", "red", "red"),
-        ("cancelled", "grey", "neutral"),
+        ("approved", "green", "green", "check_outlined", "green"),
+        ("rejected", "red", "red", "close_outlined", "red"),
+        ("cancelled", "grey", "neutral", "close_outlined", "grey"),
     ],
 )
-
-
 def test_approval_outcome_uses_semantic_decision_color(
-    decision: ApprovalDecision, template: str, tag_color: str
+    decision: ApprovalDecision,
+    template: str,
+    tag_color: str,
+    icon_token: str,
+    icon_color: str,
 ) -> None:
     card = render_outcome(
         InteractionOutcome(
@@ -260,6 +283,11 @@ def test_approval_outcome_uses_semantic_decision_color(
 
     assert card["header"]["template"] == template
     assert card["header"]["text_tag_list"][0]["color"] == tag_color
+    assert card["header"]["icon"] == {
+        "tag": "standard_icon",
+        "token": icon_token,
+        "color": icon_color,
+    }
     status_blocks = card["body"]["elements"]
     assert len(status_blocks) == 1
     status_lines = status_blocks[0]["columns"][0]["elements"]
@@ -747,6 +775,10 @@ def test_approval_card_rendering_and_callback_decoding() -> None:
     card = render_interaction(prompt)
 
     assert card["schema"] == "2.0"
+    assert card["header"]["icon"] == {
+        "tag": "standard_icon",
+        "token": "approval_colorful",
+    }
     button_columns = card["body"]["elements"][-1]["columns"]
     values = [
         column["elements"][0]["behaviors"][0]["value"]
@@ -772,6 +804,10 @@ def test_single_question_card_rendering_and_answer_decoding() -> None:
     prompt = _question_prompt()
     card = render_interaction(prompt)
 
+    assert card["header"]["icon"] == {
+        "tag": "standard_icon",
+        "token": "myai_colorful",
+    }
     question_context = card["body"]["elements"][1]["columns"][0]["elements"][0][
         "text"
     ]["content"]
