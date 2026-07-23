@@ -326,6 +326,18 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             ),
         ),
         RestOperationContract(
+            "abort_session",
+            "KimiServerClient.abort_session",
+            "POST",
+            "/sessions/{session_id}:abort",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note=(
+                "The OpenAPI session-action union is exposed under the "
+                "archive path; the runtime path remains :abort"
+            ),
+        ),
+        RestOperationContract(
             "goal",
             "KimiServerClient.get_goal",
             "GET",
@@ -591,7 +603,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "list_prompts",
-            "KimiServerClient.abort_prompt",
+            "KimiServerClient.abort_prompt/abort_session",
             "GET",
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
@@ -599,11 +611,12 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                 _field("active", "object", required=False),
                 _field("active.prompt_id", "string", required=False),
                 _field("queued", "array"),
+                _field("queued.[].prompt_id", "string"),
             ),
         ),
         RestOperationContract(
             "abort_prompt",
-            "KimiServerClient.abort_prompt",
+            "KimiServerClient.abort_prompt/abort_session",
             "POST",
             "/sessions/{session_id}/prompts/{prompt_id}:abort",
             "/api/v1/sessions/{session_id}/prompts/{tail}",

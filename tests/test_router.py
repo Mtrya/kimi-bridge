@@ -91,6 +91,8 @@ class FakeKimiClient:
         self.tools: dict[str, list[ToolInfo]] = {}
         self.aborted: list[str] = []
         self.abort_result = True
+        self.stopped: list[str] = []
+        self.stop_result = True
         self.sessions: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
@@ -328,6 +330,16 @@ class FakeKimiClient:
         if session is not None:
             session["busy"] = False
         return self.abort_result
+
+    async def abort_session(self, session_id: str) -> bool:
+        self.call_order.append(f"stop:{session_id}")
+        self.stopped.append(session_id)
+        session = next(
+            (item for item in self.sessions if item["id"] == session_id), None
+        )
+        if session is not None:
+            session["busy"] = False
+        return self.stop_result
 
     async def get_snapshot(self, session_id: str) -> dict[str, Any]:
         self.snapshot_calls.append(session_id)
@@ -779,7 +791,7 @@ async def test_bridge_commands_switch_stop_and_mode(
     assert any("Permission mode: yolo" in text for text in texts)
     assert any(text == "Stopped." for text in texts)
     assert client.profile_updates == [("session-b", {"permission_mode": "yolo"})]
-    assert client.aborted == ["session-b"]
+    assert client.stopped == ["session-b"]
     binding = store.load().bindings["feishu:cli_bot:ou_user"]
     assert binding.session_id == "session-b"
     assert binding.permission_mode == "yolo"
@@ -2237,7 +2249,7 @@ async def test_stop_cancels_pending_approval_and_makes_callback_stale(
     finally:
         await router.close()
 
-    assert client.aborted == ["session-1"]
+    assert client.stopped == ["session-1"]
     assert client.resolved_approvals == []
     assert [outcome.state for _message, outcome in adapter.outcomes] == [
         "cancelled",
@@ -2271,7 +2283,7 @@ async def test_stop_cancels_pending_question_without_dismissing_it(
     finally:
         await router.close()
 
-    assert client.aborted == ["session-1"]
+    assert client.stopped == ["session-1"]
     assert client.resolved_questions == []
     assert client.dismissed_questions == []
     assert adapter.outcomes[-1][1].state == "cancelled"
@@ -2307,7 +2319,7 @@ async def test_stop_aborts_pending_interaction_after_binding_changes(
     finally:
         await router.close()
 
-    assert client.aborted == ["session-1", "session-2"]
+    assert client.stopped == ["session-1", "session-2"]
     assert adapter.outcomes[-1][1].state == "cancelled"
 
 
