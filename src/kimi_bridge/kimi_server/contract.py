@@ -620,6 +620,11 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                 _field("epoch", "string"),
                 _field("messages.items", "array"),
                 _field("messages.items.[].role", "string"),
+                _field(
+                    "messages.items.[].prompt_id",
+                    "string",
+                    required=False,
+                ),
                 _field("messages.items.[].content", "array"),
                 _field(
                     "messages.items.[].content.[].text",
@@ -632,6 +637,17 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     required=False,
                 ),
                 _field("in_flight_turn", "object"),
+                _field(
+                    "in_flight_turn.turn_id",
+                    "integer",
+                    "number",
+                    required=False,
+                ),
+                _field(
+                    "in_flight_turn.current_prompt_id",
+                    "string",
+                    required=False,
+                ),
                 _field(
                     "in_flight_turn.assistant_text", "string", required=False
                 ),
@@ -779,7 +795,11 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
 
 
 KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
-    SessionEventContract("turn.started", "ChatRouter.dispatch_event"),
+    SessionEventContract(
+        "turn.started",
+        "ChatRouter.dispatch_event",
+        (_field("turnId", "integer", "number"),),
+    ),
     SessionEventContract(
         "turn.step.started",
         "ChatRouter.dispatch_event",
@@ -796,7 +816,14 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
         (_field("delta", "string"),),
     ),
     SessionEventContract(
-        "turn.ended", "ChatRouter.dispatch_event/scripts.smoke_server"
+        "turn.ended",
+        "ChatRouter.dispatch_event/scripts.smoke_server",
+        (_field("turnId", "integer", "number"),),
+    ),
+    SessionEventContract(
+        "prompt.completed",
+        "ChatRouter.dispatch_event",
+        (_field("promptId", "string"),),
     ),
     SessionEventContract(
         "agent.status.updated",

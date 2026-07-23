@@ -97,6 +97,8 @@ class FakeKimiClient:
         self.stream_actions: list[tuple[str, str]] = []
         self.call_order: list[str] = []
         self.snapshots: dict[str, dict[str, Any]] = {}
+        self.snapshot_sequences: dict[str, list[dict[str, Any]]] = {}
+        self.snapshot_calls: list[str] = []
         self.approvals: dict[str, list[ApprovalRequest]] = {}
         self.questions: dict[str, list[QuestionRequest]] = {}
         self.resolved_approvals: list[tuple[str, str, str]] = []
@@ -328,6 +330,10 @@ class FakeKimiClient:
         return self.abort_result
 
     async def get_snapshot(self, session_id: str) -> dict[str, Any]:
+        self.snapshot_calls.append(session_id)
+        sequence = self.snapshot_sequences.get(session_id)
+        if sequence:
+            return sequence.pop(0)
         return self.snapshots.get(
             session_id,
             {"in_flight_turn": None, "messages": {"items": []}},
@@ -2653,6 +2659,252 @@ async def test_delta_throttle_final_edit_and_router_chunking(
     )
 
 
+async def test_turn_end_keeps_longer_stream_until_prompt_completion(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", turnId=7),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="first", offset=0),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta=" plus remainder", offset=5),
+        )
+
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=12,
+            turn_id=7,
+            prompt_id="prompt-1",
+            text="first",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.ended", seq=12, turnId=7, reason="completed"),
+        )
+
+        answer_ref = adapter.sent[0][0]
+        assert adapter.edits == [(answer_ref, "first plus remainder")]
+
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=13,
+                promptId="another-prompt",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+        assert client.snapshot_calls == ["session-1"]
+
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=14,
+            prompt_id="prompt-1",
+            text="first plus remainder",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=14,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == ["first"]
+    assert adapter.edits == [(answer_ref, "first plus remainder")]
+    assert client.snapshot_calls == ["session-1", "session-1"]
+
+
+async def test_turn_end_does_not_replace_stream_with_uncorrelated_history(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", turnId=8),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="current answer", offset=0),
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=20,
+            prompt_id="previous-prompt",
+            text="previous answer",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.ended", seq=20, turnId=8, reason="completed"),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "current answer"
+    ]
+    assert adapter.edits == []
+
+
+async def test_prompt_completion_retries_and_repairs_a_missing_delta(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    poll_delays: list[float] = []
+
+    async def record_poll(delay: float) -> None:
+        poll_delays.append(delay)
+
+    client.snapshot_sequences["session-1"] = [
+        _in_flight_snapshot(
+            seq=20,
+            turn_id=8,
+            prompt_id="prompt-1",
+            text="first",
+        ),
+        _in_flight_snapshot(
+            seq=21,
+            turn_id=8,
+            prompt_id="prompt-1",
+            text="first",
+        ),
+        _completed_snapshot(
+            seq=22,
+            prompt_id="prompt-1",
+            text="first plus repaired",
+        ),
+    ]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        poll_sleep=record_poll,
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", turnId=8),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="first", offset=0),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.ended", seq=20, turnId=8, reason="completed"),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=22,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    answer_ref = adapter.sent[0][0]
+    assert adapter.edits == [(answer_ref, "first plus repaired")]
+    assert client.snapshot_calls == ["session-1"] * 3
+    assert poll_delays == [0.05]
+
+
+async def test_late_prompt_completion_does_not_edit_a_new_turn(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", turnId=9),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="old", offset=0),
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=30,
+            turn_id=9,
+            prompt_id="prompt-1",
+            text="old",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.ended", seq=30, turnId=9, reason="completed"),
+        )
+
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", turnId=10),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="new", offset=0),
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=32,
+            prompt_id="prompt-1",
+            text="old finalized",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=32,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == ["old", "new"]
+    assert adapter.edits == []
+    assert client.snapshot_calls == ["session-1"]
+
+
 async def test_text_after_tool_call_starts_a_new_message(
     tmp_path: Path,
 ) -> None:
@@ -3017,6 +3269,7 @@ def _event(
     *,
     delta: str | None = None,
     offset: int | None = None,
+    seq: int | None = None,
     **payload_fields: Any,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"type": event_type}
@@ -3026,7 +3279,50 @@ def _event(
     event: dict[str, Any] = {"type": event_type, "payload": payload}
     if offset is not None:
         event["offset"] = offset
+    if seq is not None:
+        event["seq"] = seq
     return event
+
+
+def _in_flight_snapshot(
+    *,
+    seq: int,
+    turn_id: int,
+    prompt_id: str,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "as_of_seq": seq,
+        "in_flight_turn": {
+            "turn_id": turn_id,
+            "current_prompt_id": prompt_id,
+            "assistant_text": text,
+            "thinking_text": "",
+            "running_tools": [],
+        },
+        "messages": {"items": []},
+    }
+
+
+def _completed_snapshot(
+    *,
+    seq: int,
+    prompt_id: str,
+    text: str,
+) -> dict[str, Any]:
+    return {
+        "as_of_seq": seq,
+        "in_flight_turn": None,
+        "messages": {
+            "items": [
+                {
+                    "role": "assistant",
+                    "prompt_id": prompt_id,
+                    "content": [{"type": "text", "text": text}],
+                }
+            ]
+        },
+    }
 
 
 async def _wait_for(predicate: Any) -> None:
