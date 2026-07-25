@@ -43,7 +43,9 @@ from kimi_bridge.kimi_server import (
 REPORT_SCHEMA_VERSION = 2
 CANARY_PLATFORMS = ("linux", "macos", "windows")
 OFFICIAL_KIMI_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
-OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/install.ps1"
+# /install.ps1 is the deprecated Python kimi-cli installer; Kimi Code lives
+# under /kimi-code/ on both platforms.
+OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.ps1"
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
