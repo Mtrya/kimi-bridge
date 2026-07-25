@@ -49,6 +49,11 @@ def test_ci_has_locked_fake_test_matrix_quality_and_distribution_jobs() -> None:
     assert workflow["concurrency"]["cancel-in-progress"] == "true"
     jobs = workflow["jobs"]
     assert set(jobs) == {"tests", "quality", "distribution"}
+    assert jobs["tests"]["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "macos-latest",
+        "windows-latest",
+    ]
     assert jobs["tests"]["strategy"]["matrix"]["python-version"] == [
         "3.11",
         "3.12",
@@ -79,6 +84,11 @@ def test_drift_workflow_is_daily_manual_credential_free_and_write_scoped() -> No
     assert workflow["on"]["schedule"] == [{"cron": "17 19 * * *"}]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["jobs"]["canary"]["if"] == ("github.ref == 'refs/heads/main'")
+    assert workflow["jobs"]["canary"]["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "macos-latest",
+        "windows-latest",
+    ]
     assert "permissions" not in workflow["jobs"]["canary"]
     assert workflow["jobs"]["synchronize"]["permissions"] == {
         "actions": "write",

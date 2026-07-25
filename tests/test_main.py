@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import signal
 from typing import Any
 
 import pytest
@@ -12,6 +14,56 @@ from kimi_bridge.config import Config, FeishuConfig, TelegramConfig
 class _Adapter:
     name = "fake"
     message_limit = 1
+
+
+async def test_signal_handlers_prefer_the_event_loop() -> None:
+    class LoopRecorder:
+        def __init__(self) -> None:
+            self.registered: dict[int, Any] = {}
+
+        def add_signal_handler(self, watched_signal: int, callback: Any) -> None:
+            self.registered[watched_signal] = callback
+
+    loop = LoopRecorder()
+    stop_requested = asyncio.Event()
+
+    main_module._install_shutdown_signal_handlers(loop, stop_requested)  # type: ignore[arg-type]
+
+    assert set(loop.registered) == {signal.SIGINT, signal.SIGTERM}
+    loop.registered[signal.SIGTERM]()
+    assert stop_requested.is_set()
+
+
+async def test_signal_handlers_fall_back_when_loop_registration_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_loop = asyncio.get_running_loop()
+
+    class WindowsLikeLoop:
+        def add_signal_handler(self, *_args: Any) -> None:
+            raise NotImplementedError
+
+        def call_soon_threadsafe(self, callback: Any, *args: Any) -> None:
+            real_loop.call_soon_threadsafe(callback, *args)
+
+    registered: dict[int, Any] = {}
+    monkeypatch.setattr(
+        main_module.signal,
+        "signal",
+        lambda watched_signal, handler: registered.setdefault(
+            watched_signal, handler
+        ),
+    )
+    stop_requested = asyncio.Event()
+
+    main_module._install_shutdown_signal_handlers(
+        WindowsLikeLoop(),  # type: ignore[arg-type]
+        stop_requested,
+    )
+
+    assert set(registered) == {signal.SIGINT, signal.SIGTERM}
+    registered[signal.SIGINT](signal.SIGINT, None)
+    await asyncio.wait_for(stop_requested.wait(), timeout=1)
 
 
 def test_builds_only_selected_telegram_adapter(monkeypatch: pytest.MonkeyPatch) -> None:

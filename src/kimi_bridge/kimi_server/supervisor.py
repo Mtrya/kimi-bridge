@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import logging
 import re
+import shutil
 import socket
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
@@ -64,6 +66,19 @@ def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _spawn_target(executable: str, platform_name: str = sys.platform) -> str:
+    """Return the value to pass to the process factory for ``executable``.
+
+    Windows CreateProcess only appends ``.exe`` when searching PATH, so npm-style
+    ``kimi.cmd``/``kimi.ps1`` shims must be resolved through PATHEXT-aware
+    ``shutil.which``. POSIX exec already searches PATH correctly.
+    """
+
+    if not platform_name.startswith("win"):
+        return executable
+    return shutil.which(executable) or executable
 
 
 class KimiServerSupervisor:
@@ -252,7 +267,7 @@ class KimiServerSupervisor:
             if self._process_env is not None:
                 kwargs["env"] = self._process_env
             process = await self._process_factory(
-                self._executable,
+                _spawn_target(self._executable),
                 *arguments,
                 **kwargs,
             )
@@ -316,7 +331,7 @@ class KimiServerSupervisor:
     async def _run_child(self) -> int:
         assert self._port is not None
         command = (
-            self._executable,
+            _spawn_target(self._executable),
             "web",
             "--no-open",
             "--host",

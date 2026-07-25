@@ -1,6 +1,6 @@
 # Architecture
 
-kimi-bridge is an always-on, single-operator Linux process that translates one instant-messaging adapter into Kimi Code's local server contract. It deliberately keeps Kimi protocol details, chat semantics, and platform-native UI in separate boundaries.
+kimi-bridge is an always-on, single-operator process that translates one instant-messaging adapter into Kimi Code's local server contract. Linux is the supported platform; macOS and Windows are experimental and CI-tested with fakes, not live-validated. It deliberately keeps Kimi protocol details, chat semantics, and platform-native UI in separate boundaries.
 
 ```text
 ┌──────────────────────────────────────────────┐

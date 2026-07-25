@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ from .kimi_server import (
 
 REPORT_SCHEMA_VERSION = 1
 OFFICIAL_KIMI_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
+OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/install.ps1"
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
@@ -333,13 +335,20 @@ async def check_live(
     *,
     version: str | None = None,
     artifact_directory: Path | None = None,
-    installer_url: str = OFFICIAL_KIMI_INSTALLER_URL,
+    installer_url: str | None = None,
     runner: CommandRunner | None = None,
     startup_timeout: float = 30.0,
+    platform_name: str = sys.platform,
 ) -> CompatibilityReport:
     """Install and probe Kimi in a disposable credential-free home."""
 
     command_runner = runner or _run_command
+    if installer_url is None:
+        installer_url = (
+            OFFICIAL_KIMI_WINDOWS_INSTALLER_URL
+            if platform_name.startswith("win")
+            else OFFICIAL_KIMI_INSTALLER_URL
+        )
     product = "unknown"
     temporary_root: str | None = None
     if version is not None:
@@ -372,6 +381,7 @@ async def check_live(
                 version=version,
                 installer_url=installer_url,
                 runner=command_runner,
+                platform_name=platform_name,
             )
             supervisor = KimiServerSupervisor(
                 executable=str(installed.executable),
@@ -426,10 +436,12 @@ def install_official_kimi(
     version: str | None,
     installer_url: str,
     runner: CommandRunner,
+    platform_name: str = sys.platform,
 ) -> InstalledKimi:
     """Download an inspectable installer file and execute it in isolation."""
 
-    installer = root / "install.sh"
+    windows = platform_name.startswith("win")
+    installer = root / ("install.ps1" if windows else "install.sh")
     install_directory = root / "install"
     home = root / "home"
     kimi_home = root / "kimi-home"
@@ -440,6 +452,7 @@ def install_official_kimi(
         install_directory=install_directory,
         kimi_home=kimi_home,
         version=version,
+        platform_name=platform_name,
     )
     _run_checked(
         runner,
@@ -464,20 +477,34 @@ def install_official_kimi(
         timeout=180.0,
         category="installer-download",
     )
+    if windows:
+        install_command = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(installer),
+        ]
+    else:
+        install_command = ["bash", str(installer)]
     _run_checked(
         runner,
-        ["bash", str(installer)],
+        install_command,
         env=environment,
         timeout=180.0,
         category="installer-execution",
     )
-    executable = install_directory / "bin" / "kimi"
-    if not executable.is_file():
-        raise CompatibilityCheckError(
-            "installer-execution",
-            "official installer completed without creating bin/kimi",
-        )
-    return InstalledKimi(executable, environment)
+    executable_names = ("kimi.exe", "kimi.cmd") if windows else ("kimi",)
+    for name in executable_names:
+        executable = install_directory / "bin" / name
+        if executable.is_file():
+            return InstalledKimi(executable, environment)
+    raise CompatibilityCheckError(
+        "installer-execution",
+        "official installer completed without creating "
+        + " or ".join(f"bin/{name}" for name in executable_names),
+    )
 
 
 def write_report(report: CompatibilityReport, path: Path) -> None:
@@ -854,7 +881,9 @@ def _isolated_environment(
     install_directory: Path,
     kimi_home: Path,
     version: str | None,
+    platform_name: str = sys.platform,
 ) -> dict[str, str]:
+    windows = platform_name.startswith("win")
     retained = (
         "PATH",
         "LANG",
@@ -868,6 +897,9 @@ def _isolated_environment(
         "https_proxy",
         "no_proxy",
     )
+    if windows:
+        # CreateProcess and PowerShell need these to function at all.
+        retained += ("SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "TEMP", "TMP")
     environment = {name: os.environ[name] for name in retained if name in os.environ}
     environment.update(
         {
@@ -878,8 +910,19 @@ def _isolated_environment(
             "KIMI_CODE_HOME": str(kimi_home),
         }
     )
-    environment["PATH"] = (
-        f"{install_directory / 'bin'}:{environment.get('PATH', '/usr/bin:/bin')}"
+    if windows:
+        environment["USERPROFILE"] = str(home)
+        environment["APPDATA"] = str(home / "AppData" / "Roaming")
+        environment["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+    path_separator = ";" if windows else ":"
+    fallback_path = "" if windows else "/usr/bin:/bin"
+    environment["PATH"] = path_separator.join(
+        part
+        for part in (
+            str(install_directory / "bin"),
+            environment.get("PATH", fallback_path),
+        )
+        if part
     )
     if version is not None:
         environment["KIMI_VERSION"] = version

@@ -4,6 +4,7 @@ import ast
 import base64
 import inspect
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -417,9 +418,49 @@ def test_installer_failure_is_redacted(tmp_path: Path) -> None:
             version="0.28.1",
             installer_url="https://example.invalid/install.sh",
             runner=failed_runner,
+            platform_name="linux",
         )
     assert "do-not-print" not in str(raised.value)
     assert raised.value.category == "installer-download"
+
+
+def test_windows_installer_uses_powershell_and_finds_exe(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    def windows_runner(
+        command: Any, *, env: Any = None, timeout: Any = None
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(list(command))
+        if command[0] == "curl":
+            destination = Path(command[command.index("--output") + 1])
+            destination.write_text("# installer\n", encoding="utf-8")
+        else:
+            executable = Path(env["KIMI_INSTALL_DIR"]) / "bin" / "kimi.exe"
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            executable.write_bytes(b"")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    installed = install_official_kimi(
+        tmp_path,
+        version=None,
+        installer_url="https://example.invalid/install.ps1",
+        runner=windows_runner,
+        platform_name="win32",
+    )
+
+    assert installed.executable.name == "kimi.exe"
+    assert commands[0][0] == "curl"
+    assert commands[0][-1] == "https://example.invalid/install.ps1"
+    assert Path(commands[0][commands[0].index("--output") + 1]).name == "install.ps1"
+    assert commands[1][:4] == [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+    ]
+    assert installed.environment["USERPROFILE"] == str(tmp_path / "home")
+    install_bin = str(tmp_path / "install" / "bin")
+    assert installed.environment["PATH"].startswith(f"{install_bin};")
 
 
 async def test_live_checker_cleans_temporary_home_after_installer_failure() -> None:
@@ -436,7 +477,7 @@ async def test_live_checker_cleans_temporary_home_after_installer_failure() -> N
             destination.write_text("#!/bin/sh\n", encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    report = await check_live(runner=incomplete_runner)
+    report = await check_live(runner=incomplete_runner, platform_name="linux")
 
     assert not report.compatible
     assert report.failures[0]["category"] == "installer-execution"
@@ -457,6 +498,9 @@ async def test_live_checker_rejects_malformed_explicit_version_before_download()
     assert report.failures[0]["id"] == "input.version"
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="spawns a shebang script as the fake kimi"
+)
 async def test_live_checker_reports_startup_timeout_and_cleans_up() -> None:
     roots: list[Path] = []
 

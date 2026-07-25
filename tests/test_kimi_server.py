@@ -345,6 +345,23 @@ def test_parses_contract_and_ansi_startup_lines_without_exposing_token() -> None
     )
 
 
+def test_windows_spawn_target_resolves_path_shims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kimi_bridge.kimi_server import supervisor as supervisor_module
+
+    spawn_target = supervisor_module._spawn_target
+    monkeypatch.setattr(
+        supervisor_module.shutil, "which", lambda _name: r"C:\npm\kimi.CMD"
+    )
+    assert spawn_target("kimi", "win32") == r"C:\npm\kimi.CMD"
+    assert spawn_target("kimi", "linux") == "kimi"
+    assert spawn_target("kimi", "darwin") == "kimi"
+
+    monkeypatch.setattr(supervisor_module.shutil, "which", lambda _name: None)
+    assert spawn_target("kimi", "win32") == "kimi"
+
+
 async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> None:
     http = FakeHttpClient(
         [
