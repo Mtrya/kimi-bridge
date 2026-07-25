@@ -12,7 +12,7 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 | WeChat bot | Not currently supported |
 | Telegram private chats | Experimental |
 | Linux, Python ≥3.11 | Supported |
-| macOS and Windows | Experimental (CI-tested, not live-validated) |
+| macOS and Windows | Experimental |
 | Voice messages | Not currently supported |
 
 Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram uses a small handwritten `httpx` Bot API transport without a Telegram framework.
@@ -28,18 +28,10 @@ Only one adapter runs in each bridge process. Feishu uses the official `lark-oap
 
 ## Quick start
 
-Install and authenticate official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started), then install [uv](https://docs.astral.sh/uv/getting-started/installation/) and kimi-bridge.
-
-For Feishu:
+Install and authenticate official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started), then install [uv](https://docs.astral.sh/uv/getting-started/installation/) and kimi-bridge:
 
 ```bash
-uv tool install 'kimi-bridge[feishu]'
-```
-
-For the experimental Telegram adapter:
-
-```bash
-uv tool install kimi-bridge
+uv tool install 'kimi-bridge'
 ```
 
 Create `~/.kimi-bridge/config.toml` for one adapter, protect it with `chmod 600`, and validate the installation without starting the server or connecting to chat:
