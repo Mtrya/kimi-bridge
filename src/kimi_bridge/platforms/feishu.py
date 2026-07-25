@@ -119,7 +119,7 @@ class _LarkTransport:
             import lark_oapi as lark
         except ImportError as exc:
             raise RuntimeError(
-                "Feishu support is not installed; run 'uv sync --extra feishu'"
+                "Feishu support is not installed; reinstall kimi-bridge"
             ) from exc
         self._client = (
             lark.Client.builder()
@@ -367,7 +367,7 @@ class _LarkWebSocketRunner:
             self._initialized.set()
             sdk_loop.close()
             raise RuntimeError(
-                "Feishu support is not installed; run 'uv sync --extra feishu'"
+                "Feishu support is not installed; reinstall kimi-bridge"
             ) from exc
         previous_sdk_loop = ws_module.loop
         ws_module.loop = sdk_loop

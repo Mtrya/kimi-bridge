@@ -27,13 +27,7 @@ Do not ask the user to paste credentials into a repository file. Do not print, l
 
 ## 2. Install from PyPI
 
-For Feishu, install the optional SDK extra:
-
-```bash
-uv tool install 'kimi-bridge[feishu]'
-```
-
-For the experimental Telegram adapter, the core package is sufficient:
+One package covers both adapters:
 
 ```bash
 uv tool install kimi-bridge
@@ -143,13 +137,13 @@ kimi-bridge doctor
 systemctl --user restart kimi-bridge.service
 ```
 
-Pin a known release for rollback, retaining the Feishu extra when applicable:
+Pin a known release for rollback:
 
 ```bash
-uv tool install --force 'kimi-bridge[feishu]==0.1.0'
+uv tool install --force 'kimi-bridge==0.1.0'
 ```
 
-Use `kimi-bridge==0.1.0` instead for the core installation, then rerun `doctor` and restart the service.
+Then rerun `doctor` and restart the service.
 
 Stop and disable the service without deleting user data:
 
@@ -171,7 +165,6 @@ Contributors can use an isolated tool directly from a trusted checkout:
 
 ```bash
 uv tool install .
-uv tool install --force '.[feishu]'
 ```
 
 For development and validation commands, see [README](README.md#development).

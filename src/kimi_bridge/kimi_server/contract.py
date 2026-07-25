@@ -830,7 +830,7 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "turn.ended",
-        "ChatRouter.dispatch_event/scripts.smoke_server",
+        "ChatRouter.dispatch_event",
         (_field("turnId", "integer", "number"),),
     ),
     SessionEventContract(

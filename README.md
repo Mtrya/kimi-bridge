@@ -89,14 +89,12 @@ Tested Kimi Code versions are recorded in a packaged compatibility manifest. An 
 ## Development
 
 ```bash
-uv sync --all-extras --dev
+uv sync --dev
 uv run pytest -q
 uv run ruff check .
-uv run python scripts/check_docs.py
-uv run python scripts/smoke_server.py
 ```
 
-Unit tests use fake Kimi, Feishu, Telegram, WebSocket, state, and process boundaries. The smoke script is the explicit authenticated local-server check; hosted checks use no credentials or inference.
+Unit tests use fake Kimi, Feishu, Telegram, WebSocket, state, and process boundaries; hosted checks use no credentials or inference.
 
 ## License
 

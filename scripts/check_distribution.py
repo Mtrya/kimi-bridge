@@ -48,8 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _check_wheel(wheel)
     _check_source(source)
     for artifact in (source, wheel):
-        for feishu in (False, True):
-            _check_tool_install(artifact.resolve(), feishu=feishu)
+        _check_tool_install(artifact.resolve())
     print("distribution checks passed")
     return 0
 
@@ -118,8 +117,8 @@ def _check_metadata(metadata: str) -> None:
         raise RuntimeError(f"distribution metadata mismatches: {mismatches}")
     if parsed.get_all("License-File") != ["LICENSE"]:
         raise RuntimeError("distribution metadata does not identify LICENSE")
-    if parsed.get_all("Provides-Extra") != ["feishu"]:
-        raise RuntimeError("distribution metadata does not identify the Feishu extra")
+    if parsed.get_all("Provides-Extra"):
+        raise RuntimeError("distribution metadata declares unexpected extras")
 
     project_urls = set(parsed.get_all("Project-URL", []))
     required_urls = {
@@ -133,7 +132,7 @@ def _check_metadata(metadata: str) -> None:
         raise RuntimeError("distribution metadata is missing project URLs")
 
 
-def _check_tool_install(artifact: Path, *, feishu: bool) -> None:
+def _check_tool_install(artifact: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="kimi-bridge-tool-check-") as raw_root:
         root = Path(raw_root)
         tool_directory = root / "tools"
@@ -165,8 +164,10 @@ def _check_tool_install(artifact: Path, *, feishu: bool) -> None:
                 "UV_CACHE_DIR": str(root / "cache"),
             }
         )
-        source = f"{artifact}[feishu]" if feishu else str(artifact)
-        _run(["uv", "tool", "install", "--from", source, "kimi-bridge"], environment)
+        _run(
+            ["uv", "tool", "install", "--from", str(artifact), "kimi-bridge"],
+            environment,
+        )
         executable = bin_directory / "kimi-bridge"
         _run([str(executable), "--help"], environment)
         version = subprocess.run(
