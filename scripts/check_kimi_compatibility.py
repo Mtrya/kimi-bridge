@@ -518,13 +518,16 @@ def install_official_kimi(
         category="installer-download",
     )
     if windows:
+        # -Command instead of -File so progress rendering can be disabled;
+        # Windows PowerShell 5.1 downloads are pathologically slow otherwise.
         install_command = [
             "powershell",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
-            "-File",
-            str(installer),
+            "-Command",
+            "$ProgressPreference = 'SilentlyContinue'; "
+            f"& '{installer}'; exit $LASTEXITCODE",
         ]
     else:
         install_command = ["bash", str(installer)]
@@ -532,7 +535,7 @@ def install_official_kimi(
         runner,
         install_command,
         env=environment,
-        timeout=180.0,
+        timeout=600.0,
         category="installer-execution",
     )
     executable_names = ("kimi.exe", "kimi.cmd") if windows else ("kimi",)
@@ -641,6 +644,19 @@ def synchronize_reports(
     else:
         actions.append(automation.record_drift(summary))
     return tuple(actions)
+
+
+class DryRunAutomation:
+    """Predict the synchronization decision without touching GitHub."""
+
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
+        return False
+
+    def promote_version(self, summary: CompatibilitySummary) -> str | None:
+        return f"would-promote-{summary.version}"
+
+    def record_drift(self, summary: CompatibilitySummary) -> str:
+        return "would-record-drift"
 
 
 class GitHubApiAutomation:
@@ -950,11 +966,13 @@ def _run_command(
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    # Closed stdin keeps interactive installer prompts from hanging forever.
     return subprocess.run(
         list(command),
         env=dict(env) if env is not None else None,
         timeout=timeout,
         check=False,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
     )
@@ -970,6 +988,16 @@ def _run_checked(
 ) -> None:
     try:
         result = runner(command, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        tail = "\n".join(
+            part
+            for part in (_decoded_tail(exc.stdout), _decoded_tail(exc.stderr))
+            if part
+        )
+        detail = f"{command[0]} timed out after {timeout:g} seconds"
+        if tail:
+            detail = f"{detail}; output before timeout:\n{tail}"
+        raise CompatibilityCheckError(category, detail) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise CompatibilityCheckError(category, str(exc)) from exc
     if result.returncode != 0:
@@ -978,6 +1006,14 @@ def _run_checked(
             category,
             f"{command[0]} exited with status {result.returncode}: {detail}",
         )
+
+
+def _decoded_tail(value: str | bytes | None, *, limit: int = 1500) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value.strip()[-limit:]
 
 
 def _isolated_environment(
@@ -1136,6 +1172,11 @@ def _parser() -> argparse.ArgumentParser:
         help="path to one per-platform report; repeat for each platform",
     )
     sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the predicted decision without touching GitHub",
+    )
+    sync.add_argument(
         "--repository", default=os.environ.get("GITHUB_REPOSITORY")
     )
     sync.add_argument(
@@ -1175,18 +1216,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if report.compatible else 1
 
-    token = os.environ.get("GITHUB_TOKEN")
-    if not args.repository or not token:
-        raise SystemExit("sync requires GITHUB_REPOSITORY and GITHUB_TOKEN")
     reports = [read_report(path) for path in args.reports]
     summary = summarize_reports(reports)
-    with GitHubApiAutomation(
-        args.repository,
-        token,
-        default_branch=args.default_branch,
-        run_url=args.run_url,
-    ) as automation:
-        actions = synchronize_reports(reports, automation)
+    if args.dry_run:
+        actions = synchronize_reports(reports, DryRunAutomation())
+    else:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not args.repository or not token:
+            raise SystemExit("sync requires GITHUB_REPOSITORY and GITHUB_TOKEN")
+        with GitHubApiAutomation(
+            args.repository,
+            token,
+            default_branch=args.default_branch,
+            run_url=args.run_url,
+        ) as automation:
+            actions = synchronize_reports(reports, automation)
     outcome = "compatible" if summary.compatible else "incompatible"
     print(
         f"kimi-code {summary.version} on "

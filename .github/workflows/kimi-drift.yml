@@ -4,17 +4,24 @@ on:
   schedule:
     - cron: "17 19 * * *"
   workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/kimi-drift.yml"
+      - "scripts/check_kimi_compatibility.py"
+      - "src/kimi_bridge/compatibility.py"
+      - "src/kimi_bridge/supported-kimi-code-versions.json"
+      - "src/kimi_bridge/kimi_server/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: kimi-code-compatibility
+  group: kimi-code-compatibility-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 jobs:
   canary:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,9 +36,10 @@ jobs:
       - run: uv sync --locked --dev
       - name: Run isolated credential-free canary
         id: canary
-        # An incompatible result still writes a report; synchronization
-        # turns it into the rolling drift issue.
-        continue-on-error: true
+        # On main an incompatible result still writes a report and the
+        # synchronize job turns it into the rolling drift issue; branch
+        # dispatches have no synchronize job, so they fail loudly here.
+        continue-on-error: ${{ github.ref == 'refs/heads/main' }}
         run: uv run --locked python scripts/check_kimi_compatibility.py check --report "${{ runner.temp }}/kimi-compatibility/report.json" --artifacts "${{ runner.temp }}/kimi-compatibility/artifacts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -66,4 +74,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_DEFAULT_BRANCH: main
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: uv run --locked python scripts/check_kimi_compatibility.py sync --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-ubuntu-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-macos-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-windows-latest/report.json"
+          # Promotion PRs and the rolling drift issue are shared state;
+          # anywhere but main the same decision runs as a prediction.
+          SYNC_MODE: ${{ github.ref != 'refs/heads/main' && '--dry-run' || '' }}
+        run: uv run --locked python scripts/check_kimi_compatibility.py sync $SYNC_MODE --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-ubuntu-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-macos-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-windows-latest/report.json"

@@ -465,6 +465,35 @@ def test_installer_failure_is_redacted(tmp_path: Path) -> None:
     assert raised.value.category == "installer-download"
 
 
+def test_installer_timeout_reports_partial_output(tmp_path: Path) -> None:
+    def hanging_runner(
+        command: Any, *, env: Any = None, timeout: Any = None
+    ) -> subprocess.CompletedProcess[str]:
+        if command[0] == "curl":
+            destination = Path(command[command.index("--output") + 1])
+            destination.write_text("# installer\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=b"Downloading kimi.exe #token=do-not-print",
+            stderr=None,
+        )
+
+    with pytest.raises(CompatibilityCheckError) as raised:
+        install_official_kimi(
+            tmp_path,
+            version=None,
+            installer_url="https://example.invalid/install.ps1",
+            runner=hanging_runner,
+            platform_name="win32",
+        )
+    assert raised.value.category == "installer-execution"
+    assert "timed out after 600 seconds" in str(raised.value)
+    assert "Downloading kimi.exe" in str(raised.value)
+    assert "do-not-print" not in str(raised.value)
+
+
 def test_windows_installer_uses_powershell_and_finds_exe(tmp_path: Path) -> None:
     commands: list[list[str]] = []
 
@@ -493,11 +522,14 @@ def test_windows_installer_uses_powershell_and_finds_exe(tmp_path: Path) -> None
     assert commands[0][0] == "curl"
     assert commands[0][-1] == "https://example.invalid/install.ps1"
     assert Path(commands[0][commands[0].index("--output") + 1]).name == "install.ps1"
-    assert commands[1][:4] == [
+    assert commands[1][:6] == [
         "powershell",
         "-NoProfile",
         "-ExecutionPolicy",
         "Bypass",
+        "-Command",
+        "$ProgressPreference = 'SilentlyContinue'; "
+        f"& '{tmp_path / 'install.ps1'}'; exit $LASTEXITCODE",
     ]
     assert installed.environment["USERPROFILE"] == str(tmp_path / "home")
     install_bin = str(tmp_path / "install" / "bin")
@@ -722,6 +754,47 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.comments) == 1
     assert synchronize_reports(recovered, automation) == ()
     assert len(fake.comments) == 1
+
+
+def test_sync_dry_run_predicts_the_decision_without_github(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted_kimi_code_version: str,
+) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+
+    def render(reports: list[Any]) -> list[str]:
+        argv = ["sync", "--dry-run"]
+        for index, report in enumerate(reports):
+            path = tmp_path / f"report-{index}.json"
+            write_report(report, path)
+            argv += ["--report", str(path)]
+        return argv
+
+    exit_code = checker.main(render(_reports_for_all_platforms("0.28.1")))
+    assert exit_code == 0
+    assert "compatible" in capsys.readouterr().out
+
+    exit_code = checker.main(
+        render(_reports_for_all_platforms(unlisted_kimi_code_version))
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"would-promote-{unlisted_kimi_code_version}" in output
+
+    exit_code = checker.main(
+        render(
+            _reports_for_all_platforms(
+                "0.30.0", failing={"windows": _failing_check()}
+            )
+        )
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "incompatible" in output
+    assert "would-record-drift" in output
 
 
 def test_strict_gating_blocks_promotion_without_every_platform(
