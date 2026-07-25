@@ -69,7 +69,7 @@ def _write_feishu_config(path: Path, workspace: Path) -> tuple[str, str, str]:
     path.write_text(
         "\n".join(
             [
-                f'default_workspace = "{workspace}"',
+                f"default_workspace = '{workspace}'",
                 "[feishu]",
                 f'app_id = "{app_id}"',
                 f'app_secret = "{app_secret}"',
@@ -89,7 +89,7 @@ def _write_telegram_config(path: Path, workspace: Path) -> tuple[str, str]:
         "\n".join(
             [
                 'platform = "telegram"',
-                f'default_workspace = "{workspace}"',
+                f"default_workspace = '{workspace}'",
                 "[telegram]",
                 f'bot_token = "{token}"',
                 f"allowed_users = [{user_id}]",
