@@ -42,14 +42,30 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
+
+from ..interactions import InteractionOutcome, InteractionPrompt
+from .base import (
+    ActorRef,
+    ConversationRef,
+    InboundFile,
+    InboundHandler,
+    InboundImage,
+    InboundMessage,
+    InteractionHandler,
+    MessageRef,
+    OutboundFile,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -67,6 +83,26 @@ OP_RECONNECT = 7
 OP_INVALID_SESSION = 9
 OP_HELLO = 10
 OP_HEARTBEAT_ACK = 11
+
+MSG_TYPE_TEXT = 0
+MSG_TYPE_MARKDOWN = 2
+MSG_TYPE_TYPING = 6
+
+# QQ's stream_messages input_state enum (protocol/types.ts StreamInputState).
+STREAM_INPUT_STATE_GENERATING = 1
+STREAM_INPUT_STATE_DONE = 10
+
+# tune-me: matches @tencent-connect/qqbot-nodejs's hardcoded TEXT_CHUNK_LIMIT,
+# walked back from 20000 after live testing per its changelog.
+QQ_TEXT_LIMIT = 5000
+QQ_PASSIVE_REPLY_LIMIT = 4
+QQ_PASSIVE_REPLY_WINDOW_SECONDS = 60 * 60
+QQ_TYPING_KEEPALIVE_SECONDS = 50
+QQ_TYPING_INPUT_SECONDS = 60
+# tune-me: comfortably above the router's ~1.5s edit throttle.
+QQ_STREAM_IDLE_TIMEOUT_SECONDS = 6.0
+QQ_URL_DEFANG_ERROR_CODE = 304003
+_QQ_DEDUPE_MEMORY = 512
 
 
 class QQError(RuntimeError):
@@ -346,6 +382,65 @@ class QQBotAPI:
         )
         if not isinstance(data, dict):
             raise QQProtocolError("QQ send message response must be an object")
+        return data
+
+    async def send_c2c_stream_message(
+        self,
+        openid: str,
+        *,
+        input_state: int,
+        content_raw: str,
+        msg_id: str,
+        msg_seq: int,
+        index: int,
+        event_id: str | None = None,
+        stream_msg_id: str | None = None,
+        input_mode: str = "replace",
+        content_type: str = "markdown",
+    ) -> dict[str, Any]:
+        _require_openid(openid)
+        body: dict[str, Any] = {
+            "input_mode": input_mode,
+            "input_state": input_state,
+            "content_type": content_type,
+            "content_raw": content_raw,
+            "msg_id": msg_id,
+            "msg_seq": msg_seq,
+            "index": index,
+        }
+        if event_id is not None:
+            body["event_id"] = event_id
+        if stream_msg_id is not None:
+            body["stream_msg_id"] = stream_msg_id
+        data = await self._request(
+            "POST", f"/v2/users/{openid}/stream_messages", json_body=body
+        )
+        if not isinstance(data, dict):
+            raise QQProtocolError("QQ stream message response must be an object")
+        return data
+
+    async def send_c2c_typing(
+        self,
+        openid: str,
+        *,
+        msg_id: str | None = None,
+        msg_seq: int | None = None,
+        input_second: int = QQ_TYPING_INPUT_SECONDS,
+    ) -> dict[str, Any]:
+        _require_openid(openid)
+        body: dict[str, Any] = {
+            "msg_type": MSG_TYPE_TYPING,
+            "input_notify": {"input_type": 1, "input_second": input_second},
+        }
+        if msg_seq is not None:
+            body["msg_seq"] = msg_seq
+        if msg_id is not None:
+            body["msg_id"] = msg_id
+        data = await self._request(
+            "POST", f"/v2/users/{openid}/messages", json_body=body
+        )
+        if not isinstance(data, dict):
+            raise QQProtocolError("QQ typing indicator response must be an object")
         return data
 
     async def upload_c2c_media(
@@ -658,3 +753,491 @@ def _decode_frame(raw: str | bytes) -> dict[str, Any]:
     if not isinstance(frame, dict):
         raise QQProtocolError("QQ gateway frame must be an object")
     return frame
+
+
+_ZERO_WIDTH_SPACE = "\u200b"
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+_URL_RE = re.compile(r"(https?://)(\S+)")
+
+
+def sanitize_markdown(text: str) -> str:
+    """Rewrite text into QQ's supported markdown subset.
+
+    QQ's native markdown has no fenced/inline code and no tables (see
+    `roadmap/qq-bot-adapter.md` §5); a single newline also collapses into
+    the surrounding paragraph unless forced with a trailing zero-width
+    space. Headings, bold/italic, lists, and quotes pass through unchanged.
+    """
+
+    text = _flatten_fenced_code(text)
+    text = _flatten_tables(text)
+    text = _strip_inline_code(text)
+    text = _force_line_breaks(text)
+    return text
+
+
+def defang_urls(text: str) -> str:
+    """Strip the scheme and bracket dots so QQ's 304003 URL filter passes."""
+
+    return _URL_RE.sub(lambda match: match.group(2).replace(".", "[.]"), text)
+
+
+def _flatten_fenced_code(text: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        body = match.group(1).rstrip("\n")
+        return "\n".join(f"    {line}" for line in body.splitlines())
+
+    return _FENCE_RE.sub(_replace, text)
+
+
+def _strip_inline_code(text: str) -> str:
+    return _INLINE_CODE_RE.sub(lambda match: match.group(1), text)
+
+
+def _flatten_tables(text: str) -> str:
+    lines = []
+    for line in text.split("\n"):
+        if "|" in line and _TABLE_SEPARATOR_RE.match(line):
+            continue
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|") and len(stripped) > 1:
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            lines.append(" | ".join(cell for cell in cells if cell))
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _force_line_breaks(text: str) -> str:
+    lines = text.split("\n")
+    last = len(lines) - 1
+    forced = [
+        line + _ZERO_WIDTH_SPACE
+        if index != last and line and lines[index + 1] != ""
+        else line
+        for index, line in enumerate(lines)
+    ]
+    return "\n".join(forced)
+
+
+def _require_response_id(data: dict[str, Any], context: str) -> str:
+    message_id = data.get("id")
+    if not isinstance(message_id, str) or not message_id:
+        raise QQProtocolError(f"QQ {context} response omitted id")
+    return message_id
+
+
+def _parse_qq_timestamp(value: object) -> float:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            pass
+    return time.time()
+
+
+def _dedupe_key(data: dict[str, Any], msg_id: str) -> str:
+    scene = data.get("message_scene")
+    if isinstance(scene, dict):
+        ext = scene.get("ext")
+        if isinstance(ext, list):
+            for item in ext:
+                if isinstance(item, str) and item.startswith("msg_idx="):
+                    return item
+    return msg_id
+
+
+@dataclass(slots=True)
+class _ReplyAnchor:
+    """Passive-reply budget for the most recent inbound message per chat."""
+
+    msg_id: str
+    event_id: str | None
+    received_at: float
+    used: int = 0
+
+    def reserve(self, *, now: float) -> int | None:
+        if now - self.received_at > QQ_PASSIVE_REPLY_WINDOW_SECONDS:
+            return None
+        if self.used >= QQ_PASSIVE_REPLY_LIMIT:
+            return None
+        self.used += 1
+        return self.used
+
+
+@dataclass(slots=True)
+class _StreamState:
+    """Per-`MessageRef` `stream_messages` bookkeeping."""
+
+    openid: str
+    anchor_msg_id: str
+    event_id: str | None
+    msg_seq: int
+    streamable: bool
+    stream_msg_id: str | None = None
+    next_index: int = 0
+    last_text: str = ""
+    finalized: bool = False
+    idle_task: asyncio.Task[None] | None = None
+
+
+class QQAdapter:
+    """C2C-only QQ official bot adapter: gateway inbound, streamed outbound."""
+
+    name = "qq"
+    message_limit = QQ_TEXT_LIMIT
+    supports_edits = True
+    supports_interactions = False
+
+    def __init__(
+        self,
+        app_id: str,
+        allowed_users: set[str] | frozenset[str],
+        *,
+        api: QQBotAPI,
+        gateway: QQGatewayClient,
+        http_client: httpx.AsyncClient | None = None,
+        idle_timeout: float = QQ_STREAM_IDLE_TIMEOUT_SECONDS,
+        typing_keepalive: float = QQ_TYPING_KEEPALIVE_SECONDS,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not app_id:
+            raise ValueError("app_id must be non-empty")
+        if not allowed_users:
+            raise ValueError("allowed_users must be non-empty")
+        self._app_id = app_id
+        self._allowed_users = frozenset(allowed_users)
+        self._api = api
+        self._gateway = gateway
+        self._http = http_client or httpx.AsyncClient()
+        self._owns_http = http_client is None
+        self._idle_timeout = idle_timeout
+        self._typing_keepalive = typing_keepalive
+        self._sleep = sleep
+        self._clock = clock
+        self._on_message: InboundHandler | None = None
+        self._on_interaction: InteractionHandler | None = None
+        self._anchors: dict[ConversationRef, _ReplyAnchor] = {}
+        self._streams: dict[MessageRef, _StreamState] = {}
+        self._typing_tasks: dict[ConversationRef, asyncio.Task[None]] = {}
+        self._seen_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
+        self._closed = False
+
+    async def start(
+        self,
+        on_message: InboundHandler,
+        on_interaction: InteractionHandler,
+    ) -> None:
+        if self._on_message is not None:
+            raise RuntimeError("QQ adapter is already started")
+        if self._closed:
+            raise RuntimeError("QQ adapter is closed")
+        self._on_message = on_message
+        self._on_interaction = on_interaction
+        await self._gateway.start(self._handle_gateway_event)
+
+    async def wait(self) -> None:
+        if self._on_message is None:
+            raise RuntimeError("QQ adapter has not been started")
+        await self._gateway.wait()
+
+    async def stop(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        await self._gateway.stop()
+        pending = [
+            task for task in self._typing_tasks.values() if not task.done()
+        ]
+        pending += [
+            state.idle_task
+            for state in self._streams.values()
+            if state.idle_task is not None and not state.idle_task.done()
+        ]
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._owns_http:
+            await self._http.aclose()
+
+    async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
+        self._validate_conversation(conversation)
+        openid = conversation.conversation_id
+        sanitized = sanitize_markdown(text)
+        anchor = self._anchors.get(conversation)
+        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+
+        if anchor is not None and reply_seq is not None:
+            result, sent_text = await self._with_defang_retry(
+                lambda content: self._api.send_c2c_stream_message(
+                    openid,
+                    input_state=STREAM_INPUT_STATE_GENERATING,
+                    content_raw=content,
+                    msg_id=anchor.msg_id,
+                    msg_seq=reply_seq,
+                    index=0,
+                    event_id=anchor.event_id,
+                ),
+                sanitized,
+            )
+            message_id = _require_response_id(result, "stream_messages")
+            ref = MessageRef(conversation, message_id)
+            self._streams[ref] = _StreamState(
+                openid=openid,
+                anchor_msg_id=anchor.msg_id,
+                event_id=anchor.event_id,
+                msg_seq=reply_seq,
+                streamable=True,
+                stream_msg_id=message_id,
+                next_index=1,
+                last_text=sent_text,
+            )
+            self._schedule_idle_finalize(ref)
+            return ref
+
+        result, _sent_text = await self._with_defang_retry(
+            lambda content: self._api.send_c2c_message(
+                openid, msg_type=MSG_TYPE_MARKDOWN, markdown={"content": content}
+            ),
+            sanitized,
+        )
+        message_id = _require_response_id(result, "messages")
+        ref = MessageRef(conversation, message_id)
+        self._streams[ref] = _StreamState(
+            openid=openid,
+            anchor_msg_id=anchor.msg_id if anchor is not None else "",
+            event_id=anchor.event_id if anchor is not None else None,
+            msg_seq=0,
+            streamable=False,
+        )
+        return ref
+
+    async def edit_text(self, message: MessageRef, text: str) -> None:
+        self._validate_conversation(message.conversation)
+        state = self._streams.get(message)
+        if state is None or not state.streamable:
+            LOGGER.debug(
+                "QQ edit_text no-op for non-streamable message %s",
+                message.message_id,
+            )
+            return
+        sanitized = sanitize_markdown(text)
+        _result, sent_text = await self._with_defang_retry(
+            lambda content: self._api.send_c2c_stream_message(
+                state.openid,
+                input_state=STREAM_INPUT_STATE_GENERATING,
+                content_raw=content,
+                msg_id=state.anchor_msg_id,
+                msg_seq=state.msg_seq,
+                index=state.next_index,
+                event_id=state.event_id,
+                stream_msg_id=state.stream_msg_id,
+            ),
+            sanitized,
+        )
+        state.next_index += 1
+        state.last_text = sent_text
+        state.finalized = False
+        self._schedule_idle_finalize(message)
+
+    async def send_file(
+        self, conversation: ConversationRef, file: OutboundFile
+    ) -> MessageRef:
+        raise NotImplementedError("QQ outbound file delivery is not yet supported")
+
+    async def present_interaction(
+        self, conversation: ConversationRef, prompt: InteractionPrompt
+    ) -> MessageRef:
+        self._validate_conversation(conversation)
+        return await self.send_text(
+            conversation,
+            "Interactive prompt not supported on QQ; it will expire — steer "
+            "with a normal message.",
+        )
+
+    async def finish_interaction(
+        self, message: MessageRef, outcome: InteractionOutcome
+    ) -> None:
+        return None
+
+    def _validate_conversation(self, conversation: ConversationRef) -> None:
+        if conversation.platform != "qq":
+            raise ValueError(
+                f"unexpected platform for QQ adapter: {conversation.platform}"
+            )
+
+    async def _with_defang_retry(
+        self,
+        send: Callable[[str], Awaitable[dict[str, Any]]],
+        content_raw: str,
+    ) -> tuple[dict[str, Any], str]:
+        try:
+            return await send(content_raw), content_raw
+        except QQAPIError as error:
+            if error.code != QQ_URL_DEFANG_ERROR_CODE:
+                raise
+            LOGGER.warning("QQ rejected an unregistered URL; retrying defanged")
+            defanged = defang_urls(content_raw)
+            return await send(defanged), defanged
+
+    def _schedule_idle_finalize(self, message: MessageRef) -> None:
+        state = self._streams.get(message)
+        if state is None:
+            return
+        if state.idle_task is not None and not state.idle_task.done():
+            state.idle_task.cancel()
+        state.idle_task = asyncio.create_task(
+            self._finalize_after_idle(message), name="qq-stream-idle-finalize"
+        )
+
+    async def _finalize_after_idle(self, message: MessageRef) -> None:
+        try:
+            await self._sleep(self._idle_timeout)
+            state = self._streams.get(message)
+            if state is None or not state.streamable or state.finalized:
+                return
+            _result, sent_text = await self._with_defang_retry(
+                lambda content: self._api.send_c2c_stream_message(
+                    state.openid,
+                    input_state=STREAM_INPUT_STATE_DONE,
+                    content_raw=content,
+                    msg_id=state.anchor_msg_id,
+                    msg_seq=state.msg_seq,
+                    index=state.next_index,
+                    event_id=state.event_id,
+                    stream_msg_id=state.stream_msg_id,
+                ),
+                state.last_text,
+            )
+            state.next_index += 1
+            state.last_text = sent_text
+            state.finalized = True
+        finally:
+            state = self._streams.get(message)
+            if state is not None and state.idle_task is asyncio.current_task():
+                state.idle_task = None
+
+    async def _handle_gateway_event(self, event: QQGatewayEvent) -> None:
+        if event.type != "C2C_MESSAGE_CREATE":
+            return
+        data = event.data
+        if not isinstance(data, dict):
+            return
+        await self._handle_c2c_message(data, event.event_id)
+
+    async def _handle_c2c_message(
+        self, data: dict[str, Any], event_id: str | None
+    ) -> None:
+        msg_id = data.get("id")
+        if not isinstance(msg_id, str) or not msg_id:
+            LOGGER.warning("QQ C2C message omitted id; dropping")
+            return
+        dedupe_key = _dedupe_key(data, msg_id)
+        if dedupe_key in self._seen_ids:
+            return
+        self._remember_dedupe_key(dedupe_key)
+
+        author = data.get("author")
+        openid = author.get("user_openid") if isinstance(author, dict) else None
+        if not isinstance(openid, str) or not openid:
+            LOGGER.warning("QQ C2C message omitted author.user_openid; dropping")
+            return
+        if openid not in self._allowed_users:
+            LOGGER.warning(
+                "unauthorized sender openid: %s — add it to [qq].allowed_users",
+                openid,
+            )
+            return
+
+        content = data.get("content")
+        text = content if isinstance(content, str) else ""
+        timestamp = _parse_qq_timestamp(data.get("timestamp"))
+        conversation = ConversationRef(
+            platform="qq", bot_id=self._app_id, conversation_id=openid
+        )
+        images, files = await self._collect_attachments(data.get("attachments"))
+
+        self._anchors[conversation] = _ReplyAnchor(
+            msg_id=msg_id, event_id=event_id, received_at=self._clock()
+        )
+        self._start_typing(conversation, msg_id)
+
+        message = InboundMessage(
+            conversation=conversation,
+            actor=ActorRef(id=openid),
+            message_id=msg_id,
+            text=text,
+            timestamp=timestamp,
+            images=images,
+            files=files,
+        )
+        assert self._on_message is not None
+        await self._on_message(self, message)
+
+    async def _collect_attachments(
+        self, raw: object
+    ) -> tuple[tuple[InboundImage, ...], tuple[InboundFile, ...]]:
+        if not isinstance(raw, list):
+            return (), ()
+        images: list[InboundImage] = []
+        files: list[InboundFile] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            if not isinstance(url, str) or not url:
+                continue
+            content_type = item.get("content_type")
+            media_type = (
+                content_type
+                if isinstance(content_type, str) and content_type
+                else "application/octet-stream"
+            )
+            name = item.get("filename")
+            name = name if isinstance(name, str) and name else "attachment"
+            try:
+                response = await self._http.get(url, timeout=30.0)
+                response.raise_for_status()
+                data = response.content
+            except httpx.HTTPError as exc:
+                LOGGER.warning("QQ attachment download failed for %s: %s", url, exc)
+                continue
+            if media_type.startswith("image/"):
+                images.append(InboundImage(data=data, media_type=media_type))
+            else:
+                files.append(InboundFile(data=data, name=name, media_type=media_type))
+        return tuple(images), tuple(files)
+
+    def _remember_dedupe_key(self, key: str) -> None:
+        self._seen_ids.add(key)
+        self._seen_order.append(key)
+        while len(self._seen_order) > _QQ_DEDUPE_MEMORY:
+            oldest = self._seen_order.popleft()
+            self._seen_ids.discard(oldest)
+
+    def _start_typing(self, conversation: ConversationRef, msg_id: str) -> None:
+        existing = self._typing_tasks.pop(conversation, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        self._typing_tasks[conversation] = asyncio.create_task(
+            self._typing_loop(conversation, msg_id), name="qq-typing-indicator"
+        )
+
+    async def _typing_loop(self, conversation: ConversationRef, msg_id: str) -> None:
+        try:
+            while True:
+                with contextlib.suppress(QQAPIError, QQTransportError):
+                    await self._api.send_c2c_typing(
+                        conversation.conversation_id,
+                        msg_id=msg_id,
+                        input_second=QQ_TYPING_INPUT_SECONDS,
+                    )
+                await self._sleep(self._typing_keepalive)
+        except asyncio.CancelledError:
+            raise
