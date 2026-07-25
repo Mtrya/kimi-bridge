@@ -65,7 +65,7 @@ The package contains a sorted manifest of official Kimi Code versions that passe
 - a listed official version is supported;
 - an unlisted official version receives a loud warning and a live contract attempt;
 - legacy Python `kimi-cli`, an unrecognized product, or an executable/server version mismatch fails;
-- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows, exercises the CLI/server contract without model inference, and quietly proposes a manifest update only when every platform passes with the same version;
+- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows, exercises the CLI/server contract without model inference, and quietly proposes a manifest update only when every platform passes with the same version; pull requests touching compatibility surfaces run the same canary and predict the same decision in dry-run mode, so only main mutates promotion or drift state;
 - contract failure uses one rolling issue rather than opening a new noisy issue every day.
 
 All raw protocol knowledge and the tracked semantic contract stay in `kimi_server`. Hosted tests use no Kimi account, chat credential, or inference.

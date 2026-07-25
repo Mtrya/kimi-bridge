@@ -646,6 +646,19 @@ def synchronize_reports(
     return tuple(actions)
 
 
+class DryRunAutomation:
+    """Predict the synchronization decision without touching GitHub."""
+
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
+        return False
+
+    def promote_version(self, summary: CompatibilitySummary) -> str | None:
+        return f"would-promote-{summary.version}"
+
+    def record_drift(self, summary: CompatibilitySummary) -> str:
+        return "would-record-drift"
+
+
 class GitHubApiAutomation:
     """Small GitHub API client for one repository's automation state."""
 
@@ -1159,6 +1172,11 @@ def _parser() -> argparse.ArgumentParser:
         help="path to one per-platform report; repeat for each platform",
     )
     sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the predicted decision without touching GitHub",
+    )
+    sync.add_argument(
         "--repository", default=os.environ.get("GITHUB_REPOSITORY")
     )
     sync.add_argument(
@@ -1198,18 +1216,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if report.compatible else 1
 
-    token = os.environ.get("GITHUB_TOKEN")
-    if not args.repository or not token:
-        raise SystemExit("sync requires GITHUB_REPOSITORY and GITHUB_TOKEN")
     reports = [read_report(path) for path in args.reports]
     summary = summarize_reports(reports)
-    with GitHubApiAutomation(
-        args.repository,
-        token,
-        default_branch=args.default_branch,
-        run_url=args.run_url,
-    ) as automation:
-        actions = synchronize_reports(reports, automation)
+    if args.dry_run:
+        actions = synchronize_reports(reports, DryRunAutomation())
+    else:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not args.repository or not token:
+            raise SystemExit("sync requires GITHUB_REPOSITORY and GITHUB_TOKEN")
+        with GitHubApiAutomation(
+            args.repository,
+            token,
+            default_branch=args.default_branch,
+            run_url=args.run_url,
+        ) as automation:
+            actions = synchronize_reports(reports, automation)
     outcome = "compatible" if summary.compatible else "incompatible"
     print(
         f"kimi-code {summary.version} on "

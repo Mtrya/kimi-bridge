@@ -756,6 +756,47 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.comments) == 1
 
 
+def test_sync_dry_run_predicts_the_decision_without_github(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted_kimi_code_version: str,
+) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+
+    def render(reports: list[Any]) -> list[str]:
+        argv = ["sync", "--dry-run"]
+        for index, report in enumerate(reports):
+            path = tmp_path / f"report-{index}.json"
+            write_report(report, path)
+            argv += ["--report", str(path)]
+        return argv
+
+    exit_code = checker.main(render(_reports_for_all_platforms("0.28.1")))
+    assert exit_code == 0
+    assert "compatible" in capsys.readouterr().out
+
+    exit_code = checker.main(
+        render(_reports_for_all_platforms(unlisted_kimi_code_version))
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"would-promote-{unlisted_kimi_code_version}" in output
+
+    exit_code = checker.main(
+        render(
+            _reports_for_all_platforms(
+                "0.30.0", failing={"windows": _failing_check()}
+            )
+        )
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "incompatible" in output
+    assert "would-record-drift" in output
+
+
 def test_strict_gating_blocks_promotion_without_every_platform(
     unlisted_kimi_code_version: str,
 ) -> None:
