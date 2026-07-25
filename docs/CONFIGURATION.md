@@ -1,6 +1,6 @@
 # Configuration
 
-kimi-bridge reads `~/.kimi-bridge/config.toml`. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu, Telegram, and QQ tables may coexist while one process runs exactly one of them.
+kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` selects another file, and the `KIMI_BRIDGE_CONFIG` environment variable provides an override when the flag is absent. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu, QQ and Telegram tables may coexist while one process runs exactly one of them.
 
 ## Complete schema
 
@@ -9,6 +9,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml`. It does not read adapter credent
 | `platform` | string | `"feishu"` | Exactly `"feishu"`, `"telegram"`, or `"qq"`. |
 | `log_level` | string | `"INFO"` | Case-insensitive `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `default_workspace` | string path | `"~/.kimi-bridge/workspace"` | Non-empty; `~` is expanded and the result is resolved. |
+| `state_path` | string path | `"~/.kimi-bridge/state.json"` | Non-empty; `~` is expanded and the result is resolved. |
 | `edit_throttle_seconds` | number | `1.5` | Must be positive. Controls the minimum cadence of streamed message edits. |
 | `interaction_timeout_seconds` | number | `600.0` | Must be positive. Applies to each approval or question request. |
 | `inbox_subdir` | relative string path | `".kimi-bridge-inbox"` | Non-empty, not absolute, and may not contain `..`. |
@@ -30,6 +31,7 @@ Only the keys above have an effect. New sessions start in `manual` permission mo
 platform = "feishu"
 log_level = "INFO"
 default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
 edit_throttle_seconds = 1.5
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
@@ -54,6 +56,7 @@ Feishu accepts only user-sent `p2p` events. Authorization compares the sender's 
 platform = "telegram"
 log_level = "INFO"
 default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
 edit_throttle_seconds = 1.5
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
@@ -95,8 +98,8 @@ The QQ adapter is C2C (private-chat) only, experimental, and covered by fake tra
 
 ## Files and state
 
-- `~/.kimi-bridge/config.toml` contains adapter credentials and should be mode `600` on Linux and macOS.
-- `~/.kimi-bridge/state.json` is an atomically replaced, versioned bridge state file. It stores conversation-to-session bindings, workspaces, permission modes, and thinking-rendering preferences, but no adapter credentials.
+- `~/.kimi-bridge/config.toml` contains adapter credentials and should be mode `600` on Linux and macOS. `--config` or `KIMI_BRIDGE_CONFIG` selects a different file.
+- `~/.kimi-bridge/state.json` is an atomically replaced, versioned bridge state file. It stores conversation-to-session bindings, workspaces, permission modes, and thinking-rendering preferences, but no adapter credentials. The `state_path` config key selects a different file.
 - `~/.kimi-bridge/workspace/` is the default scratch workspace. Use `/new <absolute-or-relative-path>` to bind real project work to another directory.
 - `<session workspace>/<inbox_subdir>/` receives inbound files. The configured subdirectory cannot escape its workspace.
 - Kimi Code owns its sessions and model/profile state in its own home directory. kimi-bridge does not copy that data into `state.json`.

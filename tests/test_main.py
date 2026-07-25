@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from kimi_bridge import __main__ as main_module
 from kimi_bridge import doctor as doctor_module
-from kimi_bridge.config import Config, FeishuConfig, QQConfig, TelegramConfig
+from kimi_bridge.config import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG_PATH,
+    Config,
+    FeishuConfig,
+    QQConfig,
+    TelegramConfig,
+)
 
 
 class _Adapter:
@@ -167,8 +175,9 @@ def test_doctor_dispatch_does_not_start_runtime_or_build_an_adapter(
     runtime_started = False
     adapter_built = False
     doctor_called = False
+    received: dict[str, object] = {}
 
-    async def forbidden_run() -> None:
+    async def forbidden_run(_config_path: object) -> None:
         nonlocal runtime_started
         runtime_started = True
 
@@ -177,16 +186,51 @@ def test_doctor_dispatch_does_not_start_runtime_or_build_an_adapter(
         adapter_built = True
         return _Adapter()
 
-    def fake_doctor() -> int:
+    def fake_doctor(*, config_path: object = None) -> int:
         nonlocal doctor_called
         doctor_called = True
+        received["config_path"] = config_path
         return 1
 
+    monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
     monkeypatch.setattr(main_module, "run", forbidden_run)
     monkeypatch.setattr(main_module, "_build_adapter", forbidden_adapter)
     monkeypatch.setattr(doctor_module, "run_doctor", fake_doctor)
 
     assert main_module.main(["doctor"]) == 1
     assert doctor_called
+    assert received["config_path"] == DEFAULT_CONFIG_PATH
     assert not runtime_started
     assert not adapter_built
+
+
+def test_config_argument_reaches_doctor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    received: list[object] = []
+
+    def fake_doctor(*, config_path: object = None) -> int:
+        received.append(config_path)
+        return 0
+
+    monkeypatch.setattr(doctor_module, "run_doctor", fake_doctor)
+
+    custom = tmp_path / "custom.toml"
+    assert main_module.main(["--config", str(custom), "doctor"]) == 0
+    assert main_module.main(["doctor", "--config", str(custom)]) == 0
+    assert received == [custom, custom]
+
+
+def test_config_argument_reaches_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    received: list[object] = []
+
+    async def fake_run(config_path: object) -> None:
+        received.append(config_path)
+
+    monkeypatch.setattr(main_module, "run", fake_run)
+
+    custom = tmp_path / "custom.toml"
+    assert main_module.main(["--config", str(custom)]) == 0
+    assert received == [custom]

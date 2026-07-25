@@ -5,12 +5,15 @@ from pathlib import Path
 import pytest
 
 from kimi_bridge.config import (
+    CONFIG_PATH_ENV,
+    DEFAULT_CONFIG_PATH,
     Config,
     FeishuConfig,
     KimiServerConfig,
     QQConfig,
     TelegramConfig,
     load_config,
+    resolve_config_path,
 )
 
 
@@ -191,3 +194,43 @@ def test_rejects_out_of_range_server_port(tmp_path: Path, port: int) -> None:
 
     with pytest.raises(ValueError, match="between 1 and 65535"):
         load_config(path)
+
+
+def test_loads_custom_state_path(tmp_path: Path) -> None:
+    state = tmp_path / "custom" / "state.json"
+    path = tmp_path / "config.toml"
+    path.write_text(f"state_path = '{state}'\n", encoding="utf-8")
+
+    assert load_config(path).state_path == state
+
+
+def test_rejects_blank_state_path(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('state_path = "   "\n', encoding="utf-8")
+
+    with pytest.raises(TypeError, match="state_path"):
+        load_config(path)
+
+
+def test_resolve_config_path_prefers_explicit_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(CONFIG_PATH_ENV, str(tmp_path / "env.toml"))
+
+    assert resolve_config_path(tmp_path / "cli.toml") == tmp_path / "cli.toml"
+
+
+def test_resolve_config_path_uses_env_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(CONFIG_PATH_ENV, str(tmp_path / "env.toml"))
+
+    assert resolve_config_path() == tmp_path / "env.toml"
+
+
+def test_resolve_config_path_defaults_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
+
+    assert resolve_config_path() == DEFAULT_CONFIG_PATH

@@ -47,9 +47,9 @@ The router never constructs Feishu cards, Telegram dictionaries, multipart bodie
 
 ## State and lifecycle
 
-Bridge state is stored atomically at `~/.kimi-bridge/state.json`. Its versioned schema contains conversation bindings, workspace, permission mode, and thinking-rendering preference. Known older schemas migrate without losing bindings; an unknown future version fails loudly. Kimi remains authoritative for sessions, profiles, model/effort/plan settings, usage, tasks, and goals.
+Bridge state is stored atomically at `~/.kimi-bridge/state.json` (relocatable with the `state_path` config key). Its versioned schema contains conversation bindings, workspace, permission mode, and thinking-rendering preference. Known older schemas migrate without losing bindings; an unknown future version fails loudly. Kimi remains authoritative for sessions, profiles, model/effort/plan settings, usage, tasks, and goals.
 
-The config file is `~/.kimi-bridge/config.toml`; inbound files live under a configured subdirectory of the bound workspace. Startup creates the default workspace, starts the supervised local server, then starts one adapter. Shutdown stops the adapter, stream tasks, client, and child process. A crashed Kimi child can be restarted by the supervisor; session subscriptions are re-established through the client boundary.
+The config file is `~/.kimi-bridge/config.toml` by default; `--config` or the `KIMI_BRIDGE_CONFIG` environment variable selects another file. Inbound files live under a configured subdirectory of the bound workspace. Startup creates the default workspace, starts the supervised local server, then starts one adapter. Shutdown stops the adapter, stream tasks, client, and child process. A crashed Kimi child can be restarted by the supervisor; session subscriptions are re-established through the client boundary.
 
 ## Security model
 

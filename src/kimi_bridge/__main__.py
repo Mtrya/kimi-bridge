@@ -8,9 +8,10 @@ import contextlib
 import logging
 import signal
 from collections.abc import Sequence
+from pathlib import Path
 
 from . import __version__
-from .config import Config, load_config
+from .config import CONFIG_PATH_ENV, Config, load_config, resolve_config_path
 from .kimi_server import KimiServerClient, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
 from .platforms.feishu import FeishuAdapter
@@ -26,8 +27,8 @@ from .router import ChatRouter
 from .state import StateStore
 
 
-async def run() -> None:
-    config = load_config()
+async def run(config_path: str | Path) -> None:
+    config = load_config(config_path)
     logging.basicConfig(
         level=config.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -46,7 +47,7 @@ async def run() -> None:
             model = await client.get_default_model()
             router = ChatRouter(
                 client,
-                state_store=StateStore(),
+                state_store=StateStore(config.state_path),
                 default_workspace=config.default_workspace,
                 model=model,
                 edit_throttle_seconds=config.edit_throttle_seconds,
@@ -166,23 +167,42 @@ def _argument_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {__version__}",
     )
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        default=None,
+        help=(
+            "path to the config file "
+            f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+        ),
+    )
     subcommands = parser.add_subparsers(dest="command")
-    subcommands.add_parser(
+    doctor_command = subcommands.add_parser(
         "doctor",
         help="validate local configuration without starting services",
         description="Validate bridge and Kimi Code configuration without starting services.",
+    )
+    doctor_command.add_argument(
+        "--config",
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help=(
+            "path to the config file "
+            f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+        ),
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _argument_parser().parse_args(argv)
+    config_path = resolve_config_path(arguments.config)
     if arguments.command == "doctor":
         from .doctor import run_doctor
 
-        return run_doctor()
+        return run_doctor(config_path=config_path)
     try:
-        asyncio.run(run())
+        asyncio.run(run(config_path))
     except KeyboardInterrupt:
         pass
     return 0

@@ -23,7 +23,7 @@ from .compatibility import (
     unknown_version_warning,
 )
 from .config import DEFAULT_CONFIG_PATH, Config, load_config
-from .state import DEFAULT_STATE_PATH, StateStore
+from .state import StateStore
 
 
 class CheckStatus(str, Enum):
@@ -86,7 +86,7 @@ class CommandRunner(Protocol):
 def diagnose(
     *,
     config_path: str | Path = DEFAULT_CONFIG_PATH,
-    state_path: str | Path = DEFAULT_STATE_PATH,
+    state_path: str | Path | None = None,
     executable: str = "kimi",
     command_runner: CommandRunner | None = None,
     which: Callable[[str], str | None] = shutil.which,
@@ -106,18 +106,27 @@ def diagnose(
             ]
         )
     else:
+        resolved_state = (
+            Path(state_path).expanduser()
+            if state_path is not None
+            else config.state_path
+        )
         checks.append(_check_selected_adapter(config))
         checks.append(_check_directory_target("workspace", config.default_workspace))
-        checks.append(_check_state(Path(state_path).expanduser()))
+        checks.append(_check_state(resolved_state))
 
     _check_kimi(executable, runner, which, checks)
     return DoctorReport(tuple(checks))
 
 
-def run_doctor(*, stream: TextIO | None = None) -> int:
+def run_doctor(
+    *,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    stream: TextIO | None = None,
+) -> int:
     """Run diagnostics, print their safe projection, and return an exit code."""
 
-    report = diagnose()
+    report = diagnose(config_path=config_path)
     print(report.render(), file=stream or sys.stdout)
     return report.exit_code
 
