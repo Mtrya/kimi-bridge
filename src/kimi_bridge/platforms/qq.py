@@ -39,6 +39,7 @@ WS gateway contract, verified 2026-07-25 against the official docs source
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -87,10 +88,18 @@ OP_HEARTBEAT_ACK = 11
 MSG_TYPE_TEXT = 0
 MSG_TYPE_MARKDOWN = 2
 MSG_TYPE_TYPING = 6
+MSG_TYPE_MEDIA = 7
 
 # QQ's stream_messages input_state enum (protocol/types.ts StreamInputState).
 STREAM_INPUT_STATE_GENERATING = 1
 STREAM_INPUT_STATE_DONE = 10
+
+# `file_type` on `POST /v2/users/{openid}/files` (roadmap/qq-bot-adapter.md §4).
+# Voice (3) and arbitrary files (4, closed in C2C) are out of scope for v1.
+QQ_FILE_TYPE_IMAGE = 1
+QQ_FILE_TYPE_VIDEO = 2
+_QQ_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
+_QQ_VIDEO_MEDIA_TYPE = "video/mp4"
 
 # tune-me: matches @tencent-connect/qqbot-nodejs's hardcoded TEXT_CHUNK_LIMIT,
 # walked back from 20000 after live testing per its changelog.
@@ -1049,7 +1058,42 @@ class QQAdapter:
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
     ) -> MessageRef:
-        raise NotImplementedError("QQ outbound file delivery is not yet supported")
+        self._validate_conversation(conversation)
+        if file.media_type in _QQ_IMAGE_MEDIA_TYPES:
+            file_type = QQ_FILE_TYPE_IMAGE
+        elif file.media_type == _QQ_VIDEO_MEDIA_TYPE:
+            file_type = QQ_FILE_TYPE_VIDEO
+        else:
+            raise ValueError("QQ only delivers png/jpg images and mp4 video")
+
+        openid = conversation.conversation_id
+        upload = await self._api.upload_c2c_media(
+            openid,
+            file_type=file_type,
+            file_data=base64.b64encode(file.data).decode("ascii"),
+            srv_send_msg=False,
+        )
+        file_info = upload.get("file_info")
+        if not isinstance(file_info, str) or not file_info:
+            raise QQProtocolError("QQ media upload response omitted file_info")
+
+        anchor = self._anchors.get(conversation)
+        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+        if anchor is not None and reply_seq is not None:
+            result = await self._api.send_c2c_message(
+                openid,
+                msg_type=MSG_TYPE_MEDIA,
+                media={"file_info": file_info},
+                msg_id=anchor.msg_id,
+                event_id=anchor.event_id,
+                msg_seq=reply_seq,
+            )
+        else:
+            result = await self._api.send_c2c_message(
+                openid, msg_type=MSG_TYPE_MEDIA, media={"file_info": file_info}
+            )
+        message_id = _require_response_id(result, "messages")
+        return MessageRef(conversation, message_id)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt

@@ -14,6 +14,13 @@ from .config import Config, load_config
 from .kimi_server import KimiServerClient, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
 from .platforms.feishu import FeishuAdapter
+from .platforms.qq import (
+    QQAdapter,
+    QQBotAPI,
+    QQCredentials,
+    QQGatewayClient,
+    QQTokenManager,
+)
 from .platforms.telegram import TelegramAdapter
 from .router import ChatRouter
 from .state import StateStore
@@ -115,6 +122,26 @@ def _build_adapter(config: Config) -> PlatformAdapter:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    if config.platform == "qq":
+        if not config.qq.app_id or not config.qq.app_secret:
+            raise RuntimeError(
+                "QQ credentials are missing from ~/.kimi-bridge/config.toml"
+            )
+        if not config.qq.allowed_users:
+            raise RuntimeError("qq.allowed_users must contain at least one user")
+        token_manager = QQTokenManager(
+            QQCredentials(config.qq.app_id, config.qq.app_secret)
+        )
+        api = QQBotAPI(token_manager)
+        gateway = QQGatewayClient(token_manager, api.get_gateway_url)
+        return QQAdapter(
+            config.qq.app_id,
+            config.qq.allowed_users,
+            api=api,
+            gateway=gateway,
+        )
+
     if not config.telegram.bot_token:
         raise RuntimeError(
             "Telegram bot token is missing from ~/.kimi-bridge/config.toml"

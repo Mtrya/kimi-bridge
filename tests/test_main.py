@@ -8,7 +8,7 @@ import pytest
 
 from kimi_bridge import __main__ as main_module
 from kimi_bridge import doctor as doctor_module
-from kimi_bridge.config import Config, FeishuConfig, TelegramConfig
+from kimi_bridge.config import Config, FeishuConfig, QQConfig, TelegramConfig
 
 
 class _Adapter:
@@ -93,12 +93,49 @@ def test_builds_only_selected_telegram_adapter(monkeypatch: pytest.MonkeyPatch) 
     assert calls == [("telegram", ("secret-token", frozenset({123})))]
 
 
+def test_builds_qq_adapter_with_wired_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    class FakeAdapter(_Adapter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            calls.append(args)
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(main_module, "QQAdapter", FakeAdapter)
+    config = Config(
+        platform="qq",
+        qq=QQConfig(
+            app_id="app-1", app_secret="secret-1", allowed_users=frozenset({"O1"})
+        ),
+    )
+
+    adapter = main_module._build_adapter(config)
+
+    assert isinstance(adapter, FakeAdapter)
+    assert calls == [("app-1", frozenset({"O1"}))]
+    assert isinstance(adapter.kwargs["api"], main_module.QQBotAPI)
+    assert isinstance(adapter.kwargs["gateway"], main_module.QQGatewayClient)
+
+
 def test_selected_platform_requires_its_own_credentials() -> None:
     with pytest.raises(RuntimeError, match="Telegram bot token"):
         main_module._build_adapter(Config(platform="telegram"))
 
     with pytest.raises(RuntimeError, match="Feishu credentials"):
         main_module._build_adapter(Config(platform="feishu"))
+
+    with pytest.raises(RuntimeError, match="QQ credentials"):
+        main_module._build_adapter(Config(platform="qq"))
+
+    with pytest.raises(RuntimeError, match="qq.allowed_users"):
+        main_module._build_adapter(
+            Config(
+                platform="qq",
+                qq=QQConfig(app_id="app-1", app_secret="secret-1"),
+            )
+        )
 
 
 @pytest.mark.parametrize("argument", ["--help", "--version"])

@@ -101,6 +101,27 @@ def _write_telegram_config(path: Path, workspace: Path) -> tuple[str, str]:
     return token, user_id
 
 
+def _write_qq_config(path: Path, workspace: Path) -> tuple[str, str, str]:
+    app_id = "DO_NOT_PRINT_QQ_APP_ID"
+    app_secret = "DO_NOT_PRINT_QQ_SECRET"
+    openid = "DO_NOT_PRINT_QQ_OPENID"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "qq"',
+                f"default_workspace = '{workspace}'",
+                "[qq]",
+                f'app_id = "{app_id}"',
+                f'app_secret = "{app_secret}"',
+                f'allowed_users = ["{openid}"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return app_id, app_secret, openid
+
+
 def _diagnose(
     config_path: Path,
     state_path: Path,
@@ -162,6 +183,21 @@ def test_valid_telegram_config_and_unknown_kimi_warn_but_pass(
     assert _status(report, "adapter") is CheckStatus.OK
     assert _status(report, "kimi") is CheckStatus.WARNING
     assert f"UNTESTED KIMI CODE VERSION {unlisted_kimi_code_version}" in rendered
+    assert all(secret not in rendered for secret in secrets)
+
+
+def test_valid_qq_config_is_secret_safe_and_mentions_ip_whitelist(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    secrets = _write_qq_config(config_path, tmp_path / "workspace")
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+    rendered = report.render()
+
+    assert report.exit_code == 0
+    assert _status(report, "adapter") is CheckStatus.OK
+    assert "IP whitelist" in rendered
     assert all(secret not in rendered for secret in secrets)
 
 
@@ -239,6 +275,7 @@ def test_windows_skips_posix_permission_check(tmp_path: Path) -> None:
     [
         'platform = "feishu"\n',
         'platform = "telegram"\n[telegram]\nbot_token = "token"\n',
+        'platform = "qq"\n[qq]\napp_id = "app-1"\napp_secret = "secret-1"\n',
     ],
 )
 def test_selected_adapter_requires_credentials_and_an_allowlist(

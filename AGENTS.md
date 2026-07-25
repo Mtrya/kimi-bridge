@@ -4,7 +4,7 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## Project state
 
-**The managed server client, Feishu bridge, and experimental Telegram adapter are implemented, including interactive approvals/questions, prompt steering, inbound media, semantic outbound files, separately streamed optional thinking, compatibility diagnostics, and credential-free contract monitoring.** Feishu is live-validated; Telegram is fake-tested but not live-validated. The core contracts are platform-neutral, and the runtime intentionally enables one selected adapter per process. Public behavior and architectural requirements live in `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`, and `docs/COMMANDS.md`; changing those contracts requires explicit user sign-off and matching documentation in the same change.
+**The managed server client, Feishu bridge, and experimental Telegram and QQ adapters are implemented, including interactive approvals/questions, prompt steering, inbound media, semantic outbound files, separately streamed optional thinking, compatibility diagnostics, and credential-free contract monitoring.** Feishu is live-validated; Telegram and QQ are fake-tested but not live-validated. QQ has no interactive approvals/questions or separate thinking stream (forced `auto` mode) but streams edited answers via its own `stream_messages` replace API. The core contracts are platform-neutral, and the runtime intentionally enables one selected adapter per process. Public behavior and architectural requirements live in `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`, and `docs/COMMANDS.md`; changing those contracts requires explicit user sign-off and matching documentation in the same change.
 
 ## Layout
 
@@ -14,6 +14,7 @@ Guidance for AI agents (and humans) working in this repo.
 - `src/kimi_bridge/platforms/` — one adapter per IM platform, behind the semantic `PlatformAdapter` protocol in `base.py`. Native text/file rendering, uploads, and callback decoding stay inside the platform package.
 - `src/kimi_bridge/platforms/feishu.py` and `feishu_cards.py` — Feishu Markdown posts, native media uploads/messages, card JSON, and callback decoding. Bundled native-rendering assets live below `src/kimi_bridge/assets/` and must be loaded with package resources so wheel installs work.
 - `src/kimi_bridge/platforms/telegram.py` — the handwritten Telegram Bot API transport and adapter. Telegram update dictionaries, multipart uploads, inline keyboards, callback tokens, `ForceReply` wizard state, retry policy, and file downloads stay here.
+- `src/kimi_bridge/platforms/qq.py` — the handwritten QQ official-bot transport and adapter: access-token refresh, REST client, WS gateway (identify/heartbeat/resume), markdown sanitizer, `stream_messages`-based streaming with passive/active reply budget bookkeeping, media upload, and inbound dedupe/allowlisting all stay here.
 - `src/kimi_bridge/state.py` — versioned bridge-owned conversation state. New schema changes require an explicit migration that preserves existing bindings; unknown future versions must still fail loudly.
 - `scripts/check_kimi_compatibility.py` and `.github/workflows/kimi-drift.yml` — credential-free semantic contract checking and quiet supported-version promotion. Protocol knowledge must remain in `kimi_server`; automation consumes its projection.
 
@@ -27,11 +28,11 @@ Guidance for AI agents (and humans) working in this repo.
 ## Conventions
 
 - Python ≥ 3.11, asyncio throughout, typed (dataclasses / Protocol, `from __future__ import annotations`).
-- Minimal dependencies: `httpx` + `websockets` + the `lark-oapi` Feishu SDK. Telegram reuses `httpx` and must not gain a framework dependency without an explicit design change.
+- Minimal dependencies: `httpx` + `websockets` + the `lark-oapi` Feishu SDK. Telegram and QQ reuse `httpx`/`websockets` and must not gain a framework dependency without an explicit design change.
 - Keep the shared contracts semantic and platform-neutral. Do not introduce a generic UI schema, plugin framework, capability registry, or multi-adapter runtime without a concrete second platform requiring it.
 - Keep public documentation compact and current. Do not expose private credentials, local planning material, ignored reference snapshots, or internal progress terminology in package metadata, docs, workflows, issues, or releases.
 - If a file is gitignored, it's gitignored for a reason — never force-add it.
 
 ## Testing
 
-Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions, path authorization, state migration, and independent stream behavior; platform tests assert native rendering, uploads, and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, Telegram Bot API transport, configuration, and state persistence behind fakes in CI; do not require a live Kimi server or real IM credentials. Distribution changes also require building source and wheel artifacts, checking metadata/license/bundled assets, and exercising isolated `uv tool` installs through non-starting `--help`, `--version`, and `doctor` before uninstalling them.
+Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions, path authorization, state migration, and independent stream behavior; platform tests assert native rendering, uploads, and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, Telegram Bot API transport, QQ REST/gateway transport, configuration, and state persistence behind fakes in CI; do not require a live Kimi server or real IM credentials. Distribution changes also require building source and wheel artifacts, checking metadata/license/bundled assets, and exercising isolated `uv tool` installs through non-starting `--help`, `--version`, and `doctor` before uninstalling them.

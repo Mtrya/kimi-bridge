@@ -22,6 +22,7 @@ Ask the user which adapter they want before configuring anything:
 
 - Feishu requires an app ID, app secret, and at least one Feishu `open_id` or `user_id`.
 - Experimental Telegram requires a bot token and at least one stable numeric Telegram user ID. Usernames are not authorization identities.
+- Experimental QQ requires an app ID, app secret, and at least one QQ C2C `user_openid`. Register the app at [q.qq.com](https://q.qq.com/), whitelist the tester's QQ number in the console's sandbox (沙箱) configuration (up to 20 test users), and add this host's egress IP to the console's OpenAPI IP whitelist — REST calls fail until that IP is allowlisted, and a dynamic IP needs re-whitelisting after it changes.
 
 Do not ask the user to paste credentials into a repository file. Do not print, log, commit, or echo credentials or real allowlist values. If a secret already exists in a protected environment file or secret manager, transfer it locally without displaying it. Otherwise ask the user to enter it through a private local editor or another secret-safe channel. Avoid commands that leave secrets in shell history.
 
@@ -75,7 +76,7 @@ kimi-bridge
 
 Ask the allowlisted user to send `/status`, then send one small prompt and confirm that its reply streams and completes without a duplicate message. Exercise an approval or question if the selected permission mode requires it. Stop with `Ctrl-C` and confirm clean shutdown.
 
-For Feishu, do not call the setup complete until direct messages, editable replies, and any configured card callbacks work. For Telegram, state plainly that its adapter remains experimental and was not live-validated by the project unless this installation's own private-chat test actually passed.
+For Feishu, do not call the setup complete until direct messages, editable replies, and any configured card callbacks work. For Telegram or QQ, state plainly that the adapter remains experimental and was not live-validated by the project unless this installation's own private-chat test actually passed.
 
 ## 5. Optional per-user systemd service (Linux)
 

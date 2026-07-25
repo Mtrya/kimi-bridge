@@ -63,11 +63,13 @@ Feishu renders approvals and questions as interactive cards. Telegram renders ap
 
 Each request uses `interaction_timeout_seconds`. An unanswered approval is rejected and an unanswered question is dismissed. The existing card or keyboard is moved to a terminal state. In-memory interaction handles intentionally do not survive restart, so a later callback is reported as stale instead of being applied to a new turn.
 
+QQ cannot present approvals or questions at all: every session is forced into `auto` mode. `/mode <anything>` replies "This platform can't present approval or question prompts, so permission mode stays fixed at auto." and `/render-thinking on` replies "This platform can't stream edited messages, so thinking rendering stays off." If Kimi still raises an unexpected interactive prompt, the QQ adapter replies with a short notice ("Interactive prompt not supported on QQ; it will expire — steer with a normal message.") and lets the request time out normally.
+
 ## Streaming and thinking
 
 Answers stream into editable messages at the configured throttle and are split by the router at the selected platform's text limit. Text separated by an interleaved tool-call boundary starts a new visible message instead of overwriting earlier answer text.
 
-`/render-thinking on` creates a separately labelled thinking stream with independent buffering, edits, chunking, resynchronization, and finalization. Enabling it during a live turn backfills the current thinking snapshot. Disabling it freezes the visible thinking while the answer continues. The preference persists per conversation. Tool-call and transcript rendering are intentionally absent.
+`/render-thinking on` creates a separately labelled thinking stream with independent buffering, edits, chunking, resynchronization, and finalization. Enabling it during a live turn backfills the current thinking snapshot. Disabling it freezes the visible thinking while the answer continues. The preference persists per conversation. Tool-call and transcript rendering are intentionally absent. QQ streams its answer text by repeatedly replacing one message via QQ's `stream_messages` API, but never offers a separate thinking stream.
 
 ## Inbound and outbound media
 
@@ -75,11 +77,13 @@ Feishu accepts direct text, native images, files, and images embedded in rich po
 
 The experimental Telegram adapter accepts plain text, one photo, or one document with an optional caption. Albums and other media are rejected. Hosted Bot API downloads are capped at 20 MB. Startup discards pending updates rather than replaying old instructions.
 
-`/send <path>` accepts a relative path resolved from the bound workspace or an absolute path whose resolved target remains inside it. Missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG images natively, MP4 as native media with a neutral cover, and other files as native files. Telegram sends JPEG/PNG through `sendPhoto` and every other type, including MP4, through `sendDocument`.
+The experimental QQ adapter accepts direct C2C text and any attachments the sender sends; image attachments become image prompt parts and everything else is saved as an inbound file, same as Feishu. Only C2C (private) messages are handled; group chat is not implemented.
+
+`/send <path>` accepts a relative path resolved from the bound workspace or an absolute path whose resolved target remains inside it. Missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG images natively, MP4 as native media with a neutral cover, and other files as native files. Telegram sends JPEG/PNG through `sendPhoto` and every other type, including MP4, through `sendDocument`. QQ uploads JPEG/PNG images and MP4 video and sends them as native media; every other file type raises `"QQ only delivers png/jpg images and mp4 video"`, which the router surfaces as `"File send failed: …"`.
 
 ## Current operating limits
 
 - One selected adapter per process and one trusted-operator security model.
-- Feishu direct messages only; Telegram private chats only.
-- Telegram remains experimental and has not been project live-validated.
-- No tool-call or transcript rendering, multi-tenant isolation, generic plugin/UI framework, webhooks, Telegram groups/topics/albums, or remote Kimi server mode.
+- Feishu direct messages only; Telegram private chats only; QQ C2C (private chats) only.
+- Telegram and QQ remain experimental and have not been project live-validated.
+- No tool-call or transcript rendering, multi-tenant isolation, generic plugin/UI framework, webhooks, Telegram groups/topics/albums, QQ group chat, or remote Kimi server mode.
