@@ -259,6 +259,17 @@ def test_semantic_projection_accepts_an_optional_outbound_message_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     openapi, asyncapi = _minimal_documents()
+    client_hello = next(
+        message
+        for message in kimi_contract.KIMI_WEBSOCKET_MESSAGES
+        if message.name == "client_hello"
+    )
+    assert next(
+        field
+        for field in client_hello.fields
+        if field.path == ("payload", "subscriptions")
+    ).required is False
+
     message = kimi_contract.WebSocketMessageContract(
         "client_hello",
         "KimiServerClient._send_client_hello",
@@ -305,8 +316,6 @@ def test_semantic_projection_accepts_an_optional_outbound_message_field(
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
 
     assert not [item for item in checks if item.status == "fail"]
-
-
 def _write_fixture(directory: Path, *, legacy: bool = False) -> None:
     version = "kimi, version 1.49.0\n" if legacy else "0.28.1\n"
     help_text = (
