@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kimi-bridge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Control a local Kimi Code agent from Feishu or Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
