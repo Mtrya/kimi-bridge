@@ -124,6 +124,39 @@ def _status(report: DoctorReport, name: str) -> CheckStatus:
     return next(check.status for check in report.checks if check.name == name)
 
 
+def _detail(report: DoctorReport, name: str) -> str:
+    return next(check.detail for check in report.checks if check.name == name)
+
+
+def test_state_check_uses_configured_state_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    state_path = tmp_path / "custom" / "state.json"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                f"state_path = '{state_path}'",
+                "[feishu]",
+                'app_id = "id"',
+                'app_secret = "secret"',
+                'allowed_users = ["ou_one"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = diagnose(
+        config_path=config_path,
+        command_runner=_runner(),
+        which=lambda _name: "/fake/kimi",
+        platform_name="linux" if os.name == "posix" else "win32",
+    )
+
+    assert _status(report, "state") is CheckStatus.OK
+    assert str(state_path.parent) in _detail(report, "state")
+
+
 def test_valid_feishu_config_and_supported_kimi_are_secret_safe(
     tmp_path: Path,
 ) -> None:
