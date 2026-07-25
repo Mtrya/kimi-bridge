@@ -255,6 +255,67 @@ def test_semantic_projection_checks_requests_messages_and_events(
     assert "websocket.event.assistant.delta.delta" in failures
 
 
+def test_semantic_projection_accepts_an_optional_outbound_message_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    client_hello = next(
+        message
+        for message in kimi_contract.KIMI_WEBSOCKET_MESSAGES
+        if message.name == "client_hello"
+    )
+    assert next(
+        field
+        for field in client_hello.fields
+        if field.path == ("payload", "subscriptions")
+    ).required is False
+
+    message = kimi_contract.WebSocketMessageContract(
+        "client_hello",
+        "KimiServerClient._send_client_hello",
+        (
+            kimi_contract.SchemaFieldContract(("payload", "client_id"), ("string",)),
+            kimi_contract.SchemaFieldContract(
+                ("payload", "subscriptions"), ("array",), required=False
+            ),
+        ),
+        (
+            {
+                "payload": {
+                    "client_id": "kimi-bridge",
+                    "subscriptions": [],
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (message,))
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
+    asyncapi["components"]["messages"] = {
+        "client_hello": {
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "properties": {
+                            "client_id": {"type": "string"},
+                            "subscriptions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["client_id"],
+                    }
+                },
+                "required": ["payload"],
+            }
+        }
+    }
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+
+    assert not [item for item in checks if item.status == "fail"]
 def _write_fixture(directory: Path, *, legacy: bool = False) -> None:
     version = "kimi, version 1.49.0\n" if legacy else "0.28.1\n"
     help_text = (

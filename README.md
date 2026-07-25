@@ -6,12 +6,13 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 
 ## Support
 
-| Surface | Status | Validation |
-| --- | --- | --- |
-| Feishu direct messages | Supported | Live-validated end to end |
-| Telegram private chats | Experimental | Fake Bot API tests only; not live-validated |
-| Linux, Python ≥3.11 | Supported | Hosted tests on 3.11 and 3.13 |
-| macOS and Windows | Not currently supported | — |
+| Surface | Status |
+| --- | --- |
+| Feishu direct messages | Supported |
+| Telegram private chats | Experimental |
+| Linux, Python ≥3.11 | Supported |
+| macOS and Windows | Not currently supported |
+| Voice messages | Not currently supported |
 
 Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram uses a small handwritten `httpx` Bot API transport without a Telegram framework.
 

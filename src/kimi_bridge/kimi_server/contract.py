@@ -681,7 +681,7 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("type", "string", values=("client_hello",)),
             _field("id", "string"),
             _field("payload.client_id", "string"),
-            _field("payload.subscriptions", "array"),
+            _field("payload.subscriptions", "array", required=False),
         ),
         (
             {
