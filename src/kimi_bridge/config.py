@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 import logging
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
+from .state import DEFAULT_STATE_PATH
+
 
 DEFAULT_CONFIG_PATH = Path.home() / ".kimi-bridge" / "config.toml"
+CONFIG_PATH_ENV = "KIMI_BRIDGE_CONFIG"
 DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 PlatformName: TypeAlias = Literal["feishu", "telegram"]
 _PLATFORMS = {"feishu", "telegram"}
+
+
+def resolve_config_path(explicit: str | Path | None = None) -> Path:
+    """Resolve the config file: explicit path, then env override, then default."""
+
+    if explicit is not None:
+        return Path(explicit).expanduser()
+    override = os.environ.get(CONFIG_PATH_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return DEFAULT_CONFIG_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +62,7 @@ class Config:
     platform: PlatformName = "feishu"
     log_level: str = "INFO"
     default_workspace: Path = DEFAULT_WORKSPACE
+    state_path: Path = DEFAULT_STATE_PATH
     edit_throttle_seconds: float = 1.5
     interaction_timeout_seconds: float = 600.0
     inbox_subdir: str = ".kimi-bridge-inbox"
@@ -63,6 +79,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         platform = "feishu"
         log_level = "INFO"
         default_workspace = "~/.kimi-bridge/workspace"
+        state_path = "~/.kimi-bridge/state.json"
         edit_throttle_seconds = 1.5
         interaction_timeout_seconds = 600
         inbox_subdir = ".kimi-bridge-inbox"
@@ -104,6 +121,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     if not isinstance(workspace_raw, str) or not workspace_raw.strip():
         raise TypeError("default_workspace must be a non-empty string")
     default_workspace = Path(workspace_raw).expanduser().resolve()
+
+    state_raw = raw.get("state_path", str(DEFAULT_STATE_PATH))
+    if not isinstance(state_raw, str) or not state_raw.strip():
+        raise TypeError("state_path must be a non-empty string")
+    state_path = Path(state_raw).expanduser().resolve()
 
     throttle = raw.get("edit_throttle_seconds", 1.5)
     if isinstance(throttle, bool) or not isinstance(throttle, (int, float)):
@@ -177,6 +199,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         platform=cast(PlatformName, platform),
         log_level=log_level,
         default_workspace=default_workspace,
+        state_path=state_path,
         edit_throttle_seconds=edit_throttle_seconds,
         interaction_timeout_seconds=interaction_timeout_seconds,
         inbox_subdir=inbox_subdir,
