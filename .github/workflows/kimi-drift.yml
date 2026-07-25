@@ -14,7 +14,9 @@ concurrency:
 
 jobs:
   canary:
-    if: github.ref == 'refs/heads/main'
+    # Scheduled runs stay on main; manual dispatch may target any branch
+    # to validate canary changes before they merge.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,9 +31,10 @@ jobs:
       - run: uv sync --locked --dev
       - name: Run isolated credential-free canary
         id: canary
-        # An incompatible result still writes a report; synchronization
-        # turns it into the rolling drift issue.
-        continue-on-error: true
+        # On main an incompatible result still writes a report and the
+        # synchronize job turns it into the rolling drift issue; branch
+        # dispatches have no synchronize job, so they fail loudly here.
+        continue-on-error: ${{ github.ref == 'refs/heads/main' }}
         run: uv run --locked python scripts/check_kimi_compatibility.py check --report "${{ runner.temp }}/kimi-compatibility/report.json" --artifacts "${{ runner.temp }}/kimi-compatibility/artifacts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -43,7 +46,9 @@ jobs:
 
   synchronize:
     needs: canary
-    if: always() && needs.canary.result == 'success'
+    # Promotion PRs and the rolling drift issue are shared state; only
+    # main results may touch them. Branch dispatches stop at the reports.
+    if: always() && needs.canary.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       actions: write
