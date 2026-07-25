@@ -38,6 +38,7 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 def test_manifest_contains_the_verified_baseline_and_is_immutable() -> None:
     assert isinstance(SUPPORTED_KIMI_CODE_VERSIONS, frozenset)
     assert "0.28.1" in SUPPORTED_KIMI_CODE_VERSIONS
+    assert "0.29.1" in SUPPORTED_KIMI_CODE_VERSIONS
 
 
 def test_manifest_version_order_is_semantic() -> None:
