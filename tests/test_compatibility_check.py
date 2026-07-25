@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import importlib.util
 import inspect
 import json
 import os
@@ -13,30 +14,47 @@ from typing import Any
 import httpx
 import pytest
 
-from kimi_bridge import compatibility_check as checker
 from kimi_bridge.compatibility import (
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
-from kimi_bridge.compatibility_check import (
-    AUTOMATION_BRANCH,
-    CANARY_PLATFORMS,
-    ArtifactMetadata,
-    CompatibilityCheckError,
-    GitHubApiAutomation,
-    build_report,
-    check_fixture,
-    check_live,
-    install_official_kimi,
-    read_report,
-    redact,
-    summarize_reports,
-    synchronize_reports,
-    write_report,
-)
 from kimi_bridge.kimi_server import KimiContractCheck, KimiServerClient
 from kimi_bridge.kimi_server import contract as kimi_contract
 from kimi_bridge.kimi_server.probe import PROBED_LIFECYCLE_INVARIANTS
+
+
+def _load_checker() -> Any:
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "scripts"
+        / "check_kimi_compatibility.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "check_kimi_compatibility", script
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+checker = _load_checker()
+
+AUTOMATION_BRANCH = checker.AUTOMATION_BRANCH
+CANARY_PLATFORMS = checker.CANARY_PLATFORMS
+ArtifactMetadata = checker.ArtifactMetadata
+CompatibilityCheckError = checker.CompatibilityCheckError
+GitHubApiAutomation = checker.GitHubApiAutomation
+build_report = checker.build_report
+check_fixture = checker.check_fixture
+check_live = checker.check_live
+install_official_kimi = checker.install_official_kimi
+read_report = checker.read_report
+redact = checker.redact
+summarize_reports = checker.summarize_reports
+synchronize_reports = checker.synchronize_reports
+write_report = checker.write_report
 
 
 def _passing_check(identifier: str = "ok") -> KimiContractCheck:
