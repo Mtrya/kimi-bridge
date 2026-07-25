@@ -24,6 +24,9 @@ class _RenderState:
     text: str = ""
     messages: list[MessageRef] = field(default_factory=list)
     rendered_chunks: list[str] = field(default_factory=list)
+    # Deferred rendering (edit-less adapters) sends the buffered text in
+    # append-only batches; this tracks how much of ``text`` is already sent.
+    emitted_length: int = 0
     turn_id: int | None = None
     prompt_id: str | None = None
     turn_active: bool = False

@@ -91,6 +91,8 @@ InteractionHandler = Callable[
 class PlatformAdapter(Protocol):
     name: str
     message_limit: int
+    supports_edits: bool
+    supports_interactions: bool
 
     async def start(
         self,

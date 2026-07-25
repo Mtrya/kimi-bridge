@@ -97,6 +97,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         conversation_key = _conversation_key(msg)
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
         async with lock:
+            self._coerce_binding_capabilities(conversation_key, adapter)
             if text.startswith("/") and not msg.images and not msg.files:
                 try:
                     await self._handle_command(
@@ -121,6 +122,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                     conversation_key,
                     self._default_workspace,
                     _title_from_message(msg),
+                    adapter,
                 )
             await self._ensure_active_stream(
                 conversation_key,

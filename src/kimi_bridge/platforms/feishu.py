@@ -450,6 +450,8 @@ class FeishuAdapter:
     """Receive allowlisted direct messages and send editable text replies."""
 
     name = "feishu"
+    supports_edits = True
+    supports_interactions = True
 
     def __init__(
         self,
