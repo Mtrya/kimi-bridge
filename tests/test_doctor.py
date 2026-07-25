@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -10,6 +11,11 @@ from kimi_bridge.doctor import (
     CommandResult,
     DoctorReport,
     diagnose,
+)
+
+
+requires_posix_modes = pytest.mark.skipif(
+    os.name != "posix", reason="POSIX file modes are not enforceable here"
 )
 
 
@@ -63,7 +69,7 @@ def _write_feishu_config(path: Path, workspace: Path) -> tuple[str, str, str]:
     path.write_text(
         "\n".join(
             [
-                f'default_workspace = "{workspace}"',
+                f"default_workspace = '{workspace}'",
                 "[feishu]",
                 f'app_id = "{app_id}"',
                 f'app_secret = "{app_secret}"',
@@ -83,7 +89,7 @@ def _write_telegram_config(path: Path, workspace: Path) -> tuple[str, str]:
         "\n".join(
             [
                 'platform = "telegram"',
-                f'default_workspace = "{workspace}"',
+                f"default_workspace = '{workspace}'",
                 "[telegram]",
                 f'bot_token = "{token}"',
                 f"allowed_users = [{user_id}]",
@@ -101,13 +107,16 @@ def _diagnose(
     runner: FakeRunner,
     *,
     kimi_path: str | None = "/fake/kimi",
+    platform_name: str | None = None,
 ) -> DoctorReport:
+    if platform_name is None:
+        platform_name = "linux" if os.name == "posix" else "win32"
     return diagnose(
         config_path=config_path,
         state_path=state_path,
         command_runner=runner,
         which=lambda _name: kimi_path,
-        platform_name="linux",
+        platform_name=platform_name,
     )
 
 
@@ -184,6 +193,7 @@ def test_malformed_toml_does_not_echo_contents(tmp_path: Path) -> None:
     assert secret not in report.render()
 
 
+@requires_posix_modes
 def test_group_readable_config_warns_without_failing(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     _write_feishu_config(config_path, tmp_path / "workspace")
@@ -195,6 +205,33 @@ def test_group_readable_config_warns_without_failing(tmp_path: Path) -> None:
 
     assert report.exit_code == 0
     assert _status(report, "config permissions") is CheckStatus.WARNING
+
+
+@requires_posix_modes
+def test_macos_group_readable_config_warns_like_linux(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_feishu_config(config_path, tmp_path / "workspace")
+    config_path.chmod(0o640)
+
+    report = _diagnose(
+        config_path, tmp_path / "state.json", _runner(), platform_name="darwin"
+    )
+
+    assert report.exit_code == 0
+    assert _status(report, "config permissions") is CheckStatus.WARNING
+
+
+def test_windows_skips_posix_permission_check(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_feishu_config(config_path, tmp_path / "workspace")
+
+    report = _diagnose(
+        config_path, tmp_path / "state.json", _runner(), platform_name="win32"
+    )
+
+    assert report.exit_code == 0
+    assert _status(report, "config permissions") is CheckStatus.OK
+    assert "does not apply on Windows" in report.render()
 
 
 @pytest.mark.parametrize(

@@ -27,11 +27,11 @@ Guidance for AI agents (and humans) working in this repo.
 ## Conventions
 
 - Python ≥ 3.11, asyncio throughout, typed (dataclasses / Protocol, `from __future__ import annotations`).
-- Minimal dependencies: core is `httpx` + `websockets` only. Feishu uses the optional `lark-oapi` SDK; Telegram reuses `httpx` and must not gain a framework dependency without an explicit design change.
+- Minimal dependencies: `httpx` + `websockets` + the `lark-oapi` Feishu SDK. Telegram reuses `httpx` and must not gain a framework dependency without an explicit design change.
 - Keep the shared contracts semantic and platform-neutral. Do not introduce a generic UI schema, plugin framework, capability registry, or multi-adapter runtime without a concrete second platform requiring it.
 - Keep public documentation compact and current. Do not expose private credentials, local planning material, ignored reference snapshots, or internal progress terminology in package metadata, docs, workflows, issues, or releases.
 - If a file is gitignored, it's gitignored for a reason — never force-add it.
 
 ## Testing
 
-Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions, path authorization, state migration, and independent stream behavior; platform tests assert native rendering, uploads, and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, Telegram Bot API transport, configuration, and state persistence behind fakes in CI; do not require a live Kimi server or real IM credentials. The standalone smoke script is the explicit authenticated live-server check. Distribution changes also require building source and wheel artifacts, checking metadata/license/bundled assets, and exercising isolated core and Feishu-extra `uv tool` installs through non-starting `--help`, `--version`, and `doctor` before uninstalling them.
+Unit-test the router against a fake `KimiServerClient` and fake adapters. Router tests assert semantic interactions, path authorization, state migration, and independent stream behavior; platform tests assert native rendering, uploads, and callback decoding. Keep server supervision, REST/WebSocket recovery, Feishu filtering, Telegram Bot API transport, configuration, and state persistence behind fakes in CI; do not require a live Kimi server or real IM credentials. Distribution changes also require building source and wheel artifacts, checking metadata/license/bundled assets, and exercising isolated `uv tool` installs through non-starting `--help`, `--version`, and `doctor` before uninstalling them.

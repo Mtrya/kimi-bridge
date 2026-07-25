@@ -31,9 +31,7 @@ async def run() -> None:
 
     supervisor = KimiServerSupervisor(preferred_port=config.kimi_server.port)
     stop_requested = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for watched_signal in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(watched_signal, stop_requested.set)
+    _install_shutdown_signal_handlers(asyncio.get_running_loop(), stop_requested)
 
     async with supervisor:
         async with KimiServerClient(supervisor=supervisor) as client:
@@ -79,6 +77,21 @@ async def run() -> None:
                             await adapter_wait
                 finally:
                     await router.close()
+
+
+def _install_shutdown_signal_handlers(
+    loop: asyncio.AbstractEventLoop, stop_requested: asyncio.Event
+) -> None:
+    for watched_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(watched_signal, stop_requested.set)
+        except NotImplementedError:
+            # Windows event loops cannot register asyncio signal handlers;
+            # call_soon_threadsafe also wakes the loop from its poll.
+            signal.signal(
+                watched_signal,
+                lambda *_args: loop.call_soon_threadsafe(stop_requested.set),
+            )
 
 
 def _build_adapter(config: Config) -> PlatformAdapter:

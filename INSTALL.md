@@ -4,7 +4,7 @@ This is the starting runbook for both humans and coding agents. An agent should 
 
 ## 1. Inspect before changing anything
 
-Confirm that the host is Linux and inventory existing tools without installing or replacing them:
+Confirm the host platform and inventory existing tools without installing or replacing them:
 
 ```bash
 uname -s
@@ -16,7 +16,7 @@ kimi --help
 kimi doctor config
 ```
 
-kimi-bridge requires Linux, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/), and authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started). Official Kimi Code has `web`, `doctor`, and `migrate` commands. The older Python product prints a `kimi, version ...` banner and is incompatible; do not install or retain legacy `kimi-cli` as a workaround. Follow Moonshot AI's current installation or migration guide when Kimi Code is absent or legacy.
+kimi-bridge requires Python 3.11 or newer, [uv](https://docs.astral.sh/uv/getting-started/installation/), and authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started). Linux is the supported platform; macOS and Windows are experimental, so state that clearly before continuing on them. Official Kimi Code has `web`, `doctor`, and `migrate` commands. The older Python product prints a `kimi, version ...` banner and is incompatible; do not install or retain legacy `kimi-cli` as a workaround. Follow Moonshot AI's current installation or migration guide when Kimi Code is absent or legacy.
 
 Ask the user which adapter they want before configuring anything:
 
@@ -27,13 +27,7 @@ Do not ask the user to paste credentials into a repository file. Do not print, l
 
 ## 2. Install from PyPI
 
-For Feishu, install the optional SDK extra:
-
-```bash
-uv tool install 'kimi-bridge[feishu]'
-```
-
-For the experimental Telegram adapter, the core package is sufficient:
+One package covers both adapters:
 
 ```bash
 uv tool install kimi-bridge
@@ -59,6 +53,8 @@ touch ~/.kimi-bridge/config.toml
 chmod 600 ~/.kimi-bridge/config.toml
 ```
 
+On Windows, create `%USERPROFILE%\.kimi-bridge\config.toml` in the user profile instead; `doctor` skips the POSIX permission check there.
+
 Do not place secrets in environment files inside the project. After the file is populated, inspect only its ownership, mode, and redacted structure. Never include its contents in tool output or a diagnostic report.
 
 Run the non-starting diagnostic:
@@ -81,9 +77,9 @@ Ask the allowlisted user to send `/status`, then send one small prompt and confi
 
 For Feishu, do not call the setup complete until direct messages, editable replies, and any configured card callbacks work. For Telegram, state plainly that its adapter remains experimental and was not live-validated by the project unless this installation's own private-chat test actually passed.
 
-## 5. Optional per-user systemd service
+## 5. Optional per-user systemd service (Linux)
 
-Do not create a service automatically. First ask: “Do you want kimi-bridge to run persistently as your user?” A foreground-only installation is complete if the answer is no.
+Do not create a service automatically. First ask: “Do you want kimi-bridge to run persistently as your user?” A foreground-only installation is complete if the answer is no. This section applies to Linux with systemd; on macOS and Windows, run the bridge in the foreground.
 
 If the user says yes, resolve the actual executable locations before creating anything:
 
@@ -143,13 +139,13 @@ kimi-bridge doctor
 systemctl --user restart kimi-bridge.service
 ```
 
-Pin a known release for rollback, retaining the Feishu extra when applicable:
+Pin a known release for rollback:
 
 ```bash
-uv tool install --force 'kimi-bridge[feishu]==0.1.0'
+uv tool install --force 'kimi-bridge==0.1.0'
 ```
 
-Use `kimi-bridge==0.1.0` instead for the core installation, then rerun `doctor` and restart the service.
+Then rerun `doctor` and restart the service.
 
 Stop and disable the service without deleting user data:
 
@@ -171,7 +167,6 @@ Contributors can use an isolated tool directly from a trusted checkout:
 
 ```bash
 uv tool install .
-uv tool install --force '.[feishu]'
 ```
 
 For development and validation commands, see [README](README.md#development).

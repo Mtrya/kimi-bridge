@@ -2575,7 +2575,10 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
     (workspace / "directory").mkdir()
     outside = tmp_path / "outside.txt"
     outside.write_text("outside", encoding="utf-8")
-    (workspace / "escape.txt").symlink_to(outside)
+    try:
+        (workspace / "escape.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is not permitted here")
     (workspace / "first.txt").write_text("one", encoding="utf-8")
     (workspace / "second.txt").write_text("two", encoding="utf-8")
     store = StateStore(tmp_path / "state.json")

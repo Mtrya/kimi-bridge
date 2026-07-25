@@ -170,11 +170,11 @@ def _check_config(
 
 
 def _check_config_permissions(path: Path, platform_name: str) -> DoctorCheck:
-    if not platform_name.startswith("linux"):
+    if platform_name.startswith("win"):
         return DoctorCheck(
             "config permissions",
             CheckStatus.OK,
-            "Linux readability check does not apply",
+            "POSIX readability check does not apply on Windows",
         )
     try:
         mode = stat.S_IMODE(path.stat().st_mode)

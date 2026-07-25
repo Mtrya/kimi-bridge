@@ -69,7 +69,7 @@ The Telegram adapter is experimental and covered by fake Bot API tests, not proj
 
 ## Files and state
 
-- `~/.kimi-bridge/config.toml` contains adapter credentials and should be mode `600` on Linux.
+- `~/.kimi-bridge/config.toml` contains adapter credentials and should be mode `600` on Linux and macOS.
 - `~/.kimi-bridge/state.json` is an atomically replaced, versioned bridge state file. It stores conversation-to-session bindings, workspaces, permission modes, and thinking-rendering preferences, but no adapter credentials.
 - `~/.kimi-bridge/workspace/` is the default scratch workspace. Use `/new <absolute-or-relative-path>` to bind real project work to another directory.
 - `<session workspace>/<inbox_subdir>/` receives inbound files. The configured subdirectory cannot escape its workspace.

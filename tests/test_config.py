@@ -35,7 +35,7 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
     path.write_text(
         "\n".join(
             [
-                f'default_workspace = "{workspace}"',
+                f"default_workspace = '{workspace}'",
                 "edit_throttle_seconds = 2.25",
                 "interaction_timeout_seconds = 42",
                 'inbox_subdir = ".bridge-files"',
