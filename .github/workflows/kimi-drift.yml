@@ -16,9 +16,6 @@ jobs:
   canary:
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
-    # Linux is the supported platform; macOS/Windows canaries are
-    # informational and must not block drift synchronization.
-    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +29,8 @@ jobs:
       - run: uv sync --locked --dev
       - name: Run isolated credential-free canary
         id: canary
+        # An incompatible result still writes a report; synchronization
+        # turns it into the rolling drift issue.
         continue-on-error: true
         run: uv run --locked python scripts/check_kimi_compatibility.py check --report "${{ runner.temp }}/kimi-compatibility/report.json" --artifacts "${{ runner.temp }}/kimi-compatibility/artifacts"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -59,7 +58,7 @@ jobs:
           enable-cache: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: kimi-compatibility-report-ubuntu-latest
+          pattern: kimi-compatibility-report-*
           path: ${{ runner.temp }}/kimi-compatibility
       - run: uv sync --locked --dev
       - name: Synchronize promotion or rolling drift issue
@@ -67,4 +66,4 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_DEFAULT_BRANCH: main
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: uv run --locked python scripts/check_kimi_compatibility.py sync --report "$RUNNER_TEMP/kimi-compatibility/report.json"
+        run: uv run --locked python scripts/check_kimi_compatibility.py sync --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-ubuntu-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-macos-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-windows-latest/report.json"

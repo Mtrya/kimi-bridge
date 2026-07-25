@@ -20,6 +20,7 @@ from kimi_bridge.compatibility import (
 )
 from kimi_bridge.compatibility_check import (
     AUTOMATION_BRANCH,
+    CANARY_PLATFORMS,
     ArtifactMetadata,
     CompatibilityCheckError,
     GitHubApiAutomation,
@@ -29,7 +30,8 @@ from kimi_bridge.compatibility_check import (
     install_official_kimi,
     read_report,
     redact,
-    synchronize_report,
+    summarize_reports,
+    synchronize_reports,
     write_report,
 )
 from kimi_bridge.kimi_server import KimiContractCheck, KimiServerClient
@@ -45,6 +47,27 @@ def _failing_check(
     identifier: str = "broken", detail: str = "required surface is missing"
 ) -> KimiContractCheck:
     return KimiContractCheck(identifier, "rest", "fail", detail, "test")
+
+
+def _reports_for_all_platforms(
+    version: str,
+    *,
+    failing: dict[str, KimiContractCheck] | None = None,
+    versions: dict[str, str] | None = None,
+) -> list[Any]:
+    reports = []
+    for platform in CANARY_PLATFORMS:
+        check = (failing or {}).get(platform) or _passing_check()
+        reports.append(
+            build_report(
+                mode="live",
+                product="kimi-code",
+                version=(versions or {}).get(platform, version),
+                checks=(check,),
+                platform=platform,
+            )
+        )
+    return reports
 
 
 def _minimal_documents() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -629,23 +652,13 @@ def test_github_promotion_drift_dedup_and_recovery(
     automation = GitHubApiAutomation(
         "Mtrya/kimi-bridge", "token", client=client
     )
-    supported = build_report(
-        mode="live",
-        product="kimi-code",
-        version="0.28.1",
-        checks=(_passing_check(),),
-    )
-    assert synchronize_report(supported, automation) == ()
+    supported = _reports_for_all_platforms("0.28.1")
+    assert synchronize_reports(supported, automation) == ()
     assert not fake.pulls and not fake.issues
 
-    compatible_unknown = build_report(
-        mode="live",
-        product="kimi-code",
-        version=unlisted_kimi_code_version,
-        checks=(_passing_check(),),
-    )
+    compatible_unknown = _reports_for_all_platforms(unlisted_kimi_code_version)
 
-    assert synchronize_report(compatible_unknown, automation) == (
+    assert synchronize_reports(compatible_unknown, automation) == (
         "created-promotion-pr",
     )
     assert AUTOMATION_BRANCH == "automation/kimi-code-compatibility"
@@ -655,45 +668,103 @@ def test_github_promotion_drift_dedup_and_recovery(
         key=kimi_code_version_sort_key,
     )
     assert fake.ci_dispatches == 1
-    assert synchronize_report(compatible_unknown, automation) == (
+    assert synchronize_reports(compatible_unknown, automation) == (
         "unchanged-promotion-pr",
     )
     assert len(fake.pulls) == 1
     assert fake.content_updates == 1
     assert fake.ci_dispatches == 1
     fake.pulls.clear()
-    assert synchronize_report(compatible_unknown, automation) == ()
+    assert synchronize_reports(compatible_unknown, automation) == ()
     assert fake.content_updates == 1
 
-    broken = build_report(
-        mode="live",
-        product="kimi-code",
-        version="0.30.0",
-        checks=(_failing_check(),),
+    broken = _reports_for_all_platforms(
+        "0.30.0", failing={"windows": _failing_check()}
     )
-    assert synchronize_report(broken, automation) == ("created-drift-issue",)
-    assert synchronize_report(broken, automation) == ("unchanged-drift-issue",)
+    assert synchronize_reports(broken, automation) == ("created-drift-issue",)
+    assert synchronize_reports(broken, automation) == ("unchanged-drift-issue",)
     assert len(fake.issues) == 1
+    assert "**windows**" in fake.issues[0]["body"]
 
-    changed = build_report(
-        mode="live",
-        product="kimi-code",
-        version="0.30.0",
-        checks=(_failing_check(detail="a different required failure"),),
+    changed = _reports_for_all_platforms(
+        "0.30.0",
+        failing={
+            "macos": _failing_check(detail="a different required failure")
+        },
     )
-    assert synchronize_report(changed, automation) == ("updated-drift-issue",)
+    assert synchronize_reports(changed, automation) == ("updated-drift-issue",)
     assert len(fake.issues) == 1
+    assert "**macos**" in fake.issues[0]["body"]
 
-    recovered = build_report(
-        mode="live",
-        product="kimi-code",
-        version="0.28.1",
-        checks=(_passing_check(),),
-    )
-    assert synchronize_report(recovered, automation) == (
+    recovered = _reports_for_all_platforms("0.28.1")
+    assert synchronize_reports(recovered, automation) == (
         "closed-recovered-drift-issue",
     )
     assert fake.issues[0]["state"] == "closed"
     assert len(fake.comments) == 1
-    assert synchronize_report(recovered, automation) == ()
+    assert synchronize_reports(recovered, automation) == ()
     assert len(fake.comments) == 1
+
+
+def test_strict_gating_blocks_promotion_without_every_platform(
+    unlisted_kimi_code_version: str,
+) -> None:
+    fake = FakeGitHub()
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = GitHubApiAutomation(
+        "Mtrya/kimi-bridge", "token", client=client
+    )
+    linux_only = [
+        build_report(
+            mode="live",
+            product="kimi-code",
+            version=unlisted_kimi_code_version,
+            checks=(_passing_check(),),
+            platform="linux",
+        )
+    ]
+
+    assert synchronize_reports(linux_only, automation) == (
+        "created-drift-issue",
+    )
+    assert not fake.pulls
+    body = fake.issues[0]["body"]
+    assert "no compatibility report for macos" in body
+    assert "no compatibility report for windows" in body
+
+    summary = summarize_reports(linux_only)
+    assert not summary.compatible
+    assert summary.platforms == ("linux",)
+
+
+def test_strict_gating_treats_version_skew_as_drift() -> None:
+    skewed = summarize_reports(
+        _reports_for_all_platforms(
+            "0.30.0", versions={"windows": "0.30.1"}
+        )
+    )
+
+    assert not skewed.compatible
+    assert skewed.version == "mixed"
+    assert any(
+        item["id"] == "aggregation.version" and item["platform"] == "all"
+        for item in skewed.failures
+    )
+
+
+def test_summarize_reports_rejects_duplicate_platforms() -> None:
+    duplicated = [
+        build_report(
+            mode="live",
+            product="kimi-code",
+            version="0.28.1",
+            checks=(_passing_check(),),
+            platform="linux",
+        )
+    ] * 2
+
+    with pytest.raises(ValueError, match="distinct platform"):
+        summarize_reports(duplicated)

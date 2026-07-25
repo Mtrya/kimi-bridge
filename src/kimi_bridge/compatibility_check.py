@@ -37,7 +37,8 @@ from .kimi_server import (
 )
 
 
-REPORT_SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 2
+CANARY_PLATFORMS = ("linux", "macos", "windows")
 OFFICIAL_KIMI_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
 OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/install.ps1"
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
@@ -71,6 +72,7 @@ class CompatibilityReport:
     """Stable machine-readable compatibility result."""
 
     mode: str
+    platform: str
     product: str
     version: str
     supported: bool
@@ -86,6 +88,7 @@ class CompatibilityReport:
             "schema_version": REPORT_SCHEMA_VERSION,
             "contract_schema_version": KIMI_SEMANTIC_CONTRACT_VERSION,
             "mode": self.mode,
+            "platform": self.platform,
             "product": self.product,
             "version": self.version,
             "supported": self.supported,
@@ -145,6 +148,7 @@ class CompatibilityReport:
         )
         return cls(
             mode=str(value["mode"]),
+            platform=str(value["platform"]),
             product=str(value["product"]),
             version=str(value["version"]),
             supported=bool(value["supported"]),
@@ -155,6 +159,19 @@ class CompatibilityReport:
             report_digest=str(value["report_digest"]),
             artifacts=artifacts,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class CompatibilitySummary:
+    """Strict cross-platform verdict combining one report per platform."""
+
+    version: str
+    supported: bool
+    compatible: bool
+    platforms: tuple[str, ...]
+    failures: tuple[dict[str, str], ...]
+    failure_digest: str
+    report_digest: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,11 +193,11 @@ class CommandRunner(Protocol):
 class GitHubAutomation(Protocol):
     """Semantic operations needed by the synchronization decision."""
 
-    def recover_drift_issue(self, report: CompatibilityReport) -> bool: ...
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool: ...
 
-    def promote_version(self, report: CompatibilityReport) -> str | None: ...
+    def promote_version(self, summary: CompatibilitySummary) -> str | None: ...
 
-    def record_drift(self, report: CompatibilityReport) -> str: ...
+    def record_drift(self, summary: CompatibilitySummary) -> str: ...
 
 
 class CompatibilityCheckError(RuntimeError):
@@ -201,6 +218,16 @@ def redact(value: str, *, limit: int = 2000) -> str:
     return redacted
 
 
+def normalize_platform_name(platform_name: str = sys.platform) -> str:
+    """Map a sys.platform value onto the canary platform vocabulary."""
+
+    if platform_name.startswith("win"):
+        return "windows"
+    if platform_name.startswith("darwin"):
+        return "macos"
+    return "linux"
+
+
 def build_report(
     *,
     mode: str,
@@ -208,9 +235,11 @@ def build_report(
     version: str,
     checks: Sequence[KimiContractCheck],
     artifacts: Sequence[ArtifactMetadata] = (),
+    platform: str | None = None,
 ) -> CompatibilityReport:
     """Normalize checks and compute digests independently of map ordering."""
 
+    report_platform = platform or normalize_platform_name()
     normalized_checks = tuple(
         sorted(
             (
@@ -242,6 +271,7 @@ def build_report(
     )
     core = {
         "mode": mode,
+        "platform": report_platform,
         "product": product,
         "version": version,
         "supported": supported,
@@ -254,6 +284,7 @@ def build_report(
     }
     return CompatibilityReport(
         mode=mode,
+        platform=report_platform,
         product=product,
         version=version,
         supported=supported,
@@ -343,6 +374,7 @@ async def check_live(
     """Install and probe Kimi in a disposable credential-free home."""
 
     command_runner = runner or _run_command
+    report_platform = normalize_platform_name(platform_name)
     if installer_url is None:
         installer_url = (
             OFFICIAL_KIMI_WINDOWS_INSTALLER_URL
@@ -368,6 +400,7 @@ async def check_live(
                         "check_live",
                     ),
                 ),
+                platform=report_platform,
             )
     reported_version = version or "latest"
     try:
@@ -402,6 +435,7 @@ async def check_live(
                 version=probe.version,
                 checks=probe.checks,
                 artifacts=artifacts,
+                platform=report_platform,
             )
     except CompatibilityCheckError as exc:
         category = exc.category
@@ -427,6 +461,7 @@ async def check_live(
                 "check_live",
             ),
         ),
+        platform=report_platform,
     )
 
 
@@ -522,21 +557,84 @@ def read_report(path: Path) -> CompatibilityReport:
     return CompatibilityReport.from_dict(payload)
 
 
-def synchronize_report(
-    report: CompatibilityReport, automation: GitHubAutomation
-) -> tuple[str, ...]:
-    """Apply the quiet pass/promotion/drift/recovery decision tree."""
+def summarize_reports(
+    reports: Sequence[CompatibilityReport],
+) -> CompatibilitySummary:
+    """Combine per-platform reports into one strict all-platform verdict."""
 
+    if not reports:
+        raise ValueError("at least one compatibility report is required")
+    ordered = sorted(reports, key=lambda item: item.platform)
+    platforms = tuple(item.platform for item in ordered)
+    if len(set(platforms)) != len(platforms):
+        raise ValueError("each compatibility report must cover a distinct platform")
+    missing = tuple(
+        platform for platform in CANARY_PLATFORMS if platform not in platforms
+    )
+    failures: list[dict[str, str]] = []
+    for report in ordered:
+        failures.extend(
+            {**failure, "platform": report.platform}
+            for failure in report.failures
+        )
+    for platform in missing:
+        failures.append(
+            {
+                "id": "aggregation.platform",
+                "category": "aggregation",
+                "detail": f"no compatibility report for {platform}",
+                "platform": platform,
+            }
+        )
+    versions = sorted({item.version for item in ordered})
+    if len(versions) > 1:
+        observed = ", ".join(
+            f"{item.platform}={item.version}" for item in ordered
+        )
+        failures.append(
+            {
+                "id": "aggregation.version",
+                "category": "aggregation",
+                "detail": "platforms observed different kimi-code versions: "
+                + observed,
+                "platform": "all",
+            }
+        )
+    version = versions[0] if len(versions) == 1 else "mixed"
+    compatible = not failures
+    return CompatibilitySummary(
+        version=version,
+        supported=all(item.supported for item in ordered),
+        compatible=compatible,
+        platforms=platforms,
+        failures=tuple(failures),
+        failure_digest=_digest(failures),
+        report_digest=_digest(
+            [(item.platform, item.report_digest) for item in ordered]
+        ),
+    )
+
+
+def synchronize_reports(
+    reports: Sequence[CompatibilityReport], automation: GitHubAutomation
+) -> tuple[str, ...]:
+    """Apply the quiet pass/promotion/drift/recovery decision tree.
+
+    Promotion and recovery require every canary platform to be compatible
+    with the same kimi-code version; any platform failure records drift.
+    """
+
+    summary = summarize_reports(reports)
     actions: list[str] = []
-    if report.compatible:
-        if automation.recover_drift_issue(report):
+    if summary.compatible:
+        if automation.recover_drift_issue(summary):
             actions.append("closed-recovered-drift-issue")
-        if not report.supported:
-            promotion = automation.promote_version(report)
+        if not summary.supported:
+            promotion = automation.promote_version(summary)
             if promotion is not None:
                 actions.append(promotion)
     else:
-        actions.append(automation.record_drift(report))
+        actions.append(automation.record_drift(summary))
     return tuple(actions)
 
 
@@ -580,7 +678,7 @@ class GitHubApiAutomation:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def recover_drift_issue(self, report: CompatibilityReport) -> bool:
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
         issue = self._find_drift_issue()
         if issue is None or issue.get("state") != "open":
             return False
@@ -590,7 +688,8 @@ class GitHubApiAutomation:
             f"/repos/{self.repository}/issues/{number}/comments",
             json={
                 "body": (
-                    f"Compatibility recovered with kimi-code {report.version}."
+                    f"Compatibility recovered with kimi-code {summary.version} "
+                    f"on {', '.join(summary.platforms)}."
                     + self._run_link_suffix()
                 )
             },
@@ -602,10 +701,10 @@ class GitHubApiAutomation:
         )
         return True
 
-    def promote_version(self, report: CompatibilityReport) -> str | None:
+    def promote_version(self, summary: CompatibilitySummary) -> str | None:
         state_marker = (
-            f"<!-- version:{report.version} "
-            f"report-digest:{report.report_digest} -->"
+            f"<!-- version:{summary.version} "
+            f"report-digest:{summary.report_digest} -->"
         )
         pull = self._find_promotion_pull()
         if pull is not None and state_marker in str(pull.get("body", "")):
@@ -616,12 +715,12 @@ class GitHubApiAutomation:
         versions = payload.get("versions")
         if not isinstance(versions, list):
             raise RuntimeError("supported-version manifest is malformed")
-        if report.version in versions:
+        if summary.version in versions:
             return None
         base_sha = self._branch_sha(self.default_branch)
         self._set_automation_branch(base_sha)
         payload["versions"] = sorted(
-            {*versions, report.version}, key=kimi_code_version_sort_key
+            {*versions, summary.version}, key=kimi_code_version_sort_key
         )
         branch_content = self._get_content(manifest_path, AUTOMATION_BRANCH)
         encoded = base64.b64encode(
@@ -631,18 +730,18 @@ class GitHubApiAutomation:
             "PUT",
             f"/repos/{self.repository}/contents/{manifest_path}",
             json={
-                "message": f"chore: support kimi-code {report.version}",
+                "message": f"chore: support kimi-code {summary.version}",
                 "content": encoded,
                 "sha": branch_content["sha"],
                 "branch": AUTOMATION_BRANCH,
             },
         )
-        title = f"chore: support kimi-code {report.version}"
+        title = f"chore: support kimi-code {summary.version}"
         body = (
             f"{PROMOTION_MARKER}\n{state_marker}\n\n"
             f"The credential-free compatibility canary passed for kimi-code "
-            f"{report.version}.\n\n"
-            f"Report digest: `{report.report_digest}`."
+            f"{summary.version} on {', '.join(summary.platforms)}.\n\n"
+            f"Report digest: `{summary.report_digest}`."
             + self._run_link_suffix()
         )
         if pull is None:
@@ -668,11 +767,11 @@ class GitHubApiAutomation:
         self._enable_auto_merge(str(pull["node_id"]))
         return action
 
-    def record_drift(self, report: CompatibilityReport) -> str:
+    def record_drift(self, summary: CompatibilitySummary) -> str:
         issue = self._find_drift_issue()
         state_marker = (
-            f"<!-- version:{report.version} "
-            f"failure-digest:{report.failure_digest} -->"
+            f"<!-- version:{summary.version} "
+            f"failure-digest:{summary.failure_digest} -->"
         )
         if (
             issue is not None
@@ -681,18 +780,19 @@ class GitHubApiAutomation:
         ):
             return "unchanged-drift-issue"
         self._ensure_drift_label()
-        summary = "\n".join(
-            f"- **{item['category']}** `{item['id']}`: {item['detail']}"
-            for item in report.failures
+        failure_lines = "\n".join(
+            f"- **{item['platform']}** **{item['category']}** "
+            f"`{item['id']}`: {item['detail']}"
+            for item in summary.failures
         )
         body = (
             f"{DRIFT_MARKER}\n{state_marker}\n\n"
             f"The credential-free canary found required behavior drift in "
-            f"kimi-code {report.version}.\n\n{summary}\n\n"
-            f"Report digest: `{report.report_digest}`."
+            f"kimi-code {summary.version}.\n\n{failure_lines}\n\n"
+            f"Report digest: `{summary.report_digest}`."
             + self._run_link_suffix()
         )
-        title = f"Kimi compatibility drift: {report.version}"
+        title = f"Kimi compatibility drift: {summary.version}"
         if issue is None:
             self._request(
                 "POST",

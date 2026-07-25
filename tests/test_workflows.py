@@ -90,6 +90,9 @@ def test_drift_workflow_is_daily_manual_credential_free_and_write_scoped() -> No
         "windows-latest",
     ]
     assert "permissions" not in workflow["jobs"]["canary"]
+    # Strict gating: every platform leg must produce a report that the
+    # synchronize job consumes; no leg is merely informational.
+    assert "continue-on-error" not in workflow["jobs"]["canary"]
     assert workflow["jobs"]["synchronize"]["permissions"] == {
         "actions": "write",
         "contents": "write",
@@ -99,6 +102,12 @@ def test_drift_workflow_is_daily_manual_credential_free_and_write_scoped() -> No
     rendered = (WORKFLOW_DIRECTORY / "kimi-drift.yml").read_text()
     assert "check_kimi_compatibility.py check" in rendered
     assert "check_kimi_compatibility.py sync" in rendered
+    for report_path in (
+        "kimi-compatibility-report-ubuntu-latest/report.json",
+        "kimi-compatibility-report-macos-latest/report.json",
+        "kimi-compatibility-report-windows-latest/report.json",
+    ):
+        assert report_path in rendered
     assert "submit_prompt" not in rendered
     assert "APP_SECRET" not in rendered
     assert "FEISHU" not in rendered

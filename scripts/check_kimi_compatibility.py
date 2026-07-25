@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check Kimi compatibility or synchronize one generated report."""
+"""Check Kimi compatibility or synchronize the per-platform reports."""
 
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ from kimi_bridge.compatibility_check import (
     GitHubApiAutomation,
     read_report,
     run_cli_check,
-    synchronize_report,
+    summarize_reports,
+    synchronize_reports,
 )
 from kimi_bridge.kimi_server import kimi_semantic_contract
 
@@ -47,9 +48,16 @@ def _parser() -> argparse.ArgumentParser:
     contract.add_argument("--output", type=Path)
 
     sync = subparsers.add_parser(
-        "sync", help="quietly synchronize a report with GitHub"
+        "sync", help="quietly synchronize per-platform reports with GitHub"
     )
-    sync.add_argument("--report", type=Path, required=True)
+    sync.add_argument(
+        "--report",
+        type=Path,
+        action="append",
+        required=True,
+        dest="reports",
+        help="path to one per-platform report; repeat for each platform",
+    )
     sync.add_argument(
         "--repository", default=os.environ.get("GITHUB_REPOSITORY")
     )
@@ -93,17 +101,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     token = os.environ.get("GITHUB_TOKEN")
     if not args.repository or not token:
         raise SystemExit("sync requires GITHUB_REPOSITORY and GITHUB_TOKEN")
-    report = read_report(args.report)
+    reports = [read_report(path) for path in args.reports]
+    summary = summarize_reports(reports)
     with GitHubApiAutomation(
         args.repository,
         token,
         default_branch=args.default_branch,
         run_url=args.run_url,
     ) as automation:
-        actions = synchronize_report(report, automation)
+        actions = synchronize_reports(reports, automation)
+    outcome = "compatible" if summary.compatible else "incompatible"
+    print(
+        f"kimi-code {summary.version} on "
+        f"{', '.join(summary.platforms)}: {outcome}"
+    )
     if actions:
         print("\n".join(actions))
-    return 0 if report.compatible else 1
+    return 0 if summary.compatible else 1
 
 
 if __name__ == "__main__":
