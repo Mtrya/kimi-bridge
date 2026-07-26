@@ -137,11 +137,19 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 msg.actor,
             )
             content = await self._build_prompt_content(binding, msg)
-            result = await self._client.submit_prompt(
-                binding.session_id,
-                content,
-                permission_mode=binding.permission_mode,
-            )
+            try:
+                result = await self._client.submit_prompt(
+                    binding.session_id,
+                    content,
+                    permission_mode=binding.permission_mode,
+                )
+            except KimiServerError as exc:
+                await self._send_chunked(
+                    adapter,
+                    conversation=msg.conversation,
+                    text=f"Prompt failed: {exc}",
+                )
+                return
             if result.get("status") in {"queued", "blocked"}:
                 prompt_id = str(result["prompt_id"])
                 try:

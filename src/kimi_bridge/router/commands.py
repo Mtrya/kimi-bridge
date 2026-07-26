@@ -543,7 +543,7 @@ class _CommandMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                "This platform can't stream edited messages, so thinking "
+                "This platform doesn't offer a separate thinking stream, so thinking "
                 "rendering stays off.",
             )
             return

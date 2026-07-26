@@ -76,13 +76,15 @@ Create a bot through Telegram's [BotFather](https://core.telegram.org/bots/featu
 
 The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
 
-## QQ example (experimental)
+## QQ example
 
 ```toml
 platform = "qq"
 log_level = "INFO"
 default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
 edit_throttle_seconds = 1.5
+max_output_seconds = 300
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
 
@@ -95,9 +97,11 @@ app_secret = "replace-me"
 allowed_users = ["replace-me"]
 ```
 
-Register an app at [q.qq.com](https://q.qq.com/) (individual developers are allowed, up to 5 bots), obtain its `AppID`/`AppSecret`, and whitelist the intended tester's QQ number under the console's sandbox (沙箱) configuration — sandbox allows up to 20 test users and is the practical mode for a personal bridge. The console's developer settings also require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. `allowed_users` holds the sender's `user_openid`, which the adapter logs (with copy-paste guidance) the first time an unrecognized sender messages the bot.
+Register an app at [q.qq.com](https://q.qq.com/) (individual developers are allowed, up to 5 bots), obtain its `AppID`/`AppSecret`, and whitelist the intended tester's QQ number under the console's sandbox (沙箱) configuration — sandbox allows up to 20 test users and is the practical mode for a personal bridge. The console's developer settings also require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance the first time an unrecognized sender messages the bot.
 
-The QQ adapter is C2C (private-chat) only, experimental, and covered by fake transport/gateway tests, not project live validation. It has no interactive approvals or questions: every session runs in `auto` permission mode, `/mode` and `/render-thinking on` are rejected with an explanatory reply, and an unexpected interactive prompt is replaced by a short notice. `/send` only delivers PNG/JPEG images and MP4 video; every other file type is rejected. See the official [QQ bot documentation](https://bot.q.qq.com/wiki/) for full protocol detail.
+The supported QQ adapter is C2C (private-chat) only and is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 media uploads, inbound vision, and clean shutdown. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
+
+QQ has no interactive approvals, questions, or separate thinking stream: every session runs in `auto` permission mode, `/mode` and `/render-thinking on` are rejected with an explanatory reply, and an unexpected interactive prompt is replaced by a short notice. `/send` only delivers PNG/JPEG images and MP4 video; every other file type is rejected. Small inbound images reach Kimi as image prompt parts; an image whose base64-expanded prompt exceeds Kimi Code's request-body limit returns an in-chat `Prompt failed` error without stopping the bridge. Sandbox accepted ordinary external Markdown links without returning `304003`; the adapter still retries once with defanged URLs if another deployment enforces that error. See the official [QQ bot documentation](https://bot.q.qq.com/wiki/) for full protocol detail.
 
 ## Files and state
 

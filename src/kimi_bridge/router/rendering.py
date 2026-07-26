@@ -547,7 +547,7 @@ class _RenderingMixin:
         self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
-            await adapter.send_text(conversation, chunk)
+            await adapter.send_final_text(conversation, chunk)
 
 
 def _optional_int(value: Any) -> int | None:

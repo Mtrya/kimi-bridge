@@ -64,14 +64,16 @@ class _InteractionMixin:
                         ),
                     )
                 finally:
-                    await adapter.send_text(action.conversation, STALE_INTERACTION_TEXT)
+                    await adapter.send_final_text(
+                        action.conversation, STALE_INTERACTION_TEXT
+                    )
                 return
             if (
                 _conversation_key(action) != pending.conversation_key
                 or action.actor.id != pending.actor.id
                 or action.conversation != pending.conversation
             ):
-                await adapter.send_text(
+                await adapter.send_final_text(
                     action.conversation,
                     "This interaction belongs to another conversation.",
                 )
@@ -81,7 +83,9 @@ class _InteractionMixin:
                 action_interaction_id is not None
                 and action_interaction_id != pending.interaction_id
             ):
-                await adapter.send_text(action.conversation, STALE_INTERACTION_TEXT)
+                await adapter.send_final_text(
+                    action.conversation, STALE_INTERACTION_TEXT
+                )
                 return
 
             approval_decision: ApprovalDecision | None = None
@@ -94,7 +98,7 @@ class _InteractionMixin:
                 else:
                     outcome = await self._resolve_question_action(pending, action)
                     if outcome is None:
-                        await adapter.send_text(
+                        await adapter.send_final_text(
                             action.conversation,
                             "Choose an option or enter a free-text answer.",
                         )

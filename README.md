@@ -11,7 +11,7 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 | Feishu direct messages | Supported |
 | WeChat bot | Not currently supported |
 | Telegram private chats | Experimental |
-| QQ C2C (private chats) | Experimental |
+| QQ C2C (private chats) | Supported |
 | Linux, Python ≥3.11 | Supported |
 | macOS and Windows | Experimental |
 | Voice messages | Not currently supported |
@@ -47,7 +47,7 @@ Then run:
 kimi-bridge
 ```
 
-Start with the [installation runbook](INSTALL.md), especially when asking a coding agent to configure the bridge. The [configuration reference](docs/CONFIGURATION.md) contains complete Feishu and Telegram examples.
+Start with the [installation runbook](INSTALL.md), especially when asking a coding agent to configure the bridge. The [configuration reference](docs/CONFIGURATION.md) contains complete Feishu, QQ, and Telegram examples.
 
 ## Commands
 
@@ -63,7 +63,7 @@ Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact 
 ## Architecture and security
 
 ```text
-Feishu or experimental Telegram/QQ
+Feishu, QQ, or experimental Telegram
               │
               ▼
        semantic chat router

@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosed
 from kimi_bridge.platforms.base import ConversationRef, MessageRef
 from kimi_bridge.platforms.qq import (
     GROUP_AND_C2C_EVENT_INTENT,
+    MSG_TYPE_MARKDOWN,
     QQ_API_BASE_URL,
     QQ_PASSIVE_REPLY_LIMIT,
     QQ_TOKEN_URL,
@@ -549,7 +550,7 @@ async def test_gateway_requires_hello_first() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: QQAdapter
+# QQAdapter
 # ---------------------------------------------------------------------------
 
 from datetime import datetime  # noqa: E402
@@ -607,7 +608,11 @@ class FakeQQBotAPI:
         self.uploads: list[dict[str, Any]] = []
         self.upload_file_info = "OPAQUE-FILE-INFO"
         self.fail_url_once = False
+        self.fail_done_once = False
         self._next_id = 1
+        self._stream_contents: dict[str, str] = {}
+        self._stream_indexes: dict[str, int] = {}
+        self._open_streams: dict[str, str] = {}
 
     async def upload_c2c_media(
         self,
@@ -674,6 +679,32 @@ class FakeQQBotAPI:
         if self.fail_url_once:
             self.fail_url_once = False
             raise QQAPIError("stream_messages", 304003, "url \u672a\u62a5\u5907")
+        if self.fail_done_once and input_state == STREAM_INPUT_STATE_DONE:
+            self.fail_done_once = False
+            raise QQAPIError("stream_messages", 40006, "\u9519\u8bef\u7684\u7d22\u5f15")
+        message_id = stream_msg_id
+        if message_id is None:
+            message_id = f"stream-{self._next_id}"
+            self._next_id += 1
+            self._open_streams[msg_id] = message_id
+        else:
+            previous = self._stream_contents[message_id]
+            if self._open_streams.get(msg_id) != message_id:
+                raise QQAPIError("stream_messages", 40006, "\u9519\u8bef\u7684\u7d22\u5f15")
+            if index != self._stream_indexes[message_id] + 1:
+                raise QQAPIError("stream_messages", 40006, "\u9519\u8bef\u7684\u7d22\u5f15")
+            if content_raw == previous:
+                raise QQAPIError("stream_messages", 40006, "\u9519\u8bef\u7684\u7d22\u5f15")
+            if not content_raw.startswith(previous):
+                raise QQAPIError(
+                    "stream_messages",
+                    40007,
+                    "\u5df2\u4e0b\u53d1\u5185\u5bb9\u524d\u7f00\u4e0d\u53ef\u4fee\u6539",
+                )
+        if input_state == STREAM_INPUT_STATE_GENERATING:
+            self._open_streams[msg_id] = message_id
+        else:
+            self._open_streams.pop(msg_id, None)
         self.stream_frames.append(
             {
                 "openid": openid,
@@ -686,10 +717,8 @@ class FakeQQBotAPI:
                 "stream_msg_id": stream_msg_id,
             }
         )
-        message_id = stream_msg_id
-        if message_id is None:
-            message_id = f"stream-{self._next_id}"
-            self._next_id += 1
+        self._stream_contents[message_id] = content_raw
+        self._stream_indexes[message_id] = index
         return {"id": message_id, "timestamp": "t"}
 
     async def send_c2c_typing(
@@ -803,7 +832,7 @@ def test_sanitize_markdown_flattens_table() -> None:
 def test_sanitize_markdown_preserves_heading_and_bold() -> None:
     result = sanitize_markdown("# Title\n**bold** and *italic*")
     assert result.startswith("# Title")
-    assert "**bold**" in result
+    assert "**bold**\u200b " in result
     assert "*italic*" in result
 
 
@@ -1059,6 +1088,28 @@ async def test_send_text_opens_stream_with_seq_one_index_zero() -> None:
     assert ref == MessageRef(conversation, "stream-1")
 
 
+async def test_send_text_finishes_previous_stream_before_opening_next() -> None:
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    first = await adapter.send_text(conversation, "first")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    second = await adapter.send_text(conversation, "second")
+    try:
+        assert [frame["input_state"] for frame in api.stream_frames] == [
+            STREAM_INPUT_STATE_GENERATING,
+            STREAM_INPUT_STATE_DONE,
+            STREAM_INPUT_STATE_GENERATING,
+        ]
+        assert adapter._streams[first].finalized
+        assert not adapter._streams[second].finalized
+    finally:
+        await adapter.stop()
+
+
 async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
@@ -1076,6 +1127,38 @@ async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> No
         frame["stream_msg_id"] in (None, "stream-1") for frame in api.stream_frames
     )
     assert api.stream_frames[-1]["content_raw"] == "hello world!"
+
+
+async def test_final_text_uses_regular_reply_without_closing_model_stream() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    model_message = await adapter.send_text(conversation, "partial")
+    final_message = await adapter.send_final_text(conversation, "Status: ready")
+    await adapter.edit_text(model_message, "partial answer")
+    try:
+        assert [frame["input_state"] for frame in api.stream_frames] == [
+            STREAM_INPUT_STATE_GENERATING,
+            STREAM_INPUT_STATE_GENERATING,
+        ]
+        assert api.active_sends == [
+            {
+                "openid": "OPENID-USER",
+                "msg_type": MSG_TYPE_MARKDOWN,
+                "content": None,
+                "markdown": {"content": "Status: ready"},
+                "media": None,
+                "msg_id": "MSGID-ANCHOR",
+                "event_id": "evt-anchor",
+                "msg_seq": 2,
+            }
+        ]
+        assert not adapter._streams[model_message].finalized
+        assert adapter._streams[final_message].finalized
+    finally:
+        await adapter.stop()
 
 
 async def test_send_text_falls_back_to_active_after_budget_exhausted() -> None:
@@ -1109,20 +1192,50 @@ async def test_send_text_falls_back_when_anchor_window_expired() -> None:
     assert len(api.active_sends) == 1
 
 
-async def test_edit_text_on_active_fallback_ref_is_noop_and_logs(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_edit_text_on_active_fallback_is_coalesced_into_a_fresh_send() -> None:
     api = FakeQQBotAPI()
-    adapter = _make_qq_adapter(api, FakeQQGateway())
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
     adapter._anchors[conversation] = _anchor(used=QQ_PASSIVE_REPLY_LIMIT)
     ref = await adapter.send_text(conversation, "hello")
 
-    caplog.set_level(logging.DEBUG, logger="kimi_bridge.platforms.qq")
     await adapter.edit_text(ref, "hello again")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    await adapter.edit_text(ref, "hello again!")
+    await _wait_for(lambda: len(sleep.calls) == 2)
+    sleep.release(1)
+    await _wait_for(lambda: len(api.active_sends) == 2)
 
     assert not api.stream_frames
-    assert "non-streamable" in caplog.text
+    assert api.active_sends[-1]["markdown"] == {"content": "hello again!"}
+
+
+async def test_non_monotonic_stream_edit_finishes_then_coalesces_fallback() -> None:
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "prefix one")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    await adapter.edit_text(ref, "prefix two")
+    await _wait_for(lambda: len(sleep.calls) == 2)
+    sleep.release(1)
+    await _wait_for(lambda: len(api.active_sends) == 1)
+
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
+    ]
+    assert api.stream_frames[-1]["content_raw"].startswith("prefix one")
+    assert api.stream_frames[-1]["content_raw"] != "prefix one"
+    assert api.active_sends[0]["markdown"] == {"content": "prefix two"}
 
 
 async def test_stream_defang_retry_once_on_304003() -> None:
@@ -1156,6 +1269,33 @@ async def test_idle_timeout_sends_done_frame() -> None:
     assert api.stream_frames[1]["input_state"] == STREAM_INPUT_STATE_DONE
     assert api.stream_frames[1]["index"] == 1
     assert api.stream_frames[1]["stream_msg_id"] == ref.message_id
+    assert api.stream_frames[1]["content_raw"].startswith("hello")
+    assert api.stream_frames[1]["content_raw"] != "hello"
+
+
+async def test_idle_timeout_contains_done_api_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = FakeQQBotAPI()
+    api.fail_done_once = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "hello")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    caplog.set_level(logging.ERROR, logger="kimi_bridge.platforms.qq")
+
+    sleep.release(0)
+    await _wait_for(lambda: adapter._streams[ref].idle_task is None)
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.qq"
+    ]
+    assert [record.args for record in records] == [(40006,)]
 
 
 async def test_typing_indicator_sent_on_inbound_and_keepalive() -> None:
@@ -1202,8 +1342,10 @@ async def test_present_interaction_sends_defensive_notice() -> None:
 
     ref = await adapter.present_interaction(conversation, object())
 
-    assert len(api.stream_frames) == 1
-    assert "not supported on QQ" in api.stream_frames[0]["content_raw"]
+    assert not api.stream_frames
+    assert len(api.active_sends) == 1
+    assert "not supported on QQ" in api.active_sends[0]["markdown"]["content"]
+    assert adapter._streams[ref].finalized
     assert await adapter.finish_interaction(ref, object()) is None
 
 
@@ -1310,7 +1452,15 @@ async def test_end_to_end_gateway_delivers_and_streams_with_budget_fallback() ->
     finally:
         await adapter.stop()
 
-    assert len(api.stream_frames) == 4
-    assert [frame["msg_seq"] for frame in api.stream_frames] == [1, 2, 3, 4]
-    assert [frame["index"] for frame in api.stream_frames] == [0, 0, 0, 0]
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        state
+        for _ in range(4)
+        for state in (STREAM_INPUT_STATE_GENERATING, STREAM_INPUT_STATE_DONE)
+    ]
+    assert [frame["msg_seq"] for frame in api.stream_frames] == [
+        sequence
+        for sequence in range(1, 5)
+        for _ in range(2)
+    ]
+    assert [frame["index"] for frame in api.stream_frames] == [0, 1] * 4
     assert len(api.active_sends) == 1

@@ -105,6 +105,9 @@ class PlatformAdapter(Protocol):
     async def send_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef: ...
+    async def send_final_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef: ...
     async def edit_text(self, message: MessageRef, text: str) -> None: ...
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile

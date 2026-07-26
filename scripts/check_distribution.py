@@ -103,7 +103,7 @@ def _check_metadata(metadata: str) -> None:
     expected = {
         "Name": "kimi-bridge",
         "Version": PROJECT_VERSION,
-        "Summary": "Control a local Kimi Code agent from Feishu or Telegram",
+        "Summary": "Control a local Kimi Code agent from Feishu, QQ, or Telegram",
         "Requires-Python": ">=3.11",
         "License-Expression": "MIT",
         "Description-Content-Type": "text/markdown",

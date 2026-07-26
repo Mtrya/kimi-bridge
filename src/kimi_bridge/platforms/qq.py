@@ -94,24 +94,23 @@ MSG_TYPE_MEDIA = 7
 STREAM_INPUT_STATE_GENERATING = 1
 STREAM_INPUT_STATE_DONE = 10
 
-# `file_type` on `POST /v2/users/{openid}/files` (roadmap/qq-bot-adapter.md §4).
-# Voice (3) and arbitrary files (4, closed in C2C) are out of scope for v1.
+# `file_type` on `POST /v2/users/{openid}/files`.
+# Voice (3) and arbitrary files (4, closed in C2C) are not supported.
 QQ_FILE_TYPE_IMAGE = 1
 QQ_FILE_TYPE_VIDEO = 2
 _QQ_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
 _QQ_VIDEO_MEDIA_TYPE = "video/mp4"
 
-# tune-me: matches @tencent-connect/qqbot-nodejs's hardcoded TEXT_CHUNK_LIMIT,
-# walked back from 20000 after live testing per its changelog.
+# Live validation accepted 5,000 visible characters plus the invisible DONE suffix.
 QQ_TEXT_LIMIT = 5000
 QQ_PASSIVE_REPLY_LIMIT = 4
 QQ_PASSIVE_REPLY_WINDOW_SECONDS = 60 * 60
 QQ_TYPING_KEEPALIVE_SECONDS = 50
 QQ_TYPING_INPUT_SECONDS = 60
-# tune-me: comfortably above the router's ~1.5s edit throttle.
 QQ_STREAM_IDLE_TIMEOUT_SECONDS = 6.0
 QQ_URL_DEFANG_ERROR_CODE = 304003
 _QQ_DEDUPE_MEMORY = 512
+_QQ_STREAM_DONE_SUFFIX = "\u200b"
 
 
 class QQError(RuntimeError):
@@ -769,20 +768,22 @@ _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _URL_RE = re.compile(r"(https?://)(\S+)")
+_EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
 
 
 def sanitize_markdown(text: str) -> str:
     """Rewrite text into QQ's supported markdown subset.
 
-    QQ's native markdown has no fenced/inline code and no tables (see
-    `roadmap/qq-bot-adapter.md` §5); a single newline also collapses into
-    the surrounding paragraph unless forced with a trailing zero-width
-    space. Headings, bold/italic, lists, and quotes pass through unchanged.
+    QQ renders four-space-indented text as a code block but not inline code
+    or tables; a single newline also collapses into the surrounding paragraph
+    unless forced with a trailing zero-width space. Headings, bold/italic,
+    lists, and quotes pass through unchanged.
     """
 
     text = _flatten_fenced_code(text)
     text = _flatten_tables(text)
     text = _strip_inline_code(text)
+    text = _preserve_emphasis_spacing(text)
     text = _force_line_breaks(text)
     return text
 
@@ -803,6 +804,13 @@ def _flatten_fenced_code(text: str) -> str:
 
 def _strip_inline_code(text: str) -> str:
     return _INLINE_CODE_RE.sub(lambda match: match.group(1), text)
+
+
+def _preserve_emphasis_spacing(text: str) -> str:
+    return _EMPHASIS_SPACE_RE.sub(
+        lambda match: match.group(1) + _ZERO_WIDTH_SPACE,
+        text,
+    )
 
 
 def _flatten_tables(text: str) -> str:
@@ -888,6 +896,7 @@ class _StreamState:
     stream_msg_id: str | None = None
     next_index: int = 0
     last_text: str = ""
+    pending_text: str | None = None
     finalized: bool = False
     idle_task: asyncio.Task[None] | None = None
 
@@ -978,6 +987,7 @@ class QQAdapter:
 
     async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
         self._validate_conversation(conversation)
+        await self._flush_conversation_streams(conversation)
         openid = conversation.conversation_id
         sanitized = sanitize_markdown(text)
         anchor = self._anchors.get(conversation)
@@ -1011,7 +1021,7 @@ class QQAdapter:
             self._schedule_idle_finalize(ref)
             return ref
 
-        result, _sent_text = await self._with_defang_retry(
+        result, sent_text = await self._with_defang_retry(
             lambda content: self._api.send_c2c_message(
                 openid, msg_type=MSG_TYPE_MARKDOWN, markdown={"content": content}
             ),
@@ -1025,19 +1035,64 @@ class QQAdapter:
             event_id=anchor.event_id if anchor is not None else None,
             msg_seq=0,
             streamable=False,
+            last_text=sent_text,
+        )
+        return ref
+
+    async def send_final_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        self._validate_conversation(conversation)
+        openid = conversation.conversation_id
+        sanitized = sanitize_markdown(text)
+        anchor = self._anchors.get(conversation)
+        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+        result, sent_text = await self._with_defang_retry(
+            lambda content: self._api.send_c2c_message(
+                openid,
+                msg_type=MSG_TYPE_MARKDOWN,
+                markdown={"content": content},
+                msg_id=anchor.msg_id
+                if anchor is not None and reply_seq is not None
+                else None,
+                event_id=anchor.event_id
+                if anchor is not None and reply_seq is not None
+                else None,
+                msg_seq=reply_seq,
+            ),
+            sanitized,
+        )
+        message_id = _require_response_id(result, "messages")
+        ref = MessageRef(conversation, message_id)
+        self._streams[ref] = _StreamState(
+            openid=openid,
+            anchor_msg_id=anchor.msg_id if anchor is not None else "",
+            event_id=anchor.event_id if anchor is not None else None,
+            msg_seq=reply_seq or 0,
+            streamable=False,
+            last_text=sent_text,
+            finalized=True,
         )
         return ref
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self._validate_conversation(message.conversation)
         state = self._streams.get(message)
-        if state is None or not state.streamable:
-            LOGGER.debug(
-                "QQ edit_text no-op for non-streamable message %s",
-                message.message_id,
-            )
+        if state is None:
+            LOGGER.debug("QQ edit_text ignored for an unknown message")
             return
         sanitized = sanitize_markdown(text)
+        if state.pending_text is None and sanitized == state.last_text:
+            return
+        if (
+            not state.streamable
+            or state.finalized
+            or state.pending_text is not None
+            or not sanitized.startswith(state.last_text)
+        ):
+            state.pending_text = sanitized
+            self._schedule_idle_finalize(message)
+            return
         _result, sent_text = await self._with_defang_retry(
             lambda content: self._api.send_c2c_stream_message(
                 state.openid,
@@ -1100,7 +1155,7 @@ class QQAdapter:
         self, conversation: ConversationRef, prompt: InteractionPrompt
     ) -> MessageRef:
         self._validate_conversation(conversation)
-        return await self.send_text(
+        return await self.send_final_text(
             conversation,
             "Interactive prompt not supported on QQ; it will expire — steer "
             "with a normal message.",
@@ -1145,28 +1200,75 @@ class QQAdapter:
         try:
             await self._sleep(self._idle_timeout)
             state = self._streams.get(message)
-            if state is None or not state.streamable or state.finalized:
+            if state is None:
                 return
-            _result, sent_text = await self._with_defang_retry(
-                lambda content: self._api.send_c2c_stream_message(
-                    state.openid,
-                    input_state=STREAM_INPUT_STATE_DONE,
-                    content_raw=content,
-                    msg_id=state.anchor_msg_id,
-                    msg_seq=state.msg_seq,
-                    index=state.next_index,
-                    event_id=state.event_id,
-                    stream_msg_id=state.stream_msg_id,
-                ),
-                state.last_text,
-            )
-            state.next_index += 1
-            state.last_text = sent_text
-            state.finalized = True
+            await self._flush_stream_state(state)
+        except asyncio.CancelledError:
+            raise
+        except QQAPIError as error:
+            LOGGER.error("QQ stream idle flush failed (code %d)", error.code)
+        except Exception:
+            LOGGER.exception("QQ stream idle flush failed")
         finally:
             state = self._streams.get(message)
             if state is not None and state.idle_task is asyncio.current_task():
                 state.idle_task = None
+
+    async def _flush_conversation_streams(
+        self, conversation: ConversationRef
+    ) -> None:
+        states = [
+            state
+            for message, state in self._streams.items()
+            if message.conversation == conversation
+            and (
+                state.pending_text is not None
+                or (state.streamable and not state.finalized)
+            )
+        ]
+        for state in states:
+            idle_task = state.idle_task
+            if idle_task is not None and not idle_task.done():
+                idle_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await idle_task
+            await self._flush_stream_state(state)
+
+    async def _flush_stream_state(self, state: _StreamState) -> None:
+        if state.pending_text is not None:
+            if state.streamable and not state.finalized:
+                await self._finish_stream(state)
+            _result, sent_text = await self._with_defang_retry(
+                lambda content: self._api.send_c2c_message(
+                    state.openid,
+                    msg_type=MSG_TYPE_MARKDOWN,
+                    markdown={"content": content},
+                ),
+                state.pending_text,
+            )
+            state.streamable = False
+            state.last_text = sent_text
+            state.pending_text = None
+            state.finalized = True
+        elif state.streamable and not state.finalized:
+            await self._finish_stream(state)
+
+    async def _finish_stream(self, state: _StreamState) -> None:
+        await self._with_defang_retry(
+            lambda content: self._api.send_c2c_stream_message(
+                state.openid,
+                input_state=STREAM_INPUT_STATE_DONE,
+                content_raw=content,
+                msg_id=state.anchor_msg_id,
+                msg_seq=state.msg_seq,
+                index=state.next_index,
+                event_id=state.event_id,
+                stream_msg_id=state.stream_msg_id,
+            ),
+            state.last_text + _QQ_STREAM_DONE_SUFFIX,
+        )
+        state.next_index += 1
+        state.finalized = True
 
     async def _handle_gateway_event(self, event: QQGatewayEvent) -> None:
         if event.type != "C2C_MESSAGE_CREATE":

@@ -61,6 +61,7 @@ class FakeKimiClient:
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | list[dict[str, Any]], dict[str, Any]]] = []
         self.prompt_statuses: list[str] = []
+        self.prompt_error: KimiServerAPIError | None = None
         self.steered: list[tuple[str, list[str]]] = []
         self.steer_error: KimiServerAPIError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
@@ -149,6 +150,8 @@ class FakeKimiClient:
     ) -> dict[str, Any]:
         self.call_order.append("submit")
         self.prompts.append((session_id, content, profile))
+        if self.prompt_error is not None:
+            raise self.prompt_error
         status = self.prompt_statuses.pop(0) if self.prompt_statuses else "running"
         return {
             "prompt_id": f"prompt-{len(self.prompts)}",
@@ -446,6 +449,7 @@ class FakeAdapter:
         self.supports_interactions = supports_interactions
         self.message_edit_limit = message_edit_limit
         self.sent: list[tuple[MessageRef, ConversationRef, str]] = []
+        self.final_texts: list[tuple[MessageRef, ConversationRef, str]] = []
         self.edits: list[tuple[MessageRef, str]] = []
         self.interactions: list[
             tuple[MessageRef, ConversationRef, InteractionPrompt]
@@ -476,6 +480,13 @@ class FakeAdapter:
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self.edits.append((message, text))
+
+    async def send_final_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        message = await self.send_text(conversation, text)
+        self.final_texts.append((message, conversation, text))
+        return message
 
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
@@ -2645,6 +2656,36 @@ async def test_images_and_files_map_to_prompt_content_and_workspace_inbox(
             "data": base64.b64encode(b"two").decode("ascii"),
         },
     ]
+
+
+async def test_prompt_api_failure_is_reported_without_escaping(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.prompt_error = KimiServerAPIError(50001, "Request body is too large")
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+
+    try:
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "inspect this",
+                images=(InboundImage(b"large-image", "image/png"),),
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert len(client.prompts) == 1
+    assert len(adapter.sent) == 1
+    assert adapter.final_texts == adapter.sent
+    assert "50001" in adapter.sent[0][2]
 
 
 async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
