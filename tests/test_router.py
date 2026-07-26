@@ -31,6 +31,7 @@ from kimi_bridge.kimi_server import (
     GoalInfo,
     GoalStatus,
     KimiServerAPIError,
+    KimiServerProtocolError,
     ModelInfo,
     SessionProfile,
     SessionStatus,
@@ -94,6 +95,9 @@ class FakeKimiClient:
         self.stopped: list[str] = []
         self.stop_result = True
         self.sessions: list[dict[str, Any]] = []
+        self.create_model_persists = True
+        self.model_updates_persist = True
+        self.status_models: dict[str, str | None] = {}
         self.list_calls: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
         self.stream_actions: list[tuple[str, str]] = []
@@ -133,6 +137,8 @@ class FakeKimiClient:
                 "agent_config": profile,
             },
         )
+        if not self.create_model_persists:
+            self.status_models[session_id] = None
         return session_id
 
     async def submit_prompt(
@@ -187,7 +193,11 @@ class FakeKimiClient:
         context_limit = profile.usage.context_limit or 0
         return SessionStatus(
             busy=profile.busy,
-            model=profile.model,
+            model=(
+                self.status_models[session_id]
+                if session_id in self.status_models
+                else profile.model
+            ),
             thinking_effort=profile.thinking_effort or "off",
             permission_mode=profile.permission_mode or "manual",
             plan_mode=bool(profile.plan_mode),
@@ -250,6 +260,8 @@ class FakeKimiClient:
                 if key != "title"
             }
         )
+        if model is not None and self.model_updates_persist:
+            self.status_models[session_id] = model
         if goal_objective is not None:
             ready = self._ready.get(session_id)
             self.goal_subscription_ready.append(
@@ -662,7 +674,62 @@ async def test_first_message_creates_manual_session_and_persists_binding(
     assert binding.permission_mode == "manual"
 
 
-async def test_persisted_auto_binding_keeps_mode_and_subscribes(
+async def test_first_message_repairs_discarded_create_model_once(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.create_model_persists = False
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("first"))
+        await router.handle_inbound(adapter, _message("second"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        (
+            "session-1",
+            {"model": "kimi-code/k3", "permission_mode": "manual"},
+        )
+    ]
+    assert [profile for _session_id, _content, profile in client.prompts] == [
+        {"permission_mode": "manual"},
+        {"permission_mode": "manual"},
+    ]
+
+
+async def test_new_binding_is_not_persisted_until_model_is_confirmed(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.create_model_persists = False
+    client.model_updates_persist = False
+    store = StateStore(tmp_path / "state.json")
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    adapter = FakeAdapter()
+    try:
+        with pytest.raises(KimiServerProtocolError, match="did not bind model"):
+            await router.handle_inbound(adapter, _message("first"))
+    finally:
+        await router.close()
+
+    assert store.load().bindings == {}
+    assert client.prompts == []
+    assert adapter.sent == []
+
+
+async def test_persisted_unbound_session_repairs_model_once_and_keeps_mode(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -688,6 +755,7 @@ async def test_persisted_auto_binding_keeps_mode_and_subscribes(
             "agent_config": {"permission_mode": "auto"},
         }
     ]
+    client.status_models["session-restored"] = None
     router = ChatRouter(
         client,  # type: ignore[arg-type]
         state_store=store,
@@ -701,6 +769,62 @@ async def test_persisted_auto_binding_keeps_mode_and_subscribes(
 
     assert client.stream_actions == [("subscribe", "session-restored")]
     assert client.prompts[0][2]["permission_mode"] == "auto"
+    assert client.profile_updates == [
+        (
+            "session-restored",
+            {"model": "kimi-code/k3", "permission_mode": "auto"},
+        )
+    ]
+
+
+async def test_persisted_selected_model_is_not_replaced_by_startup_default(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-restored",
+                    workspace=str(tmp_path),
+                    permission_mode="auto",
+                )
+            }
+        )
+    )
+    client.sessions = [
+        {
+            "id": "session-restored",
+            "title": "Restored",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path)},
+            "agent_config": {
+                "model": "kimi-code/selected",
+                "permission_mode": "auto",
+            },
+        }
+    ]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/startup",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("after restart"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == []
+    assert client.prompts == [
+        (
+            "session-restored",
+            [{"type": "text", "text": "after restart"}],
+            {"permission_mode": "auto"},
+        )
+    ]
 
 
 async def test_close_after_runtime_stream_failure_is_clean(tmp_path: Path) -> None:
