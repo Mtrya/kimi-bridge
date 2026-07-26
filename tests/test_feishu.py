@@ -37,6 +37,7 @@ from kimi_bridge.platforms.base import (
     OutboundFile,
 )
 from kimi_bridge.platforms.feishu import (
+    FEISHU_MESSAGE_EDIT_LIMIT,
     FeishuAPIError,
     FeishuAdapter,
     UNSUPPORTED_MESSAGE,
@@ -422,6 +423,7 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
             )
         ]
         text_message = MessageRef(conversation, "message-1")
+        assert adapter.message_edit_limit == FEISHU_MESSAGE_EDIT_LIMIT
         assert await adapter.send_text(conversation, "reply") == text_message
         await adapter.edit_text(text_message, "updated")
         card_message = MessageRef(conversation, "card-1")

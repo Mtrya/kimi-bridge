@@ -11,6 +11,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `default_workspace` | string path | `"~/.kimi-bridge/workspace"` | Non-empty; `~` is expanded and the result is resolved. |
 | `state_path` | string path | `"~/.kimi-bridge/state.json"` | Non-empty; `~` is expanded and the result is resolved. |
 | `edit_throttle_seconds` | number | `1.5` | Must be positive. Controls the minimum cadence of streamed message edits. |
+| `max_output_seconds` | number | `300.0` | Must be positive. Spreads a platform's final limited edits across this streaming duration. |
 | `interaction_timeout_seconds` | number | `600.0` | Must be positive. Applies to each approval or question request. |
 | `inbox_subdir` | relative string path | `".kimi-bridge-inbox"` | Non-empty, not absolute, and may not contain `..`. |
 | `kimi_server.port` | integer or omitted | omitted | When omitted, an available ephemeral port is selected. An explicit port must be 1–65535. |
@@ -30,6 +31,7 @@ log_level = "INFO"
 default_workspace = "~/.kimi-bridge/workspace"
 state_path = "~/.kimi-bridge/state.json"
 edit_throttle_seconds = 1.5
+max_output_seconds = 300
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
 
@@ -55,6 +57,7 @@ log_level = "INFO"
 default_workspace = "~/.kimi-bridge/workspace"
 state_path = "~/.kimi-bridge/state.json"
 edit_throttle_seconds = 1.5
+max_output_seconds = 300
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
 

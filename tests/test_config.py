@@ -40,6 +40,7 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
             [
                 f"default_workspace = '{workspace}'",
                 "edit_throttle_seconds = 2.25",
+                "max_output_seconds = 180",
                 "interaction_timeout_seconds = 42",
                 'inbox_subdir = ".bridge-files"',
                 "",
@@ -56,6 +57,7 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
 
     assert config.default_workspace == workspace
     assert config.edit_throttle_seconds == 2.25
+    assert config.max_output_seconds == 180
     assert config.interaction_timeout_seconds == 42
     assert config.inbox_subdir == ".bridge-files"
     assert config.feishu == FeishuConfig(
@@ -142,6 +144,25 @@ def test_rejects_inbox_path_that_escapes_workspace(tmp_path: Path) -> None:
     path.write_text('inbox_subdir = "../outside"\n', encoding="utf-8")
 
     with pytest.raises(ValueError, match="inside the session workspace"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ("true", TypeError),
+        ('"300"', TypeError),
+        ("0", ValueError),
+        ("-1", ValueError),
+    ],
+)
+def test_rejects_invalid_max_output_seconds(
+    tmp_path: Path, value: str, error: type[Exception]
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"max_output_seconds = {value}\n", encoding="utf-8")
+
+    with pytest.raises(error, match="max_output_seconds"):
         load_config(path)
 
 
