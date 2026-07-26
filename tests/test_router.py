@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 from dataclasses import replace
@@ -52,6 +53,8 @@ from kimi_bridge.platforms.base import (
     OutboundFile,
 )
 from kimi_bridge.router import ChatRouter
+from kimi_bridge.router import commands as router_commands
+from kimi_bridge.router.help import COMMAND_HELP, command_help_details
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
 
@@ -3644,3 +3647,109 @@ async def _wait_for(predicate: Any) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition did not become true")
+
+
+def test_command_help_registry_covers_dispatched_commands() -> None:
+    source = Path(str(router_commands.__file__)).read_text()
+    tree = ast.parse(source)
+    dispatched = {
+        node.comparators[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "command"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.Eq)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and isinstance(node.comparators[0].value, str)
+    }
+    top_level = {key for key in COMMAND_HELP if " " not in key}
+    assert dispatched == top_level
+
+
+def test_command_help_entries_are_complete() -> None:
+    for key, entry in COMMAND_HELP.items():
+        assert entry.details.startswith(f"**{entry.syntax}**")
+        assert "\nExample" in entry.details
+        if " " in key:
+            parent, _, _ = key.partition(" ")
+            assert parent in COMMAND_HELP
+
+
+async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(message_limit=4000)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/help"))
+        await router.handle_inbound(adapter, _message("/goal ?"))
+        await router.handle_inbound(adapter, _message("/goal help"))
+        await router.handle_inbound(adapter, _message("/tasks show ?"))
+        await router.handle_inbound(adapter, _message("/tasks bogus ?"))
+        await router.handle_inbound(adapter, _message("/bogus ?"))
+    finally:
+        await router.close()
+
+    texts = [text for _message, _conversation, text in adapter.sent]
+    index = next(text for text in texts if text.startswith("**Commands**"))
+    assert "(details: `/goal ?`)" in index
+    goal_details = [text for text in texts if text.startswith("**/goal [status")]
+    assert len(goal_details) == 2  # `?` and `help` tokens both resolve
+    assert "/goal -- <objective>" in goal_details[0]
+    assert "\nExample" in goal_details[0]
+    show_details = next(
+        text for text in texts if text.startswith("**/tasks show <id>**")
+    )
+    assert "8 KiB" in show_details
+    task_fallbacks = [text for text in texts if text.startswith("**/tasks [running")]
+    assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
+    assert any(text == "Unknown command: /bogus\nUse /help." for text in texts)
+    assert client.prompts == []
+
+
+def test_help_resolver_preserves_free_form_arguments() -> None:
+    assert command_help_details("/title", "hello help") is None
+    assert command_help_details("/title", "hello ?") is None
+    assert command_help_details("/goal", "-- help") is None
+    assert command_help_details("/goal", "-- ?") is None
+    assert command_help_details("/goal", "-- status ?") is None
+    assert command_help_details("/mode", "yolo ?") is None
+    assert command_help_details("/new", "/tmp/dir ?") is None
+    assert (
+        command_help_details("/goal", "status ?")
+        == COMMAND_HELP["/goal status"].details
+    )
+    assert command_help_details("/tasks", "bogus ?") == COMMAND_HELP["/tasks"].details
+
+
+async def test_help_tokens_do_not_hijack_free_form_arguments(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/title hello help"))
+        await router.handle_inbound(adapter, _message("/goal -- help"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-control", {"title": "hello help"}),
+        ("session-control", {"goal_objective": "help"}),
+    ]
+    assert client.prompts[0][1] == "help"
