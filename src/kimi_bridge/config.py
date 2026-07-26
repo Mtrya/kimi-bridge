@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
+from .edit_budget import minimum_output_seconds
+from .platforms.feishu import FEISHU_MESSAGE_EDIT_LIMIT
 from .state import DEFAULT_STATE_PATH
 
 
@@ -133,15 +136,24 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     if isinstance(throttle, bool) or not isinstance(throttle, (int, float)):
         raise TypeError("edit_throttle_seconds must be a number")
     edit_throttle_seconds = float(throttle)
-    if edit_throttle_seconds <= 0:
-        raise ValueError("edit_throttle_seconds must be positive")
+    if not math.isfinite(edit_throttle_seconds) or edit_throttle_seconds <= 0:
+        raise ValueError("edit_throttle_seconds must be positive and finite")
 
     max_output = raw.get("max_output_seconds", 300.0)
     if isinstance(max_output, bool) or not isinstance(max_output, (int, float)):
         raise TypeError("max_output_seconds must be a number")
     max_output_seconds = float(max_output)
-    if max_output_seconds <= 0:
-        raise ValueError("max_output_seconds must be positive")
+    if not math.isfinite(max_output_seconds) or max_output_seconds <= 0:
+        raise ValueError("max_output_seconds must be positive and finite")
+    minimum_output = minimum_output_seconds(
+        edit_throttle_seconds,
+        FEISHU_MESSAGE_EDIT_LIMIT,
+    )
+    if max_output_seconds < minimum_output:
+        raise ValueError(
+            "max_output_seconds must be at least 46 times "
+            "edit_throttle_seconds for Feishu's 20-edit budget"
+        )
 
     interaction_timeout = raw.get("interaction_timeout_seconds", 600.0)
     if isinstance(interaction_timeout, bool) or not isinstance(

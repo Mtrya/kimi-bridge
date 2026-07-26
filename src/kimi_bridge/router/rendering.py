@@ -7,6 +7,7 @@ import contextlib
 import logging
 from typing import Any, Literal
 
+from ..edit_budget import edit_interval
 from ..platforms.base import ConversationRef, MessageRef, PlatformAdapter
 from .formatting import (
     _chunk_text,
@@ -26,8 +27,6 @@ from .models import (
 
 LOGGER = logging.getLogger(__name__)
 FINAL_SNAPSHOT_RETRY_DELAYS = (0.05, 0.15, 0.5)
-FAST_EDIT_COUNT = 15
-EDIT_INTERVAL_RATIO = 2
 
 
 class _RenderingMixin:
@@ -232,20 +231,11 @@ class _RenderingMixin:
         return max(intervals) if intervals else None
 
     def _edit_interval(self, edit_number: int, edit_limit: int) -> float:
-        if edit_number <= FAST_EDIT_COUNT or edit_limit <= FAST_EDIT_COUNT:
-            return self._edit_throttle_seconds
-        adaptive_edit_count = edit_limit - FAST_EDIT_COUNT
-        remaining_seconds = (
-            self._max_output_seconds
-            - FAST_EDIT_COUNT * self._edit_throttle_seconds
-        )
-        unit = max(
-            self._edit_throttle_seconds,
-            remaining_seconds
-            / (EDIT_INTERVAL_RATIO**adaptive_edit_count - 1),
-        )
-        return unit * EDIT_INTERVAL_RATIO ** (
-            edit_number - FAST_EDIT_COUNT - 1
+        return edit_interval(
+            edit_throttle_seconds=self._edit_throttle_seconds,
+            max_output_seconds=self._max_output_seconds,
+            edit_number=edit_number,
+            edit_limit=edit_limit,
         )
 
     async def _flush_after(

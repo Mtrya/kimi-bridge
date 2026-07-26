@@ -154,6 +154,9 @@ def test_rejects_inbox_path_that_escapes_workspace(tmp_path: Path) -> None:
         ('"300"', TypeError),
         ("0", ValueError),
         ("-1", ValueError),
+        ("nan", ValueError),
+        ("inf", ValueError),
+        ("-inf", ValueError),
     ],
 )
 def test_rejects_invalid_max_output_seconds(
@@ -163,6 +166,28 @@ def test_rejects_invalid_max_output_seconds(
     path.write_text(f"max_output_seconds = {value}\n", encoding="utf-8")
 
     with pytest.raises(error, match="max_output_seconds"):
+        load_config(path)
+
+
+def test_rejects_infeasible_feishu_edit_budget(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "edit_throttle_seconds = 2\nmax_output_seconds = 91.9\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="at least 46 times"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_rejects_non_finite_edit_throttle_seconds(
+    tmp_path: Path, value: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"edit_throttle_seconds = {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="edit_throttle_seconds"):
         load_config(path)
 
 
