@@ -47,6 +47,8 @@ OFFICIAL_KIMI_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
 # under /kimi-code/ on both platforms.
 OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.ps1"
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+PROBE_MODEL_ALIAS = "compatibility/probe"
+PROBE_PROVIDER_ID = "compatibility"
 AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
 DRIFT_MARKER = "<!-- kimi-bridge:upstream-drift -->"
@@ -421,6 +423,7 @@ async def check_live(
                 runner=command_runner,
                 platform_name=platform_name,
             )
+            _write_probe_config(Path(installed.environment["KIMI_CODE_HOME"]))
             supervisor = KimiServerSupervisor(
                 executable=str(installed.executable),
                 process_env=installed.environment,
@@ -1068,6 +1071,25 @@ def _isolated_environment(
     if version is not None:
         environment["KIMI_VERSION"] = version
     return environment
+
+
+def _write_probe_config(kimi_home: Path) -> None:
+    kimi_home.mkdir(parents=True, exist_ok=True)
+    (kimi_home / "config.toml").write_text(
+        f"""default_model = "{PROBE_MODEL_ALIAS}"
+
+[providers.{PROBE_PROVIDER_ID}]
+type = "openai"
+base_url = "http://127.0.0.1:1/v1"
+api_key = "unused"
+
+[models."{PROBE_MODEL_ALIAS}"]
+provider = "{PROBE_PROVIDER_ID}"
+model = "probe"
+max_context_size = 1024
+""",
+        encoding="utf-8",
+    )
 
 
 def _write_probe_artifacts(

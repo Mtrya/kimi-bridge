@@ -36,6 +36,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         default_workspace: str | Path,
         model: str,
         edit_throttle_seconds: float = 1.5,
+        max_output_seconds: float = 300.0,
         interaction_timeout_seconds: float = 600.0,
         inbox_subdir: str = ".kimi-bridge-inbox",
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -47,6 +48,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
             raise ValueError("model must be non-empty")
         if edit_throttle_seconds <= 0:
             raise ValueError("edit_throttle_seconds must be positive")
+        if max_output_seconds <= 0:
+            raise ValueError("max_output_seconds must be positive")
         if interaction_timeout_seconds <= 0:
             raise ValueError("interaction_timeout_seconds must be positive")
         inbox_path = Path(inbox_subdir)
@@ -58,6 +61,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._default_workspace = Path(default_workspace).expanduser().resolve()
         self._model = model
         self._edit_throttle_seconds = edit_throttle_seconds
+        self._max_output_seconds = max_output_seconds
         self._interaction_timeout_seconds = interaction_timeout_seconds
         self._inbox_subdir = inbox_subdir
         self._sleep = sleep
@@ -66,6 +70,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._clock = clock
         self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
+        self._verified_model_sessions: set[str] = set()
         self._active: _ActiveStream | None = None
         self._pending: dict[str, _PendingInteraction] = {}
         self._compaction_waiters: dict[str, _CompactionWaiter] = {}

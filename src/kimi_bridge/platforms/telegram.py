@@ -379,6 +379,7 @@ class TelegramAdapter:
     message_limit = TELEGRAM_TEXT_LIMIT
     supports_edits = True
     supports_interactions = True
+    message_edit_limit = None
 
     def __init__(
         self,

@@ -8,7 +8,9 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -20,7 +22,9 @@ from kimi_bridge.compatibility import (
 )
 from kimi_bridge.kimi_server import KimiContractCheck, KimiServerClient
 from kimi_bridge.kimi_server import contract as kimi_contract
+from kimi_bridge.kimi_server import probe as probe_module
 from kimi_bridge.kimi_server.probe import PROBED_LIFECYCLE_INVARIANTS
+from kimi_bridge.kimi_server.types import SessionStatus
 
 
 def _load_checker() -> Any:
@@ -160,6 +164,89 @@ def test_client_operations_are_sourced_from_the_tracked_contract() -> None:
     assert PROBED_LIFECYCLE_INVARIANTS == {
         identifier for identifier, _source in kimi_contract.KIMI_LIFECYCLE_INVARIANTS
     }
+
+
+@pytest.mark.parametrize(
+    ("persisted_model", "expected_status"),
+    [(None, "pass"), ("kimi-code/k3", "fail")],
+)
+async def test_live_probe_monitors_create_time_model_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    persisted_model: str | None,
+    expected_status: str,
+) -> None:
+    class FakeProbeClient:
+        def __init__(self) -> None:
+            self.created_profiles: list[dict[str, Any]] = []
+            self.subscription_calls = 0
+
+        async def __aenter__(self) -> FakeProbeClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def check_server_version(self) -> str:
+            return "0.29.1"
+
+        async def get_openapi_document(self) -> dict[str, Any]:
+            return {}
+
+        async def get_asyncapi_document(self) -> dict[str, Any]:
+            return {}
+
+        async def get_default_model(self) -> str:
+            return "kimi-code/k3"
+
+        async def create_session(
+            self, _workspace: str, **profile: Any
+        ) -> str:
+            self.created_profiles.append(profile)
+            return "session-1"
+
+        async def get_session_status(self, _session_id: str) -> SessionStatus:
+            return SessionStatus(
+                busy=False,
+                model=persisted_model,
+                thinking_effort="off",
+                permission_mode="manual",
+                plan_mode=False,
+                swarm_mode=False,
+                context_tokens=0,
+                context_limit=262_144,
+                context_usage=0,
+            )
+
+        async def probe_subscription(self, _session_id: str) -> None:
+            self.subscription_calls += 1
+
+    client = FakeProbeClient()
+    supervisor = SimpleNamespace(
+        connection=SimpleNamespace(token="secret"),
+        executable_identity=SimpleNamespace(
+            product=SimpleNamespace(value="kimi-code")
+        ),
+    )
+    monkeypatch.setattr(
+        probe_module, "KimiServerClient", lambda **_kwargs: client
+    )
+    monkeypatch.setattr(
+        probe_module, "evaluate_kimi_semantic_contract", lambda *_args, **_kwargs: ()
+    )
+
+    result = await probe_module.probe_kimi_compatibility(
+        supervisor, tmp_path / "workspace"
+    )
+
+    assert client.created_profiles == [{"model": "kimi-code/k3"}]
+    assert client.subscription_calls == 2
+    model_check = next(
+        item
+        for item in result.checks
+        if item.id == "runtime.behavior.session.create_model_persistence"
+    )
+    assert model_check.status == expected_status
 
 
 def test_semantic_projection_tolerates_additions_and_rejects_required_drift(
@@ -463,6 +550,25 @@ def test_installer_failure_is_redacted(tmp_path: Path) -> None:
         )
     assert "do-not-print" not in str(raised.value)
     assert raised.value.category == "installer-download"
+
+
+def test_probe_config_defines_a_credential_free_default_model(
+    tmp_path: Path,
+) -> None:
+    checker._write_probe_config(tmp_path)
+
+    with (tmp_path / "config.toml").open("rb") as config_file:
+        config = tomllib.load(config_file)
+    alias = config["default_model"]
+    model = config["models"][alias]
+    provider = config["providers"][model["provider"]]
+
+    assert alias == checker.PROBE_MODEL_ALIAS
+    assert model["model"]
+    assert model["max_context_size"] > 0
+    assert provider["type"] == "openai"
+    assert provider["base_url"].startswith("http://127.0.0.1:")
+    assert provider["api_key"] == "unused"
 
 
 def test_installer_timeout_reports_partial_output(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ from ..kimi_server import (
     KimiServerAPIError,
     KimiServerError,
     KimiServerProtocolError,
+    PermissionMode,
     SessionStatus,
 )
 from ..platforms.base import (
@@ -114,6 +115,11 @@ class _SessionMixin:
             model=self._model,
             permission_mode=permission_mode,
         )
+        await self._verify_session_model(
+            session_id,
+            DEFAULT_PERMISSION_MODE,
+            replace_existing=True,
+        )
         current = self._state.bindings.get(conversation_key)
         binding = ConversationBinding(
             session_id=session_id,
@@ -128,6 +134,31 @@ class _SessionMixin:
         self._state.bindings[conversation_key] = binding
         self._state_store.save(self._state)
         return binding
+
+    async def _verify_session_model(
+        self,
+        session_id: str,
+        permission_mode: str,
+        *,
+        replace_existing: bool,
+    ) -> None:
+        if session_id in self._verified_model_sessions:
+            return
+        status = await self._client.get_session_status(session_id)
+        if status.model is None or (
+            replace_existing and status.model != self._model
+        ):
+            await self._client.update_profile(
+                session_id,
+                model=self._model,
+                permission_mode=cast(PermissionMode, permission_mode),
+            )
+            status = await self._client.get_session_status(session_id)
+            if status.model != self._model:
+                raise KimiServerProtocolError(
+                    f"kimi session {session_id} did not bind model {self._model!r}"
+                )
+        self._verified_model_sessions.add(session_id)
 
     def _binding_from_session(
         self,
@@ -179,7 +210,20 @@ class _SessionMixin:
         adapter: PlatformAdapter,
         conversation: ConversationRef,
         actor: ActorRef,
+        permission_mode: str | None = None,
     ) -> None:
+        if permission_mode is None:
+            binding = self._state.bindings.get(conversation_key)
+            permission_mode = (
+                binding.permission_mode
+                if binding is not None and binding.session_id == session_id
+                else DEFAULT_PERMISSION_MODE
+            )
+        await self._verify_session_model(
+            session_id,
+            permission_mode,
+            replace_existing=False,
+        )
         active = self._active
         if (
             active is not None

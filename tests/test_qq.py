@@ -771,6 +771,14 @@ def _make_qq_adapter(
     )
 
 
+def test_qq_adapter_declares_streaming_capabilities() -> None:
+    adapter = _make_qq_adapter(FakeQQBotAPI(), FakeQQGateway())
+
+    assert adapter.supports_edits is True
+    assert adapter.supports_interactions is False
+    assert adapter.message_edit_limit is None
+
+
 # --- sanitizer ---------------------------------------------------------
 
 

@@ -51,6 +51,7 @@ async def run(config_path: str | Path) -> None:
                 default_workspace=config.default_workspace,
                 model=model,
                 edit_throttle_seconds=config.edit_throttle_seconds,
+                max_output_seconds=config.max_output_seconds,
                 interaction_timeout_seconds=(config.interaction_timeout_seconds),
                 inbox_subdir=config.inbox_subdir,
             )

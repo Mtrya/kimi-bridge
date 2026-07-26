@@ -31,6 +31,7 @@ from kimi_bridge.kimi_server import (
     GoalInfo,
     GoalStatus,
     KimiServerAPIError,
+    KimiServerProtocolError,
     ModelInfo,
     SessionProfile,
     SessionStatus,
@@ -94,6 +95,9 @@ class FakeKimiClient:
         self.stopped: list[str] = []
         self.stop_result = True
         self.sessions: list[dict[str, Any]] = []
+        self.create_model_persists = True
+        self.model_updates_persist = True
+        self.status_models: dict[str, str | None] = {}
         self.list_calls: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
         self.stream_actions: list[tuple[str, str]] = []
@@ -133,6 +137,8 @@ class FakeKimiClient:
                 "agent_config": profile,
             },
         )
+        if not self.create_model_persists:
+            self.status_models[session_id] = None
         return session_id
 
     async def submit_prompt(
@@ -187,7 +193,11 @@ class FakeKimiClient:
         context_limit = profile.usage.context_limit or 0
         return SessionStatus(
             busy=profile.busy,
-            model=profile.model,
+            model=(
+                self.status_models[session_id]
+                if session_id in self.status_models
+                else profile.model
+            ),
             thinking_effort=profile.thinking_effort or "off",
             permission_mode=profile.permission_mode or "manual",
             plan_mode=bool(profile.plan_mode),
@@ -250,6 +260,8 @@ class FakeKimiClient:
                 if key != "title"
             }
         )
+        if model is not None and self.model_updates_persist:
+            self.status_models[session_id] = model
         if goal_objective is not None:
             ready = self._ready.get(session_id)
             self.goal_subscription_ready.append(
@@ -427,10 +439,12 @@ class FakeAdapter:
         message_limit: int = 1000,
         supports_edits: bool = True,
         supports_interactions: bool = True,
+        message_edit_limit: int | None = 20,
     ) -> None:
         self.message_limit = message_limit
         self.supports_edits = supports_edits
         self.supports_interactions = supports_interactions
+        self.message_edit_limit = message_edit_limit
         self.sent: list[tuple[MessageRef, ConversationRef, str]] = []
         self.edits: list[tuple[MessageRef, str]] = []
         self.interactions: list[
@@ -664,7 +678,62 @@ async def test_first_message_creates_manual_session_and_persists_binding(
     assert binding.permission_mode == "manual"
 
 
-async def test_persisted_auto_binding_keeps_mode_and_subscribes(
+async def test_first_message_repairs_discarded_create_model_once(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.create_model_persists = False
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("first"))
+        await router.handle_inbound(adapter, _message("second"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        (
+            "session-1",
+            {"model": "kimi-code/k3", "permission_mode": "manual"},
+        )
+    ]
+    assert [profile for _session_id, _content, profile in client.prompts] == [
+        {"permission_mode": "manual"},
+        {"permission_mode": "manual"},
+    ]
+
+
+async def test_new_binding_is_not_persisted_until_model_is_confirmed(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.create_model_persists = False
+    client.model_updates_persist = False
+    store = StateStore(tmp_path / "state.json")
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    adapter = FakeAdapter()
+    try:
+        with pytest.raises(KimiServerProtocolError, match="did not bind model"):
+            await router.handle_inbound(adapter, _message("first"))
+    finally:
+        await router.close()
+
+    assert store.load().bindings == {}
+    assert client.prompts == []
+    assert adapter.sent == []
+
+
+async def test_persisted_unbound_session_repairs_model_once_and_keeps_mode(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -690,6 +759,7 @@ async def test_persisted_auto_binding_keeps_mode_and_subscribes(
             "agent_config": {"permission_mode": "auto"},
         }
     ]
+    client.status_models["session-restored"] = None
     router = ChatRouter(
         client,  # type: ignore[arg-type]
         state_store=store,
@@ -703,6 +773,62 @@ async def test_persisted_auto_binding_keeps_mode_and_subscribes(
 
     assert client.stream_actions == [("subscribe", "session-restored")]
     assert client.prompts[0][2]["permission_mode"] == "auto"
+    assert client.profile_updates == [
+        (
+            "session-restored",
+            {"model": "kimi-code/k3", "permission_mode": "auto"},
+        )
+    ]
+
+
+async def test_persisted_selected_model_is_not_replaced_by_startup_default(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-restored",
+                    workspace=str(tmp_path),
+                    permission_mode="auto",
+                )
+            }
+        )
+    )
+    client.sessions = [
+        {
+            "id": "session-restored",
+            "title": "Restored",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path)},
+            "agent_config": {
+                "model": "kimi-code/selected",
+                "permission_mode": "auto",
+            },
+        }
+    ]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/startup",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("after restart"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == []
+    assert client.prompts == [
+        (
+            "session-restored",
+            [{"type": "text", "text": "after restart"}],
+            {"permission_mode": "auto"},
+        )
+    ]
 
 
 async def test_close_after_runtime_stream_failure_is_clean(tmp_path: Path) -> None:
@@ -2735,6 +2861,121 @@ async def test_delta_throttle_final_edit_and_router_chunking(
     )
 
 
+async def test_feishu_edit_budget_uses_adaptive_intervals_and_stops_at_limit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    delays: list[float] = []
+    now = [100.0]
+
+    async def advancing_sleep(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        edit_throttle_seconds=1.0,
+        max_output_seconds=77.0,
+        sleep=advancing_sleep,
+        clock=lambda: now[0],
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(conversation_key, _event("turn.started"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="0", offset=0),
+        )
+        for edit_number in range(1, 21):
+            await router.dispatch_event(
+                conversation_key,
+                _event(
+                    "assistant.delta",
+                    delta=str(edit_number % 10),
+                    offset=edit_number,
+                ),
+            )
+            await _wait_for(lambda: len(adapter.edits) == edit_number)
+
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="x", offset=21),
+        )
+        await asyncio.sleep(0)
+    finally:
+        await router.close()
+
+    assert delays == [1.0] * 15 + [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert len(adapter.edits) == 20
+    assert (
+        sum(
+            "reached its 20-edit limit" in record.message
+            for record in caplog.records
+        )
+        == 1
+    )
+
+
+async def test_platform_edit_failure_does_not_stop_event_stream(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingOnceAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def edit_text(self, message: MessageRef, text: str) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("edit unavailable")
+            await super().edit_text(message, text)
+
+    client = FakeKimiClient()
+    adapter = FailingOnceAdapter()
+    now = [100.0]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        edit_throttle_seconds=1.0,
+        clock=lambda: now[0],
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        client.emit("session-1", _event("turn.started"))
+        client.emit(
+            "session-1", _event("assistant.delta", delta="a", offset=0)
+        )
+        await _wait_for(lambda: len(adapter.sent) == 1)
+
+        now[0] += 1.0
+        client.emit(
+            "session-1", _event("assistant.delta", delta="b", offset=1)
+        )
+        await _wait_for(lambda: adapter.attempts == 1)
+
+        now[0] += 1.0
+        client.emit(
+            "session-1", _event("assistant.delta", delta="c", offset=2)
+        )
+        await _wait_for(
+            lambda: adapter.edits == [(adapter.sent[0][0], "abc")]
+        )
+    finally:
+        await router.close()
+
+    assert "keeping the Kimi event stream active" in caplog.text
+    assert "kimi event stream stopped unexpectedly" not in caplog.text
+
+
 async def test_turn_end_keeps_longer_stream_until_prompt_completion(
     tmp_path: Path,
 ) -> None:
@@ -3602,6 +3843,18 @@ async def test_existing_binding_is_coerced_to_auto_for_interaction_less_adapter(
     client = FakeKimiClient()
     adapter = FakeAdapter(supports_interactions=False)
     store = StateStore(tmp_path / "state.json")
+    client.sessions = [
+        {
+            "id": "session-existing",
+            "title": "Existing",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path / "workspace")},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "permission_mode": "manual",
+            },
+        }
+    ]
     store.save(
         BridgeState(
             bindings={

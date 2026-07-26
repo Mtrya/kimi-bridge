@@ -114,6 +114,7 @@ class _CommandMixin:
                 adapter,
                 conversation,
                 actor,
+                permission_mode=binding.permission_mode,
             )
             await self._send_chunked(
                 adapter,
@@ -151,6 +152,7 @@ class _CommandMixin:
                     adapter,
                     conversation,
                     actor,
+                    permission_mode=binding.permission_mode,
                 )
             except KimiServerError as exc:
                 await self._send_chunked(

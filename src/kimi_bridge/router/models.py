@@ -32,6 +32,8 @@ class _RenderState:
     turn_active: bool = False
     last_flush: float | None = None
     delayed_flush: asyncio.Task[None] | None = None
+    edit_counts: dict[MessageRef, int] = field(default_factory=dict)
+    exhausted_messages: set[MessageRef] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 

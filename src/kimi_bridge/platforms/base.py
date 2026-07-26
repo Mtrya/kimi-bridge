@@ -93,6 +93,7 @@ class PlatformAdapter(Protocol):
     message_limit: int
     supports_edits: bool
     supports_interactions: bool
+    message_edit_limit: int | None
 
     async def start(
         self,

@@ -899,6 +899,7 @@ class QQAdapter:
     message_limit = QQ_TEXT_LIMIT
     supports_edits = True
     supports_interactions = False
+    message_edit_limit = None
 
     def __init__(
         self,
