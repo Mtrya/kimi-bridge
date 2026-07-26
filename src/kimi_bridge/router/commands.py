@@ -112,24 +112,25 @@ class _CommandMixin:
                 )
                 return
             session = await self._resolve_session(conversation_key, argument)
-            if session is None:
+            if session is None and not argument.isdecimal():
                 matches = await self._match_sessions_by_title(argument)
                 if len(matches) == 1:
                     session = matches[0]
                 elif len(matches) > 1:
-                    self._session_choices[conversation_key] = matches
+                    candidates = matches[: self._session_list_limit]
+                    self._session_choices[conversation_key] = candidates
                     await self._send_chunked(
                         adapter,
                         conversation,
                         "Multiple sessions match; refine with /switch <n>:\n\n"
-                        + _format_sessions(matches),
+                        + _format_sessions(candidates),
                     )
                     return
-                else:
-                    await self._send_chunked(
-                        adapter, conversation, f"Session not found: {argument}"
-                    )
-                    return
+            if session is None:
+                await self._send_chunked(
+                    adapter, conversation, f"Session not found: {argument}"
+                )
+                return
             current = self._state.bindings.get(conversation_key)
             binding = self._binding_from_session(
                 session,

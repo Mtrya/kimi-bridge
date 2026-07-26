@@ -69,16 +69,19 @@ class _SessionMixin:
         return sessions[: self._session_list_limit]
 
     async def _list_all_sessions(self) -> list[dict[str, Any]]:
-        """Full session set across both busy states, for discovery."""
+        """Full session set across both busy states, for discovery.
+
+        Pagination uses the client's internal page size, independent of
+        the display-facing ``session_list_limit``. Results are merged by
+        session ID: a session that flips busy state between the two
+        requests would otherwise appear twice.
+        """
         idle, busy = await asyncio.gather(
-            self._client.list_all_sessions(
-                busy=False, page_size=self._session_list_limit
-            ),
-            self._client.list_all_sessions(
-                busy=True, page_size=self._session_list_limit
-            ),
+            self._client.list_all_sessions(busy=False),
+            self._client.list_all_sessions(busy=True),
         )
-        return [*idle, *busy]
+        by_id = {str(session["id"]): session for session in [*idle, *busy]}
+        return list(by_id.values())
 
     async def _search_sessions(self, keyword: str) -> list[dict[str, Any]]:
         """Case-insensitive substring match on title and workspace path."""
@@ -93,7 +96,11 @@ class _SessionMixin:
         return matches[: self._session_list_limit]
 
     async def _match_sessions_by_title(self, title: str) -> list[dict[str, Any]]:
-        """Exact case-insensitive title matches, most recent first."""
+        """Exact case-insensitive title matches, most recent first.
+
+        Not truncated here: callers must see every match to tell a
+        unique title from an ambiguous one before applying display caps.
+        """
         needle = title.casefold()
         matches = [
             session
@@ -101,7 +108,7 @@ class _SessionMixin:
             if str(session.get("title") or "").casefold() == needle
         ]
         matches.sort(key=_session_recency_key, reverse=True)
-        return matches[: self._session_list_limit]
+        return matches
 
     async def _resolve_new_workspace(self, argument: str) -> Path:
         if not argument:
