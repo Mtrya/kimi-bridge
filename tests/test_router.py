@@ -54,7 +54,7 @@ from kimi_bridge.platforms.base import (
 )
 from kimi_bridge.router import ChatRouter
 from kimi_bridge.router import commands as router_commands
-from kimi_bridge.router.help import COMMAND_HELP
+from kimi_bridge.router.help import COMMAND_HELP, command_help_details
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
 
@@ -3711,3 +3711,45 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
     assert any(text == "Unknown command: /bogus\nUse /help." for text in texts)
     assert client.prompts == []
+
+
+def test_help_resolver_preserves_free_form_arguments() -> None:
+    assert command_help_details("/title", "hello help") is None
+    assert command_help_details("/title", "hello ?") is None
+    assert command_help_details("/goal", "-- help") is None
+    assert command_help_details("/goal", "-- ?") is None
+    assert command_help_details("/goal", "-- status ?") is None
+    assert command_help_details("/mode", "yolo ?") is None
+    assert command_help_details("/new", "/tmp/dir ?") is None
+    assert (
+        command_help_details("/goal", "status ?")
+        == COMMAND_HELP["/goal status"].details
+    )
+    assert command_help_details("/tasks", "bogus ?") == COMMAND_HELP["/tasks"].details
+
+
+async def test_help_tokens_do_not_hijack_free_form_arguments(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/title hello help"))
+        await router.handle_inbound(adapter, _message("/goal -- help"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-control", {"title": "hello help"}),
+        ("session-control", {"goal_objective": "help"}),
+    ]
+    assert client.prompts[0][1] == "help"

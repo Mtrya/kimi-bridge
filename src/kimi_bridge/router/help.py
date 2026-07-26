@@ -444,9 +444,13 @@ Example:
 def command_help_details(command: str, argument: str) -> str | None:
     """Return detailed help when *argument* is a help request, else None.
 
-    A help request is a trailing `?` or `help` token, e.g. `/goal ?` or
-    `/tasks show ?`. Lookup tries the longest registered key first and
-    falls back to the parent command for unregistered sub-forms.
+    A bare `?` or `help` argument (`/goal ?`) always requests help. A
+    trailing `?` or `help` token (`/tasks show ?`) requests sub-form help
+    only for commands with registered sub-forms, so free-form arguments
+    such as `/title hello help` keep their literal meaning; a sub-path
+    starting with `--` is the `/goal` objective escape and is never a
+    help request. Lookup tries the longest registered key first and falls
+    back to the parent command for unregistered sub-forms.
     """
     path: str | None = None
     for token in HELP_TOKENS:
@@ -454,10 +458,10 @@ def command_help_details(command: str, argument: str) -> str | None:
             path = ""
             break
         suffix = f" {token}"
-        if argument.endswith(suffix):
+        if argument.endswith(suffix) and _has_sub_forms(command):
             path = argument[: -len(suffix)]
             break
-    if path is None:
+    if path is None or path.startswith("--"):
         return None
     path = " ".join(path.split())
     key = f"{command} {path}".strip()
@@ -469,6 +473,10 @@ def command_help_details(command: str, argument: str) -> str | None:
         if not separator:
             break
     return None
+
+
+def _has_sub_forms(command: str) -> bool:
+    return any(key.startswith(f"{command} ") for key in COMMAND_HELP)
 
 
 def render_help_index() -> str:
