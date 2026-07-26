@@ -14,6 +14,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `max_output_seconds` | number | `300.0` | Must be finite and at least `46 * edit_throttle_seconds`, the shortest feasible window for Feishu's 20-edit schedule. |
 | `interaction_timeout_seconds` | number | `600.0` | Must be positive. Applies to each approval or question request. |
 | `inbox_subdir` | relative string path | `".kimi-bridge-inbox"` | Non-empty, not absolute, and may not contain `..`. |
+| `session_list_limit` | integer | `10` | Must be positive. Controls the `/sessions` listing size and the page size of `/sessions search` results. |
 | `kimi_server.port` | integer or omitted | omitted | When omitted, an available ephemeral port is selected. An explicit port must be 1–65535. |
 | `feishu.app_id` | string | empty | Required with `app_secret` when Feishu is selected. |
 | `feishu.app_secret` | string | empty | Required with `app_id` when Feishu is selected. |
@@ -34,6 +35,7 @@ edit_throttle_seconds = 1.5
 max_output_seconds = 300
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
+session_list_limit = 10
 
 [kimi_server]
 # Omit port to select an available ephemeral port.
@@ -60,6 +62,7 @@ edit_throttle_seconds = 1.5
 max_output_seconds = 300
 interaction_timeout_seconds = 600
 inbox_subdir = ".kimi-bridge-inbox"
+session_list_limit = 10
 
 [kimi_server]
 # port = 58628

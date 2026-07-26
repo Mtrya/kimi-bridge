@@ -4,14 +4,15 @@ Commands are case-insensitive before the first space; arguments retain their cas
 
 ## Exact command grammar
 
-`/help` shows the compact index below. Every command also answers `/<command> ?` (or `/<command> help`) with detailed usage — syntax, arguments, defaults, side effects, and examples — including sub-forms such as `/tasks show ?`.
+`/help` shows the compact index below. Every command also answers `/<command> ?` with detailed usage — syntax, arguments, defaults, side effects, and examples — including sub-forms such as `/tasks show ?`.
 
 | Command | Behavior |
 | --- | --- |
 | `/help` | Show the in-chat command index. |
 | `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
-| `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
-| `/switch <n\|id>` | Bind a displayed one-based index or an explicit session ID. |
+| `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. The list size is `session_list_limit`. |
+| `/sessions search <keyword>` | Case-insensitive substring search over all active (non-archived) sessions by title and workspace path, ranked by recency and capped at `session_list_limit`. Results are remembered for `/switch <n>`. |
+| `/switch <n\|id\|title>` | Bind a displayed one-based index, an explicit session ID, or an exact case-insensitive title among active (non-archived) sessions. Ambiguous titles produce a numbered candidate list for `/switch <n>`. |
 | `/status` | Show session ID, workspace, busy state, pending interaction, model, effort, plan mode, permission mode, and Kimi Code version. |
 | `/title [text]` | Show the current title or rename the session. |
 | `/usage` | Show live input, output, cache-read, cache-creation, and context-window token values when exposed by Kimi. |

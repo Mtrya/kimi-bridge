@@ -70,6 +70,7 @@ class Config:
     max_output_seconds: float = 300.0
     interaction_timeout_seconds: float = 600.0
     inbox_subdir: str = ".kimi-bridge-inbox"
+    session_list_limit: int = 10
     kimi_server: KimiServerConfig = field(default_factory=KimiServerConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -88,6 +89,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         max_output_seconds = 300
         interaction_timeout_seconds = 600
         inbox_subdir = ".kimi-bridge-inbox"
+        session_list_limit = 10
 
         [kimi_server]
         port = 58628
@@ -171,6 +173,13 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
     if inbox_path.is_absolute() or ".." in inbox_path.parts:
         raise ValueError("inbox_subdir must stay inside the session workspace")
 
+    list_limit = raw.get("session_list_limit", 10)
+    if isinstance(list_limit, bool) or not isinstance(list_limit, int):
+        raise TypeError("session_list_limit must be an integer")
+    if list_limit <= 0:
+        raise ValueError("session_list_limit must be positive")
+    session_list_limit = list_limit
+
     server_raw = raw.get("kimi_server", {})
     if not isinstance(server_raw, dict):
         raise TypeError("kimi_server must be a TOML table")
@@ -225,6 +234,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         max_output_seconds=max_output_seconds,
         interaction_timeout_seconds=interaction_timeout_seconds,
         inbox_subdir=inbox_subdir,
+        session_list_limit=session_list_limit,
         kimi_server=KimiServerConfig(port=port),
         feishu=FeishuConfig(
             app_id=app_id,

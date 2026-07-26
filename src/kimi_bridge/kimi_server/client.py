@@ -319,6 +319,39 @@ class KimiServerClient:
         data = await self._request_operation("list_sessions", params=params)
         return list(data["items"])
 
+    async def list_all_sessions(
+        self,
+        *,
+        busy: bool = False,
+        include_archive: bool = False,
+        exclude_empty: bool = False,
+        page_size: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Page through the full session set, newest first.
+
+        The server returns sessions newest-first and treats ``after_id``
+        as "newer than the cursor", so full pagination must advance with
+        ``before_id`` (older than the cursor).
+        """
+        sessions: list[dict[str, Any]] = []
+        before_id: str | None = None
+        while True:
+            page = await self.list_sessions(
+                busy=busy,
+                include_archive=include_archive,
+                exclude_empty=exclude_empty,
+                page_size=page_size,
+                before_id=before_id,
+            )
+            if not page:
+                break
+            sessions.extend(page)
+            last_id = str(page[-1]["id"])
+            if len(page) < page_size or last_id == before_id:
+                break
+            before_id = last_id
+        return sessions
+
     async def submit_prompt(
         self,
         session_id: str,
