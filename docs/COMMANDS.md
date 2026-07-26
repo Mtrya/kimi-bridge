@@ -4,9 +4,11 @@ Commands are case-insensitive before the first space; arguments retain their cas
 
 ## Exact command grammar
 
+`/help` shows the compact index below. Every command also answers `/<command> ?` (or `/<command> help`) with detailed usage — syntax, arguments, defaults, side effects, and examples — including sub-forms such as `/tasks show ?`.
+
 | Command | Behavior |
 | --- | --- |
-| `/help` | Show in-chat command help. |
+| `/help` | Show the in-chat command index. |
 | `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
 | `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
 | `/switch <n\|id>` | Bind a displayed one-based index or an explicit session ID. |
@@ -43,7 +45,7 @@ Goal replacement and goal queues are not exposed. A blocked goal remains blocked
 
 | While a turn is busy | Commands |
 | --- | --- |
-| Reads remain available | `/help`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
+| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
 | Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop` |
 | Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume` |
 

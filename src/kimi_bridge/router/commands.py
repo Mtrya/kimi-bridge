@@ -16,6 +16,7 @@ from ..kimi_server import (
 from ..platforms.base import ActorRef, ConversationRef, PlatformAdapter
 from ..state import PERMISSION_MODES, ConversationBinding
 from .files import _load_outbound_file
+from .help import command_help_details, render_help_index
 from .formatting import (
     _effective_model,
     _find_model,
@@ -44,42 +45,6 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "yolo": "Regular tools are auto-approved; the agent may still ask questions.",
 }
 
-HELP_TEXT = """**Commands**
-
-**Sessions**
-- **/new [cwd]** — create and bind a session
-- **/sessions** — list recent sessions
-- **/switch <n|id>** — bind a listed or explicit session
-- **/status** — show bound session and runtime state
-- **/title [text]** — show or rename the session
-- **/usage** — show live session token totals and context usage
-- **/compact** — compact session context and report event metrics
-- **/undo [count]** — undo one or more history steps
-
-**Control**
-- **/mode <manual|auto|yolo>** — manual uses chat interactions; auto never asks; yolo may ask questions
-- **/model [alias]** — show or set the exact session model
-- **/effort [effort]** — show or set thinking effort for the current model
-- **/plan [on|off]** — show or explicitly set plan mode
-- **/goal [status|pause|resume|cancel|-- <objective>|<objective>]** — inspect or control a goal
-- **/stop** — stop the active turn and discard queued prompts
-
-**Tasks and tools**
-- **/tasks [running|completed|failed|cancelled]** — list tasks
-- **/tasks show <id>** — inspect a task with an 8 KiB output tail
-- **/tasks cancel <id>** — cancel a task
-- **/skills** — list skills available to the session
-- **/skills run <name> [args]** — activate an exact skill
-- **/mcp** — list session-derived MCP tools
-
-**Output**
-- **/send <path>** — send one file from the bound workspace
-- **/render-thinking [on|off]** — show or set separate thinking output
-
-**General**
-- **/help** — show this help"""
-
-
 class _CommandMixin:
     async def _handle_command(
         self,
@@ -93,8 +58,12 @@ class _CommandMixin:
         command = command.lower()
         argument = argument.strip()
 
+        details = command_help_details(command, argument)
+        if details is not None:
+            await self._send_chunked(adapter, conversation, details)
+            return
         if command == "/help":
-            await self._send_chunked(adapter, conversation, HELP_TEXT)
+            await self._send_chunked(adapter, conversation, render_help_index())
             return
         if command == "/new":
             try:
