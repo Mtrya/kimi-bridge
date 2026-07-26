@@ -3960,8 +3960,49 @@ async def test_existing_binding_is_coerced_to_auto_for_interaction_less_adapter(
     assert binding.permission_mode == "auto"
     assert binding.render_thinking is False
     assert binding.session_id == "session-existing"
+    assert client.profile_updates == [
+        ("session-existing", {"permission_mode": "auto"})
+    ]
     reloaded = StateStore(tmp_path / "state.json").load()
     assert reloaded.bindings["feishu:cli_bot:ou_user"].permission_mode == "auto"
+
+
+async def test_switch_coerces_server_profile_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        {
+            "id": "session-manual",
+            "title": "Manual",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path / "workspace")},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "permission_mode": "manual",
+            },
+        }
+    ]
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message("/switch session-manual")
+        )
+    finally:
+        await router.close()
+
+    binding = router._state.bindings["feishu:cli_bot:ou_user"]
+    assert binding.permission_mode == "auto"
+    assert client.profile_updates == [
+        ("session-manual", {"permission_mode": "auto"})
+    ]
+    assert client.sessions[0]["agent_config"]["permission_mode"] == "auto"
 
 
 def _event(

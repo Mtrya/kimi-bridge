@@ -125,6 +125,9 @@ def test_builds_qq_adapter_with_wired_transport(
     assert calls == [("app-1", frozenset({"O1"}))]
     assert isinstance(adapter.kwargs["api"], main_module.QQBotAPI)
     assert isinstance(adapter.kwargs["gateway"], main_module.QQGatewayClient)
+    assert isinstance(
+        adapter.kwargs["token_manager"], main_module.QQTokenManager
+    )
 
 
 def test_selected_platform_requires_its_own_credentials() -> None:

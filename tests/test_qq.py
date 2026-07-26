@@ -15,6 +15,7 @@ from kimi_bridge.platforms.qq import (
     MSG_TYPE_MARKDOWN,
     QQ_API_BASE_URL,
     QQ_PASSIVE_REPLY_LIMIT,
+    QQ_TEXT_LIMIT,
     QQ_TOKEN_URL,
     STREAM_INPUT_STATE_DONE,
     STREAM_INPUT_STATE_GENERATING,
@@ -26,6 +27,7 @@ from kimi_bridge.platforms.qq import (
     QQGatewayEvent,
     QQProtocolError,
     QQTokenManager,
+    QQTransportError,
     defang_urls,
     sanitize_markdown,
 )
@@ -40,8 +42,14 @@ class FakeClock:
 
 
 class FakeTokenProvider:
+    def __init__(self) -> None:
+        self.closed = False
+
     async def authorization(self) -> str:
         return "QQBot fake-token"
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class FakeGatewaySocket:
@@ -388,6 +396,33 @@ async def test_bot_api_retries_server_errors_but_not_semantic_codes() -> None:
     assert caught.value.code == 304003
 
 
+async def test_bot_api_raises_transport_error_after_server_retries_exhausted() -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(503, content=b"unavailable")
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    api, manager, http = _api_pair(
+        handler,
+        sleep=no_sleep,
+        max_retries=1,
+    )
+    try:
+        with pytest.raises(QQTransportError, match="HTTP 503"):
+            await api.get_gateway_url()
+    finally:
+        await api.close()
+        await manager.close()
+        await http.aclose()
+
+    assert attempts == 2
+
+
 async def test_bot_api_fetches_gateway_url() -> None:
     requests: list[httpx.Request] = []
 
@@ -490,6 +525,29 @@ async def test_gateway_heartbeats_carry_last_seq() -> None:
     heartbeats = [frame for frame in socket.sent if frame["op"] == 1]
     assert all(frame == {"op": 1, "d": 7} for frame in heartbeats)
     assert events == []
+
+
+async def test_gateway_reconnects_when_heartbeat_is_not_acknowledged() -> None:
+    first = FakeGatewaySocket(
+        [
+            _hello(interval_ms=1),
+            _ready(seq=7, session_id="sess-7"),
+        ]
+    )
+    second = FakeGatewaySocket([_hello()])
+    connect = FakeGatewayConnect([first, second])
+    events: list[QQGatewayEvent] = []
+    client = await _start_gateway(connect, events)
+    try:
+        await _wait_for(lambda: len(second.sent) >= 1)
+    finally:
+        await client.stop()
+
+    assert len([frame for frame in first.sent if frame["op"] == 1]) == 1
+    assert second.sent[0] == {
+        "op": 6,
+        "d": {"token": "QQBot fake-token", "session_id": "sess-7", "seq": 7},
+    }
 
 
 async def test_gateway_invalid_session_reidentifies_from_scratch() -> None:
@@ -609,6 +667,10 @@ class FakeQQBotAPI:
         self.upload_file_info = "OPAQUE-FILE-INFO"
         self.fail_url_once = False
         self.fail_done_once = False
+        self.block_done = False
+        self.done_started = asyncio.Event()
+        self.release_done = asyncio.Event()
+        self.closed = False
         self._next_id = 1
         self._stream_contents: dict[str, str] = {}
         self._stream_indexes: dict[str, int] = {}
@@ -676,6 +738,9 @@ class FakeQQBotAPI:
         input_mode: str = "replace",
         content_type: str = "markdown",
     ) -> dict[str, Any]:
+        if self.block_done and input_state == STREAM_INPUT_STATE_DONE:
+            self.done_started.set()
+            await self.release_done.wait()
         if self.fail_url_once:
             self.fail_url_once = False
             raise QQAPIError("stream_messages", 304003, "url \u672a\u62a5\u5907")
@@ -735,7 +800,7 @@ class FakeQQBotAPI:
         return {"id": "typing", "timestamp": "t"}
 
     async def close(self) -> None:
-        pass
+        self.closed = True
 
 
 class FakeQQGateway:
@@ -786,12 +851,14 @@ def _make_qq_adapter(
     idle_timeout: float = 6.0,
     typing_keepalive: float = 50.0,
     http_client: httpx.AsyncClient | None = None,
+    token_manager: Any = None,
 ) -> QQAdapter:
     return QQAdapter(
         "app-1",
         allowed_users,
         api=api,
         gateway=gateway,
+        token_manager=token_manager,
         http_client=http_client,
         clock=clock or (lambda: 1_000.0),
         sleep=sleep or asyncio.sleep,
@@ -839,6 +906,17 @@ def test_sanitize_markdown_preserves_heading_and_bold() -> None:
 def test_sanitize_markdown_forces_single_line_breaks() -> None:
     result = sanitize_markdown("line1\nline2\n\nline3")
     assert result == "line1\u200b\nline2\n\nline3"
+
+
+def test_sanitize_markdown_preserves_content_within_qq_limit() -> None:
+    lines = 1_000
+    source = "```\n" + "\n".join("x" for _ in range(lines)) + "\n```"
+
+    result = sanitize_markdown(source)
+
+    assert len(source) < QQ_TEXT_LIMIT
+    assert len(result) <= QQ_TEXT_LIMIT
+    assert result.count("x") == lines
 
 
 def test_defang_urls_strips_scheme_and_brackets_dots() -> None:
@@ -1104,7 +1182,7 @@ async def test_send_text_finishes_previous_stream_before_opening_next() -> None:
             STREAM_INPUT_STATE_DONE,
             STREAM_INPUT_STATE_GENERATING,
         ]
-        assert adapter._streams[first].finalized
+        assert first not in adapter._streams
         assert not adapter._streams[second].finalized
     finally:
         await adapter.stop()
@@ -1156,7 +1234,8 @@ async def test_final_text_uses_regular_reply_without_closing_model_stream() -> N
             }
         ]
         assert not adapter._streams[model_message].finalized
-        assert adapter._streams[final_message].finalized
+        assert final_message not in adapter._streams
+        assert set(adapter._streams) == {model_message}
     finally:
         await adapter.stop()
 
@@ -1252,6 +1331,83 @@ async def test_stream_defang_retry_once_on_304003() -> None:
     assert "example[.]com" in api.stream_frames[0]["content_raw"]
 
 
+async def test_stream_defang_retry_preserves_the_delivered_prefix() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(
+        conversation, "accepted https://example.com"
+    )
+    delivered_prefix = api.stream_frames[0]["content_raw"]
+    api.fail_url_once = True
+
+    await adapter.edit_text(
+        ref,
+        "accepted https://example.com then https://blocked.example",
+    )
+
+    continuation = api.stream_frames[1]["content_raw"]
+    assert continuation.startswith(delivered_prefix)
+    assert "https://example.com" in continuation
+    assert "blocked[.]example" in continuation
+
+
+async def test_stream_edit_waits_for_in_progress_idle_finalization() -> None:
+    api = FakeQQBotAPI()
+    api.block_done = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "hello")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    sleep.release(0)
+    await asyncio.wait_for(api.done_started.wait(), 1)
+
+    edit = asyncio.create_task(adapter.edit_text(ref, "hello again"))
+    await asyncio.sleep(0)
+    assert not edit.done()
+
+    api.release_done.set()
+    await edit
+    await adapter.stop()
+
+    assert [frame["index"] for frame in api.stream_frames] == [0, 1]
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
+    ]
+    assert api.active_sends[-1]["markdown"] == {"content": "hello again"}
+
+
+async def test_stop_finalizes_an_open_stream_before_closing_transport() -> None:
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    token_manager = FakeTokenProvider()
+    adapter = _make_qq_adapter(
+        api,
+        FakeQQGateway(),
+        sleep=sleep,
+        idle_timeout=5.0,
+        token_manager=token_manager,
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    await adapter.send_text(conversation, "hello")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    await adapter.stop()
+
+    assert api.stream_frames[-1]["input_state"] == STREAM_INPUT_STATE_DONE
+    assert api.closed
+    assert token_manager.closed
+
+
 async def test_idle_timeout_sends_done_frame() -> None:
     api = FakeQQBotAPI()
     sleep = _GatedSleep()
@@ -1331,6 +1487,36 @@ async def test_typing_indicator_sent_on_inbound_and_keepalive() -> None:
         await adapter.stop()
 
 
+async def test_typing_indicator_stops_when_a_reply_starts() -> None:
+    api = FakeQQBotAPI()
+    gateway = FakeQQGateway()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, gateway, sleep=sleep, typing_keepalive=50.0)
+
+    async def on_message(sender: QQAdapter, message: Any) -> None:
+        await _wait_for(lambda: len(api.typing_calls) == 1)
+        await sender.send_final_text(message.conversation, "ready")
+
+    await adapter.start(on_message, _noop_on_interaction)
+    try:
+        await gateway.emit(
+            QQGatewayEvent(
+                type="C2C_MESSAGE_CREATE",
+                data=_c2c_payload("MSGID-1", "hi"),
+                seq=1,
+                event_id="evt-1",
+            )
+        )
+        await asyncio.sleep(0)
+
+        conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+        assert conversation not in adapter._typing_tasks
+        assert len(api.typing_calls) == 1
+        assert api.active_sends[-1]["markdown"] == {"content": "ready"}
+    finally:
+        await adapter.stop()
+
+
 # --- defensive interactions -----------------------------------------------
 
 
@@ -1345,7 +1531,7 @@ async def test_present_interaction_sends_defensive_notice() -> None:
     assert not api.stream_frames
     assert len(api.active_sends) == 1
     assert "not supported on QQ" in api.active_sends[0]["markdown"]["content"]
-    assert adapter._streams[ref].finalized
+    assert ref not in adapter._streams
     assert await adapter.finish_interaction(ref, object()) is None
 
 

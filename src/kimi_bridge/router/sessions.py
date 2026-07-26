@@ -156,9 +156,9 @@ class _SessionMixin:
             model=self._model,
             permission_mode=permission_mode,
         )
-        await self._verify_session_model(
+        await self._verify_session_profile(
             session_id,
-            DEFAULT_PERMISSION_MODE,
+            permission_mode,
             replace_existing=True,
         )
         current = self._state.bindings.get(conversation_key)
@@ -176,30 +176,37 @@ class _SessionMixin:
         self._state_store.save(self._state)
         return binding
 
-    async def _verify_session_model(
+    async def _verify_session_profile(
         self,
         session_id: str,
         permission_mode: str,
         *,
         replace_existing: bool,
     ) -> None:
-        if session_id in self._verified_model_sessions:
+        if session_id in self._verified_session_profiles:
             return
         status = await self._client.get_session_status(session_id)
-        if status.model is None or (
+        update_model = status.model is None or (
             replace_existing and status.model != self._model
-        ):
+        )
+        update_permission = status.permission_mode != permission_mode
+        if update_model or update_permission:
             await self._client.update_profile(
                 session_id,
-                model=self._model,
+                model=self._model if update_model else None,
                 permission_mode=cast(PermissionMode, permission_mode),
             )
             status = await self._client.get_session_status(session_id)
-            if status.model != self._model:
+            if update_model and status.model != self._model:
                 raise KimiServerProtocolError(
                     f"kimi session {session_id} did not bind model {self._model!r}"
                 )
-        self._verified_model_sessions.add(session_id)
+            if status.permission_mode != permission_mode:
+                raise KimiServerProtocolError(
+                    f"kimi session {session_id} did not bind permission mode "
+                    f"{permission_mode!r}"
+                )
+        self._verified_session_profiles.add(session_id)
 
     def _binding_from_session(
         self,
@@ -260,7 +267,7 @@ class _SessionMixin:
                 if binding is not None and binding.session_id == session_id
                 else DEFAULT_PERMISSION_MODE
             )
-        await self._verify_session_model(
+        await self._verify_session_profile(
             session_id,
             permission_mode,
             replace_existing=False,

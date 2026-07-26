@@ -143,6 +143,7 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             config.qq.allowed_users,
             api=api,
             gateway=gateway,
+            token_manager=token_manager,
         )
 
     if not config.telegram.bot_token:

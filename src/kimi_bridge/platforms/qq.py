@@ -47,7 +47,7 @@ import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -171,7 +171,7 @@ async def _send_with_retries(
     initial_backoff: float,
     max_backoff: float,
 ) -> httpx.Response:
-    """Retry transport failures, 429, and 5xx; return the final response."""
+    """Retry transport failures, 429, and 5xx; raise after exhaustion."""
 
     attempt = 0
     while True:
@@ -186,7 +186,11 @@ async def _send_with_retries(
             attempt += 1
             continue
         retryable = response.status_code == 429 or response.status_code >= 500
-        if retryable and attempt < max_retries:
+        if retryable:
+            if attempt >= max_retries:
+                raise QQTransportError(
+                    f"QQ {context} request failed with HTTP {response.status_code}"
+                )
             await sleep(min(initial_backoff * (2**attempt), max_backoff))
             attempt += 1
             continue
@@ -627,20 +631,42 @@ class QQGatewayClient:
             await self._send_resume(ws)
         else:
             await self._send_identify(ws)
+        heartbeat_acknowledged = asyncio.Event()
+        heartbeat_acknowledged.set()
         heartbeat = asyncio.create_task(
-            self._heartbeat_loop(ws, heartbeat_interval),
+            self._heartbeat_loop(
+                ws,
+                heartbeat_interval,
+                heartbeat_acknowledged,
+            ),
             name="qq-gateway-heartbeat",
         )
+        receive: asyncio.Task[str | bytes] | None = None
         try:
             while True:
-                frame = _decode_frame(await ws.recv())
+                receive = asyncio.create_task(
+                    ws.recv(), name="qq-gateway-receive"
+                )
+                done, _pending = await asyncio.wait(
+                    {receive, heartbeat},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if heartbeat in done:
+                    if not receive.done():
+                        receive.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await receive
+                    heartbeat.result()
+                    return
+                frame = _decode_frame(receive.result())
+                receive = None
                 op = frame.get("op")
                 if op == OP_DISPATCH:
                     await self._handle_dispatch(frame)
                 elif op == OP_HEARTBEAT:
                     await self._send_heartbeat(ws)
                 elif op == OP_HEARTBEAT_ACK:
-                    continue
+                    heartbeat_acknowledged.set()
                 elif op == OP_RECONNECT:
                     LOGGER.info("QQ gateway requested a reconnect")
                     return
@@ -654,6 +680,10 @@ class QQGatewayClient:
                 else:
                     LOGGER.warning("QQ gateway sent unknown op code %r", op)
         finally:
+            if receive is not None and not receive.done():
+                receive.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await receive
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
@@ -743,11 +773,19 @@ class QQGatewayClient:
         await ws.send(json.dumps({"op": OP_HEARTBEAT, "d": self._last_seq}))
 
     async def _heartbeat_loop(
-        self, ws: QQGatewaySocket, interval: float
+        self,
+        ws: QQGatewaySocket,
+        interval: float,
+        acknowledged: asyncio.Event,
     ) -> None:
         try:
             while True:
                 await self._sleep(interval)
+                if not acknowledged.is_set():
+                    raise QQTransportError(
+                        "QQ gateway heartbeat acknowledgement timed out"
+                    )
+                acknowledged.clear()
                 await self._send_heartbeat(ws)
         except ConnectionClosed:
             return
@@ -777,15 +815,26 @@ def sanitize_markdown(text: str) -> str:
     QQ renders four-space-indented text as a code block but not inline code
     or tables; a single newline also collapses into the surrounding paragraph
     unless forced with a trailing zero-width space. Headings, bold/italic,
-    lists, and quotes pass through unchanged.
+    lists, and quotes pass through unchanged. If those rendering aids would
+    exceed QQ's message limit, formatting degrades without dropping content.
     """
 
-    text = _flatten_fenced_code(text)
-    text = _flatten_tables(text)
-    text = _strip_inline_code(text)
-    text = _preserve_emphasis_spacing(text)
-    text = _force_line_breaks(text)
-    return text
+    rendered = _flatten_fenced_code(text)
+    rendered = _flatten_tables(rendered)
+    rendered = _strip_inline_code(rendered)
+    rendered = _preserve_emphasis_spacing(rendered)
+    rendered = _force_line_breaks(rendered)
+    if len(rendered) <= QQ_TEXT_LIMIT:
+        return rendered
+
+    compact = _strip_fenced_code(text)
+    compact = _strip_table_separators(compact)
+    compact = _strip_inline_code(compact)
+    if len(compact) <= QQ_TEXT_LIMIT:
+        return compact
+    raise ValueError(
+        f"QQ text exceeds {QQ_TEXT_LIMIT} characters after rendering"
+    )
 
 
 def defang_urls(text: str) -> str:
@@ -800,6 +849,10 @@ def _flatten_fenced_code(text: str) -> str:
         return "\n".join(f"    {line}" for line in body.splitlines())
 
     return _FENCE_RE.sub(_replace, text)
+
+
+def _strip_fenced_code(text: str) -> str:
+    return _FENCE_RE.sub(lambda match: match.group(1).rstrip("\n"), text)
 
 
 def _strip_inline_code(text: str) -> str:
@@ -825,6 +878,14 @@ def _flatten_tables(text: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def _strip_table_separators(text: str) -> str:
+    return "\n".join(
+        line
+        for line in text.split("\n")
+        if not ("|" in line and _TABLE_SEPARATOR_RE.match(line))
+    )
 
 
 def _force_line_breaks(text: str) -> str:
@@ -896,9 +957,11 @@ class _StreamState:
     stream_msg_id: str | None = None
     next_index: int = 0
     last_text: str = ""
+    last_source_text: str = ""
     pending_text: str | None = None
     finalized: bool = False
     idle_task: asyncio.Task[None] | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class QQAdapter:
@@ -917,6 +980,7 @@ class QQAdapter:
         *,
         api: QQBotAPI,
         gateway: QQGatewayClient,
+        token_manager: QQTokenManager | None = None,
         http_client: httpx.AsyncClient | None = None,
         idle_timeout: float = QQ_STREAM_IDLE_TIMEOUT_SECONDS,
         typing_keepalive: float = QQ_TYPING_KEEPALIVE_SECONDS,
@@ -931,6 +995,7 @@ class QQAdapter:
         self._allowed_users = frozenset(allowed_users)
         self._api = api
         self._gateway = gateway
+        self._token_manager = token_manager
         self._http = http_client or httpx.AsyncClient()
         self._owns_http = http_client is None
         self._idle_timeout = idle_timeout
@@ -968,25 +1033,33 @@ class QQAdapter:
         if self._closed:
             return
         self._closed = True
-        await self._gateway.stop()
-        pending = [
-            task for task in self._typing_tasks.values() if not task.done()
-        ]
-        pending += [
-            state.idle_task
-            for state in self._streams.values()
-            if state.idle_task is not None and not state.idle_task.done()
-        ]
-        for task in pending:
-            task.cancel()
-        for task in pending:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        if self._owns_http:
-            await self._http.aclose()
+        try:
+            await self._gateway.stop()
+            for conversation in tuple(self._typing_tasks):
+                await self._stop_typing(conversation)
+            for state in tuple(self._streams.values()):
+                idle_task = state.idle_task
+                if idle_task is not None and not idle_task.done():
+                    idle_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await idle_task
+            for message, state in tuple(self._streams.items()):
+                async with state.lock:
+                    if self._streams.get(message) is not state:
+                        continue
+                    await self._flush_stream_state(state)
+                    self._streams.pop(message, None)
+        finally:
+            closers = [self._api.close()]
+            if self._token_manager is not None:
+                closers.append(self._token_manager.close())
+            if self._owns_http:
+                closers.append(self._http.aclose())
+            await asyncio.gather(*closers)
 
     async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
         self._validate_conversation(conversation)
+        await self._stop_typing(conversation)
         await self._flush_conversation_streams(conversation)
         openid = conversation.conversation_id
         sanitized = sanitize_markdown(text)
@@ -1017,6 +1090,7 @@ class QQAdapter:
                 stream_msg_id=message_id,
                 next_index=1,
                 last_text=sent_text,
+                last_source_text=sanitized,
             )
             self._schedule_idle_finalize(ref)
             return ref
@@ -1036,6 +1110,7 @@ class QQAdapter:
             msg_seq=0,
             streamable=False,
             last_text=sent_text,
+            last_source_text=sanitized,
         )
         return ref
 
@@ -1043,11 +1118,12 @@ class QQAdapter:
         self, conversation: ConversationRef, text: str
     ) -> MessageRef:
         self._validate_conversation(conversation)
+        await self._stop_typing(conversation)
         openid = conversation.conversation_id
         sanitized = sanitize_markdown(text)
         anchor = self._anchors.get(conversation)
         reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
-        result, sent_text = await self._with_defang_retry(
+        result, _sent_text = await self._with_defang_retry(
             lambda content: self._api.send_c2c_message(
                 openid,
                 msg_type=MSG_TYPE_MARKDOWN,
@@ -1063,17 +1139,7 @@ class QQAdapter:
             sanitized,
         )
         message_id = _require_response_id(result, "messages")
-        ref = MessageRef(conversation, message_id)
-        self._streams[ref] = _StreamState(
-            openid=openid,
-            anchor_msg_id=anchor.msg_id if anchor is not None else "",
-            event_id=anchor.event_id if anchor is not None else None,
-            msg_seq=reply_seq or 0,
-            streamable=False,
-            last_text=sent_text,
-            finalized=True,
-        )
-        return ref
+        return MessageRef(conversation, message_id)
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self._validate_conversation(message.conversation)
@@ -1082,39 +1148,58 @@ class QQAdapter:
             LOGGER.debug("QQ edit_text ignored for an unknown message")
             return
         sanitized = sanitize_markdown(text)
-        if state.pending_text is None and sanitized == state.last_text:
-            return
-        if (
-            not state.streamable
-            or state.finalized
-            or state.pending_text is not None
-            or not sanitized.startswith(state.last_text)
-        ):
-            state.pending_text = sanitized
+        async with state.lock:
+            if self._streams.get(message) is not state:
+                LOGGER.debug("QQ edit_text ignored for a completed message")
+                return
+            if (
+                state.pending_text is None
+                and sanitized == state.last_source_text
+            ):
+                return
+            if state.pending_text is not None:
+                state.pending_text = sanitized
+                self._schedule_idle_finalize(message)
+                return
+            continuation = sanitized
+            if sanitized.startswith(state.last_source_text):
+                continuation = (
+                    state.last_text
+                    + sanitized[len(state.last_source_text) :]
+                )
+            if (
+                not state.streamable
+                or state.finalized
+                or not continuation.startswith(state.last_text)
+            ):
+                state.pending_text = sanitized
+                self._schedule_idle_finalize(message)
+                return
+            _result, sent_text = await self._with_defang_retry(
+                lambda content: self._api.send_c2c_stream_message(
+                    state.openid,
+                    input_state=STREAM_INPUT_STATE_GENERATING,
+                    content_raw=content,
+                    msg_id=state.anchor_msg_id,
+                    msg_seq=state.msg_seq,
+                    index=state.next_index,
+                    event_id=state.event_id,
+                    stream_msg_id=state.stream_msg_id,
+                ),
+                continuation,
+                preserved_prefix=state.last_text,
+            )
+            state.next_index += 1
+            state.last_text = sent_text
+            state.last_source_text = sanitized
+            state.finalized = False
             self._schedule_idle_finalize(message)
-            return
-        _result, sent_text = await self._with_defang_retry(
-            lambda content: self._api.send_c2c_stream_message(
-                state.openid,
-                input_state=STREAM_INPUT_STATE_GENERATING,
-                content_raw=content,
-                msg_id=state.anchor_msg_id,
-                msg_seq=state.msg_seq,
-                index=state.next_index,
-                event_id=state.event_id,
-                stream_msg_id=state.stream_msg_id,
-            ),
-            sanitized,
-        )
-        state.next_index += 1
-        state.last_text = sent_text
-        state.finalized = False
-        self._schedule_idle_finalize(message)
 
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
     ) -> MessageRef:
         self._validate_conversation(conversation)
+        await self._stop_typing(conversation)
         if file.media_type in _QQ_IMAGE_MEDIA_TYPES:
             file_type = QQ_FILE_TYPE_IMAGE
         elif file.media_type == _QQ_VIDEO_MEDIA_TYPE:
@@ -1176,14 +1261,20 @@ class QQAdapter:
         self,
         send: Callable[[str], Awaitable[dict[str, Any]]],
         content_raw: str,
+        *,
+        preserved_prefix: str = "",
     ) -> tuple[dict[str, Any], str]:
+        if not content_raw.startswith(preserved_prefix):
+            raise ValueError("QQ retry prefix is not present in rendered text")
         try:
             return await send(content_raw), content_raw
         except QQAPIError as error:
             if error.code != QQ_URL_DEFANG_ERROR_CODE:
                 raise
             LOGGER.warning("QQ rejected an unregistered URL; retrying defanged")
-            defanged = defang_urls(content_raw)
+            defanged = preserved_prefix + defang_urls(
+                content_raw[len(preserved_prefix) :]
+            )
             return await send(defanged), defanged
 
     def _schedule_idle_finalize(self, message: MessageRef) -> None:
@@ -1202,7 +1293,10 @@ class QQAdapter:
             state = self._streams.get(message)
             if state is None:
                 return
-            await self._flush_stream_state(state)
+            async with state.lock:
+                if self._streams.get(message) is not state:
+                    return
+                await self._flush_stream_state(state)
         except asyncio.CancelledError:
             raise
         except QQAPIError as error:
@@ -1218,21 +1312,21 @@ class QQAdapter:
         self, conversation: ConversationRef
     ) -> None:
         states = [
-            state
+            (message, state)
             for message, state in self._streams.items()
             if message.conversation == conversation
-            and (
-                state.pending_text is not None
-                or (state.streamable and not state.finalized)
-            )
         ]
-        for state in states:
+        for message, state in states:
             idle_task = state.idle_task
             if idle_task is not None and not idle_task.done():
                 idle_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await idle_task
-            await self._flush_stream_state(state)
+            async with state.lock:
+                if self._streams.get(message) is not state:
+                    continue
+                await self._flush_stream_state(state)
+                self._streams.pop(message, None)
 
     async def _flush_stream_state(self, state: _StreamState) -> None:
         if state.pending_text is not None:
@@ -1248,6 +1342,7 @@ class QQAdapter:
             )
             state.streamable = False
             state.last_text = sent_text
+            state.last_source_text = state.pending_text
             state.pending_text = None
             state.finalized = True
         elif state.streamable and not state.finalized:
@@ -1266,6 +1361,7 @@ class QQAdapter:
                 stream_msg_id=state.stream_msg_id,
             ),
             state.last_text + _QQ_STREAM_DONE_SUFFIX,
+            preserved_prefix=state.last_text,
         )
         state.next_index += 1
         state.finalized = True
@@ -1313,7 +1409,7 @@ class QQAdapter:
         self._anchors[conversation] = _ReplyAnchor(
             msg_id=msg_id, event_id=event_id, received_at=self._clock()
         )
-        self._start_typing(conversation, msg_id)
+        await self._start_typing(conversation, msg_id)
 
         message = InboundMessage(
             conversation=conversation,
@@ -1368,10 +1464,19 @@ class QQAdapter:
             oldest = self._seen_order.popleft()
             self._seen_ids.discard(oldest)
 
-    def _start_typing(self, conversation: ConversationRef, msg_id: str) -> None:
-        existing = self._typing_tasks.pop(conversation, None)
-        if existing is not None and not existing.done():
-            existing.cancel()
+    async def _stop_typing(self, conversation: ConversationRef) -> None:
+        task = self._typing_tasks.pop(conversation, None)
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _start_typing(
+        self, conversation: ConversationRef, msg_id: str
+    ) -> None:
+        await self._stop_typing(conversation)
         self._typing_tasks[conversation] = asyncio.create_task(
             self._typing_loop(conversation, msg_id), name="qq-typing-indicator"
         )
