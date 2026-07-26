@@ -433,8 +433,14 @@ class FakeKimiClient:
 class FakeAdapter:
     name = "feishu"
 
-    def __init__(self, *, message_limit: int = 1000) -> None:
+    def __init__(
+        self,
+        *,
+        message_limit: int = 1000,
+        message_edit_limit: int | None = 20,
+    ) -> None:
         self.message_limit = message_limit
+        self.message_edit_limit = message_edit_limit
         self.sent: list[tuple[MessageRef, ConversationRef, str]] = []
         self.edits: list[tuple[MessageRef, str]] = []
         self.interactions: list[
@@ -2849,6 +2855,121 @@ async def test_delta_throttle_final_edit_and_router_chunking(
         MessageRef(conversation, "message-2"),
         "efgh",
     )
+
+
+async def test_feishu_edit_budget_uses_adaptive_intervals_and_stops_at_limit(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    delays: list[float] = []
+    now = [100.0]
+
+    async def advancing_sleep(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        edit_throttle_seconds=1.0,
+        max_output_seconds=77.0,
+        sleep=advancing_sleep,
+        clock=lambda: now[0],
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(conversation_key, _event("turn.started"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="0", offset=0),
+        )
+        for edit_number in range(1, 21):
+            await router.dispatch_event(
+                conversation_key,
+                _event(
+                    "assistant.delta",
+                    delta=str(edit_number % 10),
+                    offset=edit_number,
+                ),
+            )
+            await _wait_for(lambda: len(adapter.edits) == edit_number)
+
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="x", offset=21),
+        )
+        await asyncio.sleep(0)
+    finally:
+        await router.close()
+
+    assert delays == [1.0] * 15 + [2.0, 4.0, 8.0, 16.0, 32.0]
+    assert len(adapter.edits) == 20
+    assert (
+        sum(
+            "reached its 20-edit limit" in record.message
+            for record in caplog.records
+        )
+        == 1
+    )
+
+
+async def test_platform_edit_failure_does_not_stop_event_stream(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FailingOnceAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def edit_text(self, message: MessageRef, text: str) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("edit unavailable")
+            await super().edit_text(message, text)
+
+    client = FakeKimiClient()
+    adapter = FailingOnceAdapter()
+    now = [100.0]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        edit_throttle_seconds=1.0,
+        clock=lambda: now[0],
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        client.emit("session-1", _event("turn.started"))
+        client.emit(
+            "session-1", _event("assistant.delta", delta="a", offset=0)
+        )
+        await _wait_for(lambda: len(adapter.sent) == 1)
+
+        now[0] += 1.0
+        client.emit(
+            "session-1", _event("assistant.delta", delta="b", offset=1)
+        )
+        await _wait_for(lambda: adapter.attempts == 1)
+
+        now[0] += 1.0
+        client.emit(
+            "session-1", _event("assistant.delta", delta="c", offset=2)
+        )
+        await _wait_for(
+            lambda: adapter.edits == [(adapter.sent[0][0], "abc")]
+        )
+    finally:
+        await router.close()
+
+    assert "keeping the Kimi event stream active" in caplog.text
+    assert "kimi event stream stopped unexpectedly" not in caplog.text
 
 
 async def test_turn_end_keeps_longer_stream_until_prompt_completion(

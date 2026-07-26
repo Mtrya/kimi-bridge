@@ -619,6 +619,7 @@ async def test_send_and_edit_are_plain_persistent_messages() -> None:
         await adapter.stop()
 
     assert adapter.message_limit == TELEGRAM_TEXT_LIMIT
+    assert adapter.message_edit_limit is None
     assert _requests(api, "sendMessage")[-1] == {
         "chat_id": 111,
         "text": "hello",

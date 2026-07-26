@@ -65,7 +65,7 @@ Each request uses `interaction_timeout_seconds`. An unanswered approval is rejec
 
 ## Streaming and thinking
 
-Answers stream into editable messages at the configured throttle and are split by the router at the selected platform's text limit. Text separated by an interleaved tool-call boundary starts a new visible message instead of overwriting earlier answer text.
+Answers stream into editable messages at the configured throttle and are split by the router at the selected platform's text limit. For Feishu, the first 15 scheduled edits use the base throttle and the final five use progressively longer intervals targeting `max_output_seconds`; platform or event-loop latency can delay delivery, while final reconciliation can use the remaining edit budget sooner. The router stops editing a message after Feishu's 20-edit limit without stopping the Kimi event stream. Text separated by an interleaved tool-call boundary starts a new visible message instead of overwriting earlier answer text.
 
 `/render-thinking on` creates a separately labelled thinking stream with independent buffering, edits, chunking, resynchronization, and finalization. Enabling it during a live turn backfills the current thinking snapshot. Disabling it freezes the visible thinking while the answer continues. The preference persists per conversation. Tool-call and transcript rendering are intentionally absent.
 
