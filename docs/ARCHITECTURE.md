@@ -33,7 +33,7 @@ The supervisor fingerprints official Kimi Code before startup, launches `kimi we
 
 `src/kimi_bridge/router/` exposes one `ChatRouter` facade and splits command orchestration, session/stream lifecycle, interaction lifecycle, answer/thinking rendering, outbound-file authorization, formatting, and private runtime state into focused modules. It maps an IM conversation to one Kimi session, persists the bridge-owned fields, and translates typed events into semantic platform operations.
 
-The router never constructs Feishu cards, Telegram dictionaries, multipart bodies, or native media choices. Answer and thinking streams have independent buffers and edit lifecycles. Router-side chunking keeps platform limits out of the Kimi client. Outbound files are resolved and authorized against the bound workspace before an adapter chooses how to upload them.
+The router never constructs Feishu cards, Telegram dictionaries, multipart bodies, or native media choices. Answer and thinking streams have independent buffers and edit lifecycles. Adapters expose their text and per-message edit limits so router-side chunking and edit budgeting keep platform limits out of the Kimi client. Outbound files are resolved and authorized against the bound workspace before an adapter chooses how to upload them.
 
 ## Platform boundary
 

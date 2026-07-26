@@ -7,7 +7,8 @@ import contextlib
 import logging
 from typing import Any, Literal
 
-from ..platforms.base import ConversationRef, PlatformAdapter
+from ..edit_budget import edit_interval
+from ..platforms.base import ConversationRef, MessageRef, PlatformAdapter
 from .formatting import (
     _chunk_text,
     _in_flight_assistant_text,
@@ -180,8 +181,11 @@ class _RenderingMixin:
         if not render.messages or render.last_flush is None:
             await self._flush(active, render)
             return
+        interval = self._next_flush_interval(active, render)
+        if interval is None:
+            return
         elapsed = now - render.last_flush
-        if elapsed >= self._edit_throttle_seconds:
+        if elapsed >= interval:
             await self._flush(active, render)
             return
         if render.delayed_flush is None or render.delayed_flush.done():
@@ -189,7 +193,7 @@ class _RenderingMixin:
                 self._flush_after(
                     active,
                     render,
-                    self._edit_throttle_seconds - elapsed,
+                    interval - elapsed,
                 ),
                 name=(
                     "throttled-thinking-edit"
@@ -197,6 +201,42 @@ class _RenderingMixin:
                     else "throttled-message-edit"
                 ),
             )
+
+    def _next_flush_interval(
+        self, active: _ActiveStream, render: _RenderState
+    ) -> float | None:
+        chunks = _chunk_text(
+            f"{render.prefix}{render.text}", active.adapter.message_limit
+        )
+        intervals = (
+            [self._edit_throttle_seconds]
+            if len(chunks) > len(render.messages)
+            else []
+        )
+        edit_limit = active.adapter.message_edit_limit
+        for index, chunk in enumerate(chunks[: len(render.messages)]):
+            if (
+                index < len(render.rendered_chunks)
+                and render.rendered_chunks[index] == chunk
+            ):
+                continue
+            if edit_limit is None:
+                intervals.append(self._edit_throttle_seconds)
+                continue
+            edit_count = render.edit_counts.get(render.messages[index], 0)
+            if edit_count < edit_limit:
+                intervals.append(
+                    self._edit_interval(edit_count + 1, edit_limit)
+                )
+        return max(intervals) if intervals else None
+
+    def _edit_interval(self, edit_number: int, edit_limit: int) -> float:
+        return edit_interval(
+            edit_throttle_seconds=self._edit_throttle_seconds,
+            max_output_seconds=self._max_output_seconds,
+            edit_number=edit_number,
+            edit_limit=edit_limit,
+        )
 
     async def _flush_after(
         self, active: _ActiveStream, render: _RenderState, delay: float
@@ -218,17 +258,74 @@ class _RenderingMixin:
             chunks = _chunk_text(
                 f"{render.prefix}{render.text}", active.adapter.message_limit
             )
+            attempted = False
             for index, chunk in enumerate(chunks):
                 if index >= len(render.messages):
-                    message = await active.adapter.send_text(active.conversation, chunk)
+                    attempted = True
+                    try:
+                        message = await active.adapter.send_text(
+                            active.conversation, chunk
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "%s message send failed; keeping the Kimi event stream active",
+                            active.adapter.name,
+                        )
+                        break
                     render.messages.append(message)
+                    render.rendered_chunks.append(chunk)
                 elif (
                     index >= len(render.rendered_chunks)
                     or render.rendered_chunks[index] != chunk
                 ):
-                    await active.adapter.edit_text(render.messages[index], chunk)
-            render.rendered_chunks = chunks
-            render.last_flush = self._clock()
+                    message = render.messages[index]
+                    edit_limit = active.adapter.message_edit_limit
+                    edit_count = render.edit_counts.get(message, 0)
+                    if edit_limit is not None and edit_count >= edit_limit:
+                        self._log_exhausted_message(
+                            active, render, message, edit_limit
+                        )
+                        continue
+                    attempted = True
+                    try:
+                        await active.adapter.edit_text(message, chunk)
+                    except Exception:
+                        LOGGER.exception(
+                            "%s message edit failed for %s; keeping the Kimi event stream active",
+                            active.adapter.name,
+                            message.message_id,
+                        )
+                        continue
+                    if index >= len(render.rendered_chunks):
+                        render.rendered_chunks.append(chunk)
+                    else:
+                        render.rendered_chunks[index] = chunk
+                    if edit_limit is not None:
+                        edit_count += 1
+                        render.edit_counts[message] = edit_count
+                        if edit_count >= edit_limit:
+                            self._log_exhausted_message(
+                                active, render, message, edit_limit
+                            )
+            if attempted:
+                render.last_flush = self._clock()
+
+    def _log_exhausted_message(
+        self,
+        active: _ActiveStream,
+        render: _RenderState,
+        message: MessageRef,
+        edit_limit: int,
+    ) -> None:
+        if message in render.exhausted_messages:
+            return
+        render.exhausted_messages.add(message)
+        LOGGER.warning(
+            "%s message %s reached its %d-edit limit; further updates to that message will be skipped",
+            active.adapter.name,
+            message.message_id,
+            edit_limit,
+        )
 
     async def _snapshot_stream_text(
         self,

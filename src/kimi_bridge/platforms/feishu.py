@@ -39,6 +39,7 @@ from .feishu_cards import (
 LOGGER = logging.getLogger(__name__)
 UNSUPPORTED_MESSAGE = "Unsupported message type; send text, an image, or a file."
 FEISHU_TEXT_LIMIT = 7000
+FEISHU_MESSAGE_EDIT_LIMIT = 20
 FEISHU_IMAGE_MEDIA_TYPES = frozenset(
     {
         "image/bmp",
@@ -450,6 +451,7 @@ class FeishuAdapter:
     """Receive allowlisted direct messages and send editable text replies."""
 
     name = "feishu"
+    message_edit_limit = FEISHU_MESSAGE_EDIT_LIMIT
 
     def __init__(
         self,
