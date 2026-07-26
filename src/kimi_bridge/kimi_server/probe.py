@@ -80,7 +80,10 @@ async def probe_kimi_compatibility(
         )
 
         workspace.mkdir(parents=True, exist_ok=True)
-        session_id = await client.create_session(str(workspace))
+        default_model = await client.get_default_model()
+        session_id = await client.create_session(
+            str(workspace), model=default_model
+        )
         runtime_checks.append(
             _pass(
                 "runtime.lifecycle.session.create",
@@ -89,13 +92,29 @@ async def probe_kimi_compatibility(
                 "KimiServerClient.create_session",
             )
         )
-        await client.get_session_status(session_id)
+        status = await client.get_session_status(session_id)
         runtime_checks.append(
             _pass(
                 "runtime.lifecycle.session.materialize_before_subscribe",
                 "runtime",
                 "the empty session can be materialized through public v1",
                 "KimiServerClient.get_session_status",
+            )
+        )
+        model_persisted = status.model == default_model
+        runtime_checks.append(
+            KimiContractCheck(
+                "runtime.behavior.session.create_model_persistence",
+                "runtime",
+                "fail" if model_persisted else "pass",
+                (
+                    "create-time model now persists through session status; "
+                    "review the bridge fallback"
+                    if model_persisted
+                    else "create-time model is absent from session status; "
+                    "the bridge fallback remains required"
+                ),
+                "KimiServerClient.create_session/get_session_status",
             )
         )
         await client.probe_subscription(session_id)
