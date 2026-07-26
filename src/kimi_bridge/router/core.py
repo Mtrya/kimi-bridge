@@ -39,6 +39,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         max_output_seconds: float = 300.0,
         interaction_timeout_seconds: float = 600.0,
         inbox_subdir: str = ".kimi-bridge-inbox",
+        session_list_limit: int = 10,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         interaction_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         poll_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -55,6 +56,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         inbox_path = Path(inbox_subdir)
         if not inbox_subdir or inbox_path.is_absolute() or ".." in inbox_path.parts:
             raise ValueError("inbox_subdir must stay inside the session workspace")
+        if session_list_limit <= 0:
+            raise ValueError("session_list_limit must be positive")
         self._client = client
         self._state_store = state_store
         self._state: BridgeState = state_store.load()
@@ -64,6 +67,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._max_output_seconds = max_output_seconds
         self._interaction_timeout_seconds = interaction_timeout_seconds
         self._inbox_subdir = inbox_subdir
+        self._session_list_limit = session_list_limit
         self._sleep = sleep
         self._interaction_sleep = interaction_sleep
         self._poll_sleep = poll_sleep

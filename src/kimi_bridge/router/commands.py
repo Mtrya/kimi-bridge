@@ -16,6 +16,7 @@ from ..kimi_server import (
 from ..platforms.base import ActorRef, ConversationRef, PlatformAdapter
 from ..state import PERMISSION_MODES, ConversationBinding
 from .files import _load_outbound_file
+from .help import command_help_details, render_help_index
 from .formatting import (
     _effective_model,
     _find_model,
@@ -44,42 +45,6 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "yolo": "Regular tools are auto-approved; the agent may still ask questions.",
 }
 
-HELP_TEXT = """**Commands**
-
-**Sessions**
-- **/new [cwd]** — create and bind a session
-- **/sessions** — list recent sessions
-- **/switch <n|id>** — bind a listed or explicit session
-- **/status** — show bound session and runtime state
-- **/title [text]** — show or rename the session
-- **/usage** — show live session token totals and context usage
-- **/compact** — compact session context and report event metrics
-- **/undo [count]** — undo one or more history steps
-
-**Control**
-- **/mode <manual|auto|yolo>** — manual uses chat interactions; auto never asks; yolo may ask questions
-- **/model [alias]** — show or set the exact session model
-- **/effort [effort]** — show or set thinking effort for the current model
-- **/plan [on|off]** — show or explicitly set plan mode
-- **/goal [status|pause|resume|cancel|-- <objective>|<objective>]** — inspect or control a goal
-- **/stop** — stop the active turn and discard queued prompts
-
-**Tasks and tools**
-- **/tasks [running|completed|failed|cancelled]** — list tasks
-- **/tasks show <id>** — inspect a task with an 8 KiB output tail
-- **/tasks cancel <id>** — cancel a task
-- **/skills** — list skills available to the session
-- **/skills run <name> [args]** — activate an exact skill
-- **/mcp** — list session-derived MCP tools
-
-**Output**
-- **/send <path>** — send one file from the bound workspace
-- **/render-thinking [on|off]** — show or set separate thinking output
-
-**General**
-- **/help** — show this help"""
-
-
 class _CommandMixin:
     async def _handle_command(
         self,
@@ -93,8 +58,12 @@ class _CommandMixin:
         command = command.lower()
         argument = argument.strip()
 
+        details = command_help_details(command, argument)
+        if details is not None:
+            await self._send_chunked(adapter, conversation, details)
+            return
         if command == "/help":
-            await self._send_chunked(adapter, conversation, HELP_TEXT)
+            await self._send_chunked(adapter, conversation, render_help_index())
             return
         if command == "/new":
             try:
@@ -123,15 +92,41 @@ class _CommandMixin:
             )
             return
         if command == "/sessions":
-            sessions = await self._list_recent_sessions()
+            verb, _, keyword = argument.partition(" ")
+            if verb == "search":
+                keyword = keyword.strip()
+                if not keyword:
+                    await self._send_chunked(
+                        adapter, conversation, "Usage: /sessions search <keyword>"
+                    )
+                    return
+                sessions = await self._search_sessions(keyword)
+            else:
+                sessions = await self._list_recent_sessions()
             self._session_choices[conversation_key] = sessions
             await self._send_chunked(adapter, conversation, _format_sessions(sessions))
             return
         if command == "/switch":
             if not argument:
-                await self._send_chunked(adapter, conversation, "Usage: /switch <n|id>")
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /switch <n|id|title>"
+                )
                 return
             session = await self._resolve_session(conversation_key, argument)
+            if session is None and not argument.isdecimal():
+                matches = await self._match_sessions_by_title(argument)
+                if len(matches) == 1:
+                    session = matches[0]
+                elif len(matches) > 1:
+                    candidates = matches[: self._session_list_limit]
+                    self._session_choices[conversation_key] = candidates
+                    await self._send_chunked(
+                        adapter,
+                        conversation,
+                        "Multiple sessions match; refine with /switch <n>:\n\n"
+                        + _format_sessions(candidates),
+                    )
+                    return
             if session is None:
                 await self._send_chunked(
                     adapter, conversation, f"Session not found: {argument}"

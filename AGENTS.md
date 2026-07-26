@@ -20,7 +20,8 @@ Guidance for AI agents (and humans) working in this repo.
 
 ## kimi server API
 
-- Tested runtime versions are the immutable `src/kimi_bridge/supported-kimi-code-versions.json` manifest loaded by `compatibility.py`. Unknown official Kimi Code versions warn and attempt the live contract; executable/server version mismatches and legacy Python `kimi-cli` fail. Start the server with `kimi web --no-open --host 127.0.0.1 --port <p>`; it stays in the foreground and prints the bearer token at startup.
+- The managed server is **Kimi Code** — the native `kimi` binary (0.x), started with `kimi web --no-open --host 127.0.0.1 --port <p>`; it stays in the foreground and prints the bearer token at startup. It is NOT the legacy Python `kimi-cli` package: the two share a name and a `kimi` entry point but have different APIs and session stores, and agents repeatedly confuse them. When inspecting the server implementation or its specs, always use the installed Kimi Code binary, never `kimi-cli` sources.
+- Tested runtime versions are the immutable `src/kimi_bridge/supported-kimi-code-versions.json` manifest loaded by `compatibility.py`. Unknown official Kimi Code versions warn and attempt the live contract; executable/server version mismatches and legacy Python `kimi-cli` fail.
 - Specs are served at runtime: `GET /openapi.json` (REST) and `GET /asyncapi.json` (WebSocket). Consult them instead of guessing field names; note the API is 0.x and may shift between kimi-code releases — check `server_version` in `/api/v1/meta`.
 - Stored sessions must be materialized through `GET /api/v1/sessions/{session_id}/status` before each initial or reconnected WebSocket subscription. This lifecycle detail belongs only in the `kimi_server` package.
 - Auth: `Authorization: Bearer <token>` header on REST and WS.

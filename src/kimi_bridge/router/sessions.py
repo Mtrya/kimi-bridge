@@ -27,7 +27,6 @@ from .models import _ActiveStream, _CompactionOutcome
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_PERMISSION_MODE = "manual"
-SESSION_LIST_LIMIT = 10
 
 
 class _SessionMixin:
@@ -84,13 +83,55 @@ class _SessionMixin:
 
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
         idle, busy = await asyncio.gather(
-            self._client.list_sessions(busy=False, page_size=SESSION_LIST_LIMIT),
-            self._client.list_sessions(busy=True, page_size=SESSION_LIST_LIMIT),
+            self._client.list_sessions(busy=False, page_size=self._session_list_limit),
+            self._client.list_sessions(busy=True, page_size=self._session_list_limit),
         )
         by_id = {str(session["id"]): session for session in [*idle, *busy]}
         sessions = list(by_id.values())
         sessions.sort(key=_session_recency_key, reverse=True)
-        return sessions[:SESSION_LIST_LIMIT]
+        return sessions[: self._session_list_limit]
+
+    async def _list_all_sessions(self) -> list[dict[str, Any]]:
+        """Full session set across both busy states, for discovery.
+
+        Pagination uses the client's internal page size, independent of
+        the display-facing ``session_list_limit``. Results are merged by
+        session ID: a session that flips busy state between the two
+        requests would otherwise appear twice.
+        """
+        idle, busy = await asyncio.gather(
+            self._client.list_all_sessions(busy=False),
+            self._client.list_all_sessions(busy=True),
+        )
+        by_id = {str(session["id"]): session for session in [*idle, *busy]}
+        return list(by_id.values())
+
+    async def _search_sessions(self, keyword: str) -> list[dict[str, Any]]:
+        """Case-insensitive substring match on title and workspace path."""
+        needle = keyword.casefold()
+        matches = [
+            session
+            for session in await self._list_all_sessions()
+            if needle in str(session.get("title") or "").casefold()
+            or needle in str(session.get("metadata", {}).get("cwd", "")).casefold()
+        ]
+        matches.sort(key=_session_recency_key, reverse=True)
+        return matches[: self._session_list_limit]
+
+    async def _match_sessions_by_title(self, title: str) -> list[dict[str, Any]]:
+        """Exact case-insensitive title matches, most recent first.
+
+        Not truncated here: callers must see every match to tell a
+        unique title from an ambiguous one before applying display caps.
+        """
+        needle = title.casefold()
+        matches = [
+            session
+            for session in await self._list_all_sessions()
+            if str(session.get("title") or "").casefold() == needle
+        ]
+        matches.sort(key=_session_recency_key, reverse=True)
+        return matches
 
     async def _resolve_new_workspace(self, argument: str) -> Path:
         if not argument:
