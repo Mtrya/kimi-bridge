@@ -346,15 +346,25 @@ class _RenderingMixin:
         """Send the unsent tail of the buffer; never edit prior messages."""
 
         async with render.lock:
-            if len(render.text) <= render.emitted_length:
+            output = f"{render.prefix}{render.text}"
+            if not output.startswith(render.emitted_text):
+                render.emitted_text = ""
+            pending = output[len(render.emitted_text) :]
+            if not pending:
                 return
-            pending = render.text[render.emitted_length :]
-            if render.emitted_length == 0:
-                pending = f"{render.prefix}{pending}"
             for chunk in _chunk_text(pending, active.adapter.message_limit):
-                message = await active.adapter.send_text(active.conversation, chunk)
+                try:
+                    message = await active.adapter.send_text(
+                        active.conversation, chunk
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "%s deferred message send failed; keeping the Kimi event stream active",
+                        active.adapter.name,
+                    )
+                    break
                 render.messages.append(message)
-            render.emitted_length = len(render.text)
+                render.emitted_text += chunk
             render.last_flush = self._clock()
 
     async def _snapshot_stream_text(

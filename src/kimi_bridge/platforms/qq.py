@@ -50,6 +50,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 import websockets
@@ -109,6 +110,7 @@ QQ_TYPING_KEEPALIVE_SECONDS = 50
 QQ_TYPING_INPUT_SECONDS = 60
 QQ_STREAM_IDLE_TIMEOUT_SECONDS = 6.0
 QQ_URL_DEFANG_ERROR_CODE = 304003
+QQ_ATTACHMENT_LIMIT_BYTES = 20 * 1024 * 1024
 _QQ_DEDUPE_MEMORY = 512
 _QQ_STREAM_DONE_SUFFIX = "\u200b"
 
@@ -123,6 +125,10 @@ class QQProtocolError(QQError):
 
 class QQTransportError(QQError):
     """A QQ HTTP request failed after transient retries."""
+
+
+class QQAttachmentTooLarge(QQError):
+    """A QQ inbound attachment exceeds the bridge's download limit."""
 
 
 class QQAPIError(QQError):
@@ -1436,6 +1442,10 @@ class QQAdapter:
             url = item.get("url")
             if not isinstance(url, str) or not url:
                 continue
+            parsed_url = urlsplit(url)
+            if parsed_url.scheme != "https" or parsed_url.hostname is None:
+                LOGGER.warning("QQ attachment rejected for non-HTTPS URL")
+                continue
             content_type = item.get("content_type")
             media_type = (
                 content_type
@@ -1445,10 +1455,8 @@ class QQAdapter:
             name = item.get("filename")
             name = name if isinstance(name, str) and name else "attachment"
             try:
-                response = await self._http.get(url, timeout=30.0)
-                response.raise_for_status()
-                data = response.content
-            except httpx.HTTPError as exc:
+                data = await self._download_attachment(url)
+            except (httpx.HTTPError, QQAttachmentTooLarge) as exc:
                 LOGGER.warning("QQ attachment download failed for %s: %s", url, exc)
                 continue
             if media_type.startswith("image/"):
@@ -1456,6 +1464,25 @@ class QQAdapter:
             else:
                 files.append(InboundFile(data=data, name=name, media_type=media_type))
         return tuple(images), tuple(files)
+
+    async def _download_attachment(self, url: str) -> bytes:
+        chunks: list[bytes] = []
+        received = 0
+        async with self._http.stream(
+            "GET",
+            url,
+            timeout=30.0,
+            follow_redirects=False,
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                received += len(chunk)
+                if received > QQ_ATTACHMENT_LIMIT_BYTES:
+                    raise QQAttachmentTooLarge(
+                        "QQ attachment exceeds the 20 MB download limit"
+                    )
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     def _remember_dedupe_key(self, key: str) -> None:
         self._seen_ids.add(key)

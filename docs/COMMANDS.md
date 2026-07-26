@@ -80,7 +80,7 @@ Feishu accepts direct text, native images, files, and images embedded in rich po
 
 The experimental Telegram adapter accepts plain text, one photo, or one document with an optional caption. Albums and other media are rejected. Hosted Bot API downloads are capped at 20 MB. Startup discards pending updates rather than replaying old instructions.
 
-The supported QQ adapter accepts direct C2C text and any attachments the sender sends; image attachments become image prompt parts and everything else is saved as an inbound file, same as Feishu. An oversized image prompt rejected by Kimi Code is reported in chat without terminating the bridge. Only C2C (private) messages are handled; group chat is not implemented.
+The supported QQ adapter accepts direct C2C text and HTTPS-hosted attachments up to 20 MB; image attachments become image prompt parts and everything else is saved as an inbound file, same as Feishu. An oversized image prompt rejected by Kimi Code is reported in chat without terminating the bridge. Only C2C (private) messages are handled; group chat is not implemented.
 
 `/send <path>` accepts a relative path resolved from the bound workspace or an absolute path whose resolved target remains inside it. Missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG images natively, MP4 as native media with a neutral cover, and other files as native files. Telegram sends JPEG/PNG through `sendPhoto` and every other type, including MP4, through `sendDocument`. QQ uploads JPEG/PNG images and MP4 video and sends them as native media; every other file type raises `"QQ only delivers png/jpg images and mp4 video"`, which the router surfaces as `"File send failed: …"`.
 

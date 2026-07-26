@@ -9,6 +9,7 @@ import httpx
 import pytest
 from websockets.exceptions import ConnectionClosed
 
+from kimi_bridge.platforms import qq as qq_module
 from kimi_bridge.platforms.base import ConversationRef, MessageRef
 from kimi_bridge.platforms.qq import (
     GROUP_AND_C2C_EVENT_INTENT,
@@ -1144,6 +1145,100 @@ async def test_adapter_attachment_download_failure_logs_and_continues(
     assert message.images == ()
     assert message.files == ()
     assert "attachment download failed" in caplog.text
+
+
+async def test_adapter_rejects_non_https_attachment_without_fetching() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"PRIVATE")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    gateway = FakeQQGateway()
+    adapter = _make_qq_adapter(
+        FakeQQBotAPI(),
+        gateway,
+        http_client=http_client,
+    )
+    delivered: list[Any] = []
+
+    async def on_message(_sender: Any, message: Any) -> None:
+        delivered.append(message)
+
+    await adapter.start(on_message, _noop_on_interaction)
+    try:
+        await gateway.emit(
+            QQGatewayEvent(
+                type="C2C_MESSAGE_CREATE",
+                data=_c2c_payload(
+                    "MSGID-1",
+                    "look",
+                    attachments=[
+                        {
+                            "url": "http://127.0.0.1/private",
+                            "content_type": "image/png",
+                        }
+                    ],
+                ),
+                seq=1,
+                event_id="evt-1",
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert requests == []
+    assert len(delivered) == 1
+    assert delivered[0].images == ()
+    assert delivered[0].files == ()
+
+
+async def test_adapter_stops_attachment_download_at_size_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(qq_module, "QQ_ATTACHMENT_LIMIT_BYTES", 4)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"12345")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    gateway = FakeQQGateway()
+    adapter = _make_qq_adapter(
+        FakeQQBotAPI(),
+        gateway,
+        http_client=http_client,
+    )
+    delivered: list[Any] = []
+
+    async def on_message(_sender: Any, message: Any) -> None:
+        delivered.append(message)
+
+    await adapter.start(on_message, _noop_on_interaction)
+    try:
+        await gateway.emit(
+            QQGatewayEvent(
+                type="C2C_MESSAGE_CREATE",
+                data=_c2c_payload(
+                    "MSGID-1",
+                    "look",
+                    attachments=[
+                        {
+                            "url": "https://qq.example/image.png",
+                            "content_type": "image/png",
+                        }
+                    ],
+                ),
+                seq=1,
+                event_id="evt-1",
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert len(delivered) == 1
+    assert delivered[0].images == ()
+    assert delivered[0].files == ()
 
 
 # --- outbound streaming --------------------------------------------------

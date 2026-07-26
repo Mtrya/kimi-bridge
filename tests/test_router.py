@@ -3827,6 +3827,133 @@ async def test_deferred_rendering_falls_back_to_provisional_buffer(
     assert adapter.edits == []
 
 
+async def test_deferred_rendering_reemits_corrected_non_append_snapshot(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=1)
+        )
+        snapshot = _in_flight_snapshot(
+            seq=1,
+            turn_id=1,
+            prompt_id="prompt-1",
+            text="",
+        )
+        snapshot["in_flight_turn"]["thinking_text"] = "draft"
+        client.snapshots["session-1"] = snapshot
+        await router.handle_inbound(adapter, _message("/render-thinking on"))
+
+        await router.dispatch_event(
+            conversation_key,
+            {
+                "type": "resync_required",
+                "payload": {"type": "resync_required"},
+                "snapshot": {
+                    "in_flight_turn": {
+                        "turn_id": 1,
+                        "assistant_text": "",
+                        "thinking_text": "revised",
+                    },
+                    "messages": {"items": []},
+                },
+            },
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.step.started", step=2)
+        )
+    finally:
+        await router.close()
+
+    thinking_messages = [
+        text
+        for _ref, _conversation, text in adapter.sent
+        if text.startswith("Thinking\n\n")
+    ]
+    assert thinking_messages == [
+        "Thinking\n\ndraft",
+        "Thinking\n\nrevised",
+    ]
+
+
+async def test_deferred_send_failure_retries_only_unsent_chunks(
+    tmp_path: Path,
+) -> None:
+    class FailingSecondSendAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__(message_limit=4, supports_edits=False)
+            self.attempts = 0
+
+        async def send_text(
+            self, conversation: ConversationRef, text: str
+        ) -> MessageRef:
+            self.attempts += 1
+            if self.attempts == 2:
+                raise RuntimeError("send unavailable")
+            return await super().send_text(conversation, text)
+
+    client = FakeKimiClient()
+    adapter = FailingSecondSendAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=1)
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=1,
+            turn_id=1,
+            prompt_id="prompt-1",
+            text="abcdefghij",
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.ended", seq=1, turnId=1)
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=2,
+            prompt_id="prompt-1",
+            text="abcdefghij",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=2,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+        assert [text for _ref, _conversation, text in adapter.sent] == ["abcd"]
+
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=2)
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "abcd",
+        "efgh",
+        "ij",
+    ]
+
+
 async def _no_op_sleep(_delay: float) -> None:
     return
 
