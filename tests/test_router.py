@@ -331,10 +331,19 @@ class FakeKimiClient:
             for session in self.sessions
             if bool(session.get("busy")) is params["busy"]
         ]
+        after_id = params.get("after_id")
+        if after_id is not None:
+            ids = [str(session["id"]) for session in sessions]
+            sessions = sessions[ids.index(after_id) + 1 :] if after_id in ids else []
         return sessions[: params.get("page_size")]
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return next(session for session in self.sessions if session["id"] == session_id)
+        session = next(
+            (item for item in self.sessions if item["id"] == session_id), None
+        )
+        if session is None:
+            raise KimiServerAPIError(40401, f"session not found: {session_id}")
+        return session
 
     async def abort_prompt(self, session_id: str) -> bool:
         self.call_order.append(f"abort:{session_id}")
@@ -3753,3 +3762,191 @@ async def test_help_tokens_do_not_hijack_free_form_arguments(
         ("session-control", {"goal_objective": "help"}),
     ]
     assert client.prompts[0][1] == "help"
+
+
+def _discovery_session(
+    session_id: str,
+    title: str,
+    cwd: str,
+    *,
+    busy: bool = False,
+    updated_at: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": session_id,
+        "title": title,
+        "busy": busy,
+        "metadata": {"cwd": cwd},
+        "agent_config": {"model": "kimi-code/k3", "permission_mode": "manual"},
+        "updated_at": updated_at,
+    }
+
+
+def _discovery_router(
+    client: FakeKimiClient,
+    store: StateStore,
+    workspace: Path,
+    *,
+    session_list_limit: int = 10,
+) -> ChatRouter:
+    return ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=workspace,
+        model="kimi-code/k3",
+        session_list_limit=session_list_limit,
+    )
+
+
+async def test_switch_by_exact_title_or_id(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(),
+        _discovery_session(
+            "session-login", "Login refactor", "/tmp/login", updated_at="2026-07-01"
+        ),
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _message("/switch LOGIN refactor"))
+        await router.handle_inbound(adapter, _message("/switch session-control"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any(text == "Switched to session-login" for text in texts)
+    assert any(text == "Switched to session-control" for text in texts)
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.session_id == "session-control"
+
+
+async def test_switch_by_ambiguous_title_offers_numbered_candidates(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(),
+        _discovery_session(
+            "session-dup-old", "Duplicate", "/tmp/old", updated_at="2026-01-01"
+        ),
+        _discovery_session(
+            "session-dup-new",
+            "duplicate",
+            "/tmp/new",
+            busy=True,
+            updated_at="2026-06-01",
+        ),
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _message("/switch duplicate"))
+        await router.handle_inbound(adapter, _message("/switch 1"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    candidates = next(
+        text for text in texts if text.startswith("Multiple sessions match")
+    )
+    assert candidates.index("session-dup-new") < candidates.index("session-dup-old")
+    assert "/tmp/new" in candidates and "/tmp/old" in candidates
+    assert any(text == "Switched to session-dup-new" for text in texts)
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.session_id == "session-dup-new"
+
+
+async def test_switch_by_unknown_title_reports_not_found(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _message("/switch nope"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any(text == "Session not found: nope" for text in texts)
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.session_id == "session-control"
+
+
+async def test_sessions_search_matches_title_and_workspace_across_pages(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(),
+        _discovery_session(
+            "session-alpha", "Alpha project", "/tmp/alpha", updated_at="2026-03-01"
+        ),
+        _discovery_session(
+            "session-login", "Beta", "/tmp/login-page", updated_at="2026-05-01"
+        ),
+        _discovery_session(
+            "session-gamma",
+            "Gamma",
+            "/tmp/gamma",
+            busy=True,
+            updated_at="2026-04-01",
+        ),
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path, session_list_limit=1)
+    try:
+        await router.handle_inbound(adapter, _message("/sessions search"))
+        await router.handle_inbound(adapter, _message("/sessions search gamma"))
+        await router.handle_inbound(adapter, _message("/sessions search alpha"))
+        await router.handle_inbound(adapter, _message("/switch 1"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert any(text == "Usage: /sessions search <keyword>" for text in texts)
+    gamma = next(text for text in texts if "session-gamma" in text)
+    assert "Gamma" in gamma
+    alpha = next(
+        text for text in texts if "session-alpha" in text and "1. " in text
+    )
+    assert "Alpha project" in alpha and "Beta" not in alpha
+    # session_list_limit=1 forces paging deep enough to reach every session.
+    assert any(call.get("after_id") == "session-control" for call in client.list_calls)
+    assert any(text == "Switched to session-alpha" for text in texts)
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.session_id == "session-alpha"
+
+
+async def test_sessions_list_respects_configured_limit(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _discovery_session(
+            "session-login", "Beta", "/tmp/login", updated_at="2026-05-01"
+        ),
+        _discovery_session(
+            "session-alpha", "Alpha", "/tmp/alpha", updated_at="2026-03-01"
+        ),
+        _control_session(),
+    ]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path, session_list_limit=2)
+    try:
+        await router.handle_inbound(adapter, _message("/sessions"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    listing = next(text for text in texts if "session-alpha" in text)
+    assert "Beta" in listing and "Alpha" in listing
+    assert "Control session" not in listing

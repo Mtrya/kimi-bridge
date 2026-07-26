@@ -47,6 +47,7 @@ async def run(config_path: str | Path) -> None:
                 max_output_seconds=config.max_output_seconds,
                 interaction_timeout_seconds=(config.interaction_timeout_seconds),
                 inbox_subdir=config.inbox_subdir,
+                session_list_limit=config.session_list_limit,
             )
             adapter_wait: asyncio.Task[None] | None = None
             signal_wait: asyncio.Task[bool] | None = None

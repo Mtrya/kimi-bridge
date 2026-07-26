@@ -43,30 +43,51 @@ Example:
         section="Sessions",
         details="""**/sessions**
 
-List recent Kimi sessions with one-based indices and idle/busy state.
+List recent Kimi sessions with one-based indices and idle/busy state. The list size is the configured `session_list_limit` (default 10).
 
 Side effects: remembers the displayed indices so `/switch <n>` can reference them.
+
+Details: `/sessions search ?`.
 
 Example:
 - `/sessions`""",
     ),
-    "/switch": CommandHelp(
-        syntax="/switch <n|id>",
-        summary="bind a listed or explicit session",
+    "/sessions search": CommandHelp(
+        syntax="/sessions search <keyword>",
+        summary="search sessions by title or workspace",
         section="Sessions",
-        details="""**/switch <n|id>**
+        details="""**/sessions search <keyword>**
 
-Bind this conversation to another session.
+Search all Kimi sessions, not just the recent window.
 
 Arguments:
-- `n` — a one-based index from the most recent `/sessions` listing.
+- `keyword` — case-insensitive substring matched against session titles and workspace paths.
+
+Results are ranked by recency, capped at the configured `session_list_limit`, presented like `/sessions`, and remembered for `/switch <n>`.
+
+Example:
+- `/sessions search login`
+- `/sessions search /tmp/experiment`""",
+    ),
+    "/switch": CommandHelp(
+        syntax="/switch <n|id|title>",
+        summary="bind a listed, explicit, or titled session",
+        section="Sessions",
+        details="""**/switch <n|id|title>**
+
+Bind this conversation to another session. Precedence: numeric argument is a list index, an id-shaped argument is a session ID, anything else is a title.
+
+Arguments:
+- `n` — a one-based index from the most recent `/sessions` or `/sessions search` listing.
 - `id` — an explicit session ID.
+- `title` — an exact case-insensitive session title. Multiple matches produce a numbered candidate list for `/switch <n>`; no match reports `Session not found`.
 
 Side effects: replaces the current binding; work running in the previously bound session is not aborted. Render-thinking preference is preserved.
 
 Example:
 - `/switch 2`
-- `/switch 01932f4a-...`""",
+- `/switch 01932f4a-...`
+- `/switch Login refactor`""",
     ),
     "/status": CommandHelp(
         syntax="/status",

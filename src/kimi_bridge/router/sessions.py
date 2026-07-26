@@ -27,7 +27,6 @@ from .models import _ActiveStream, _CompactionOutcome
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_PERMISSION_MODE = "manual"
-SESSION_LIST_LIMIT = 10
 
 
 class _SessionMixin:
@@ -61,13 +60,57 @@ class _SessionMixin:
 
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
         idle, busy = await asyncio.gather(
-            self._client.list_sessions(busy=False, page_size=SESSION_LIST_LIMIT),
-            self._client.list_sessions(busy=True, page_size=SESSION_LIST_LIMIT),
+            self._client.list_sessions(busy=False, page_size=self._session_list_limit),
+            self._client.list_sessions(busy=True, page_size=self._session_list_limit),
         )
         by_id = {str(session["id"]): session for session in [*idle, *busy]}
         sessions = list(by_id.values())
         sessions.sort(key=_session_recency_key, reverse=True)
-        return sessions[:SESSION_LIST_LIMIT]
+        return sessions[: self._session_list_limit]
+
+    async def _list_all_sessions(self) -> list[dict[str, Any]]:
+        """Page through the full session set for both busy states."""
+        by_id: dict[str, dict[str, Any]] = {}
+        for busy in (False, True):
+            after_id: str | None = None
+            while True:
+                page = await self._client.list_sessions(
+                    busy=busy,
+                    page_size=self._session_list_limit,
+                    after_id=after_id,
+                )
+                if not page:
+                    break
+                for session in page:
+                    by_id[str(session["id"])] = session
+                last_id = str(page[-1]["id"])
+                if len(page) < self._session_list_limit or last_id == after_id:
+                    break
+                after_id = last_id
+        return list(by_id.values())
+
+    async def _search_sessions(self, keyword: str) -> list[dict[str, Any]]:
+        """Case-insensitive substring match on title and workspace path."""
+        needle = keyword.casefold()
+        matches = [
+            session
+            for session in await self._list_all_sessions()
+            if needle in str(session.get("title") or "").casefold()
+            or needle in str(session.get("metadata", {}).get("cwd", "")).casefold()
+        ]
+        matches.sort(key=_session_recency_key, reverse=True)
+        return matches[: self._session_list_limit]
+
+    async def _match_sessions_by_title(self, title: str) -> list[dict[str, Any]]:
+        """Exact case-insensitive title matches, most recent first."""
+        needle = title.casefold()
+        matches = [
+            session
+            for session in await self._list_all_sessions()
+            if str(session.get("title") or "").casefold() == needle
+        ]
+        matches.sort(key=_session_recency_key, reverse=True)
+        return matches[: self._session_list_limit]
 
     async def _resolve_new_workspace(self, argument: str) -> Path:
         if not argument:

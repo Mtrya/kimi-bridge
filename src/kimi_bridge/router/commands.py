@@ -91,20 +91,45 @@ class _CommandMixin:
             )
             return
         if command == "/sessions":
-            sessions = await self._list_recent_sessions()
+            verb, _, keyword = argument.partition(" ")
+            if verb == "search":
+                keyword = keyword.strip()
+                if not keyword:
+                    await self._send_chunked(
+                        adapter, conversation, "Usage: /sessions search <keyword>"
+                    )
+                    return
+                sessions = await self._search_sessions(keyword)
+            else:
+                sessions = await self._list_recent_sessions()
             self._session_choices[conversation_key] = sessions
             await self._send_chunked(adapter, conversation, _format_sessions(sessions))
             return
         if command == "/switch":
             if not argument:
-                await self._send_chunked(adapter, conversation, "Usage: /switch <n|id>")
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /switch <n|id|title>"
+                )
                 return
             session = await self._resolve_session(conversation_key, argument)
             if session is None:
-                await self._send_chunked(
-                    adapter, conversation, f"Session not found: {argument}"
-                )
-                return
+                matches = await self._match_sessions_by_title(argument)
+                if len(matches) == 1:
+                    session = matches[0]
+                elif len(matches) > 1:
+                    self._session_choices[conversation_key] = matches
+                    await self._send_chunked(
+                        adapter,
+                        conversation,
+                        "Multiple sessions match; refine with /switch <n>:\n\n"
+                        + _format_sessions(matches),
+                    )
+                    return
+                else:
+                    await self._send_chunked(
+                        adapter, conversation, f"Session not found: {argument}"
+                    )
+                    return
             current = self._state.bindings.get(conversation_key)
             binding = self._binding_from_session(
                 session,

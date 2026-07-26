@@ -238,3 +238,30 @@ def test_resolve_config_path_defaults_without_env(
     monkeypatch.delenv(CONFIG_PATH_ENV, raising=False)
 
     assert resolve_config_path() == DEFAULT_CONFIG_PATH
+
+
+def test_loads_session_list_limit(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text("session_list_limit = 25\n", encoding="utf-8")
+
+    assert load_config(path).session_list_limit == 25
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ("0", ValueError),
+        ("-3", ValueError),
+        ("1.5", TypeError),
+        ('"many"', TypeError),
+        ("true", TypeError),
+    ],
+)
+def test_rejects_invalid_session_list_limit(
+    tmp_path: Path, value: str, error: type[Exception]
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(f"session_list_limit = {value}\n", encoding="utf-8")
+
+    with pytest.raises(error, match="session_list_limit"):
+        load_config(path)
