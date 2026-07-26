@@ -75,6 +75,7 @@ class _CommandMixin:
                 conversation_key,
                 workspace,
                 f"Kimi: {workspace.name or workspace}",
+                adapter,
             )
             await self._ensure_active_stream(
                 conversation_key,
@@ -134,6 +135,7 @@ class _CommandMixin:
             current = self._state.bindings.get(conversation_key)
             binding = self._binding_from_session(
                 session,
+                adapter=adapter,
                 render_thinking=(
                     current.render_thinking if current is not None else False
                 ),
@@ -236,6 +238,14 @@ class _CommandMixin:
             )
             return
         if command == "/mode":
+            if not adapter.supports_interactions:
+                await self._send_chunked(
+                    adapter,
+                    conversation,
+                    "This platform can't present approval or question prompts, "
+                    "so permission mode stays fixed at auto.",
+                )
+                return
             if argument not in PERMISSION_MODES:
                 await self._send_chunked(
                     adapter,
@@ -522,6 +532,14 @@ class _CommandMixin:
         if argument not in {"", "on", "off"}:
             await self._send_chunked(
                 adapter, conversation, "Usage: /render-thinking [on|off]"
+            )
+            return
+        if argument == "on" and not adapter.supports_interactions:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                "This platform doesn't offer a separate thinking stream, so thinking "
+                "rendering stays off.",
             )
             return
         binding = await self._require_binding(conversation_key, adapter, conversation)

@@ -74,7 +74,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._clock = clock
         self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
-        self._verified_model_sessions: set[str] = set()
+        self._verified_session_profiles: set[str] = set()
         self._active: _ActiveStream | None = None
         self._pending: dict[str, _PendingInteraction] = {}
         self._compaction_waiters: dict[str, _CompactionWaiter] = {}
@@ -106,6 +106,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         conversation_key = _conversation_key(msg)
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
         async with lock:
+            self._coerce_binding_capabilities(conversation_key, adapter)
             if text.startswith("/") and not msg.images and not msg.files:
                 try:
                     await self._handle_command(
@@ -130,6 +131,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                     conversation_key,
                     self._default_workspace,
                     _title_from_message(msg),
+                    adapter,
                 )
             await self._ensure_active_stream(
                 conversation_key,
@@ -139,11 +141,19 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 msg.actor,
             )
             content = await self._build_prompt_content(binding, msg)
-            result = await self._client.submit_prompt(
-                binding.session_id,
-                content,
-                permission_mode=binding.permission_mode,
-            )
+            try:
+                result = await self._client.submit_prompt(
+                    binding.session_id,
+                    content,
+                    permission_mode=binding.permission_mode,
+                )
+            except KimiServerError as exc:
+                await self._send_chunked(
+                    adapter,
+                    conversation=msg.conversation,
+                    text=f"Prompt failed: {exc}",
+                )
+                return
             if result.get("status") in {"queued", "blocked"}:
                 prompt_id = str(result["prompt_id"])
                 try:

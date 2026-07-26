@@ -64,6 +64,7 @@ class FakeKimiClient:
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | list[dict[str, Any]], dict[str, Any]]] = []
         self.prompt_statuses: list[str] = []
+        self.prompt_error: KimiServerAPIError | None = None
         self.steered: list[tuple[str, list[str]]] = []
         self.steer_error: KimiServerAPIError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
@@ -153,6 +154,8 @@ class FakeKimiClient:
     ) -> dict[str, Any]:
         self.call_order.append("submit")
         self.prompts.append((session_id, content, profile))
+        if self.prompt_error is not None:
+            raise self.prompt_error
         status = self.prompt_statuses.pop(0) if self.prompt_statuses else "running"
         return {
             "prompt_id": f"prompt-{len(self.prompts)}",
@@ -474,11 +477,16 @@ class FakeAdapter:
         self,
         *,
         message_limit: int = 1000,
+        supports_edits: bool = True,
+        supports_interactions: bool = True,
         message_edit_limit: int | None = 20,
     ) -> None:
         self.message_limit = message_limit
+        self.supports_edits = supports_edits
+        self.supports_interactions = supports_interactions
         self.message_edit_limit = message_edit_limit
         self.sent: list[tuple[MessageRef, ConversationRef, str]] = []
+        self.final_texts: list[tuple[MessageRef, ConversationRef, str]] = []
         self.edits: list[tuple[MessageRef, str]] = []
         self.interactions: list[
             tuple[MessageRef, ConversationRef, InteractionPrompt]
@@ -509,6 +517,13 @@ class FakeAdapter:
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self.edits.append((message, text))
+
+    async def send_final_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        message = await self.send_text(conversation, text)
+        self.final_texts.append((message, conversation, text))
+        return message
 
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
@@ -2680,6 +2695,36 @@ async def test_images_and_files_map_to_prompt_content_and_workspace_inbox(
     ]
 
 
+async def test_prompt_api_failure_is_reported_without_escaping(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.prompt_error = KimiServerAPIError(50001, "Request body is too large")
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+
+    try:
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "inspect this",
+                images=(InboundImage(b"large-image", "image/png"),),
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert len(client.prompts) == 1
+    assert len(adapter.sent) == 1
+    assert adapter.final_texts == adapter.sent
+    assert "50001" in adapter.sent[0][2]
+
+
 async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
     tmp_path: Path,
 ) -> None:
@@ -3612,6 +3657,479 @@ async def test_thinking_retry_resync_final_flush_chunk_growth_and_turn_reset(
         "Thinking\n\nne",
         "w",
     ]
+
+
+async def test_deferred_rendering_batches_by_step_boundary_without_edits(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=1)
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.step.started", step=1)
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="step one", offset=0),
+        )
+        assert adapter.sent == []
+
+        await router.dispatch_event(
+            conversation_key, _event("turn.step.started", step=2)
+        )
+        assert [text for _ref, _conversation, text in adapter.sent] == ["step one"]
+
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="step two", offset=0),
+        )
+        assert len(adapter.sent) == 1
+
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=5, turn_id=1, prompt_id="prompt-1", text="step two"
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.ended", seq=5, turnId=1)
+        )
+        assert len(adapter.sent) == 1
+
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=6, prompt_id="prompt-1", text="step two"
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=6,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "step one",
+        "step two",
+    ]
+    assert adapter.edits == []
+
+
+async def test_deferred_rendering_flushes_reconciled_text_at_turn_end(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=3)
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="partial", offset=0),
+        )
+        assert adapter.sent == []
+
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=9, turn_id=3, prompt_id="prompt-9", text="partial"
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.ended", seq=9, turnId=3)
+        )
+        assert adapter.sent == []
+
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=10, prompt_id="prompt-9", text="partial answer, corrected"
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=10,
+                promptId="prompt-9",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "partial answer, corrected"
+    ]
+    assert adapter.edits == []
+
+
+async def test_deferred_rendering_falls_back_to_provisional_buffer(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        poll_sleep=_no_op_sleep,
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=4)
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", delta="never confirmed", offset=0),
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=1, turn_id=4, prompt_id="prompt-x", text="never confirmed"
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.ended", seq=1, turnId=4)
+        )
+        assert adapter.sent == []
+
+        # The final snapshot never reports the matching prompt as complete.
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=2,
+                promptId="prompt-x",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "never confirmed"
+    ]
+    assert adapter.edits == []
+
+
+async def test_deferred_rendering_reemits_corrected_non_append_snapshot(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=1)
+        )
+        snapshot = _in_flight_snapshot(
+            seq=1,
+            turn_id=1,
+            prompt_id="prompt-1",
+            text="",
+        )
+        snapshot["in_flight_turn"]["thinking_text"] = "draft"
+        client.snapshots["session-1"] = snapshot
+        await router.handle_inbound(adapter, _message("/render-thinking on"))
+
+        await router.dispatch_event(
+            conversation_key,
+            {
+                "type": "resync_required",
+                "payload": {"type": "resync_required"},
+                "snapshot": {
+                    "in_flight_turn": {
+                        "turn_id": 1,
+                        "assistant_text": "",
+                        "thinking_text": "revised",
+                    },
+                    "messages": {"items": []},
+                },
+            },
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.step.started", step=2)
+        )
+    finally:
+        await router.close()
+
+    thinking_messages = [
+        text
+        for _ref, _conversation, text in adapter.sent
+        if text.startswith("Thinking\n\n")
+    ]
+    assert thinking_messages == [
+        "Thinking\n\ndraft",
+        "Thinking\n\nrevised",
+    ]
+
+
+async def test_deferred_send_failure_retries_only_unsent_chunks(
+    tmp_path: Path,
+) -> None:
+    class FailingSecondSendAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__(message_limit=4, supports_edits=False)
+            self.attempts = 0
+
+        async def send_text(
+            self, conversation: ConversationRef, text: str
+        ) -> MessageRef:
+            self.attempts += 1
+            if self.attempts == 2:
+                raise RuntimeError("send unavailable")
+            return await super().send_text(conversation, text)
+
+    client = FakeKimiClient()
+    adapter = FailingSecondSendAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=1)
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=1,
+            turn_id=1,
+            prompt_id="prompt-1",
+            text="abcdefghij",
+        )
+        await router.dispatch_event(
+            conversation_key, _event("turn.ended", seq=1, turnId=1)
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=2,
+            prompt_id="prompt-1",
+            text="abcdefghij",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "prompt.completed",
+                seq=2,
+                promptId="prompt-1",
+                finishedAt="2026-07-23T00:00:00Z",
+            ),
+        )
+        assert [text for _ref, _conversation, text in adapter.sent] == ["abcd"]
+
+        await router.dispatch_event(
+            conversation_key, _event("turn.started", turnId=2)
+        )
+    finally:
+        await router.close()
+
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "abcd",
+        "efgh",
+        "ij",
+    ]
+
+
+async def _no_op_sleep(_delay: float) -> None:
+    return
+
+
+async def test_mode_command_rejected_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/mode manual"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == []
+    assert len(adapter.sent) == 1
+    assert "auto" in adapter.sent[0][2].lower()
+
+
+async def test_render_thinking_on_rejected_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/render-thinking on"))
+    finally:
+        await router.close()
+
+    assert len(adapter.sent) == 1
+    assert "off" in adapter.sent[0][2].lower()
+    assert not router._state.bindings
+
+
+async def test_render_thinking_off_is_still_a_noop_success_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.handle_inbound(adapter, _message("/render-thinking off"))
+    finally:
+        await router.close()
+
+    assert adapter.sent[-1][2] == "Thinking rendering already: off"
+
+
+async def test_new_session_forces_auto_mode_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+    finally:
+        await router.close()
+
+    assert client.created[0][2]["permission_mode"] == "auto"
+    binding = router._state.bindings["feishu:cli_bot:ou_user"]
+    assert binding.permission_mode == "auto"
+    assert binding.render_thinking is False
+
+
+async def test_existing_binding_is_coerced_to_auto_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_interactions=False)
+    store = StateStore(tmp_path / "state.json")
+    client.sessions = [
+        {
+            "id": "session-existing",
+            "title": "Existing",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path / "workspace")},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "permission_mode": "manual",
+            },
+        }
+    ]
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-existing",
+                    workspace=str(tmp_path / "workspace"),
+                    permission_mode="manual",
+                    render_thinking=True,
+                )
+            }
+        )
+    )
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+    finally:
+        await router.close()
+
+    binding = router._state.bindings["feishu:cli_bot:ou_user"]
+    assert binding.permission_mode == "auto"
+    assert binding.render_thinking is False
+    assert binding.session_id == "session-existing"
+    assert client.profile_updates == [
+        ("session-existing", {"permission_mode": "auto"})
+    ]
+    reloaded = StateStore(tmp_path / "state.json").load()
+    assert reloaded.bindings["feishu:cli_bot:ou_user"].permission_mode == "auto"
+
+
+async def test_switch_coerces_server_profile_for_interaction_less_adapter(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        {
+            "id": "session-manual",
+            "title": "Manual",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path / "workspace")},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "permission_mode": "manual",
+            },
+        }
+    ]
+    adapter = FakeAdapter(supports_interactions=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter, _message("/switch session-manual")
+        )
+    finally:
+        await router.close()
+
+    binding = router._state.bindings["feishu:cli_bot:ou_user"]
+    assert binding.permission_mode == "auto"
+    assert client.profile_updates == [
+        ("session-manual", {"permission_mode": "auto"})
+    ]
+    assert client.sessions[0]["agent_config"]["permission_mode"] == "auto"
 
 
 def _event(

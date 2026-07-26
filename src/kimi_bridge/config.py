@@ -19,8 +19,8 @@ DEFAULT_CONFIG_PATH = Path.home() / ".kimi-bridge" / "config.toml"
 CONFIG_PATH_ENV = "KIMI_BRIDGE_CONFIG"
 DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-PlatformName: TypeAlias = Literal["feishu", "telegram"]
-_PLATFORMS = {"feishu", "telegram"}
+PlatformName: TypeAlias = Literal["feishu", "telegram", "qq"]
+_PLATFORMS = {"feishu", "telegram", "qq"}
 
 
 def resolve_config_path(explicit: str | Path | None = None) -> Path:
@@ -59,6 +59,15 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class QQConfig:
+    """Credentials and authorization policy for the QQ official bot."""
+
+    app_id: str = ""
+    app_secret: str = field(default="", repr=False)
+    allowed_users: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Runtime configuration for the single-user bridge."""
 
@@ -74,6 +83,7 @@ class Config:
     kimi_server: KimiServerConfig = field(default_factory=KimiServerConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    qq: QQConfig = field(default_factory=QQConfig)
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -102,6 +112,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         [telegram]
         bot_token = "123456:..."
         allowed_users = [123456789]
+
+        [qq]
+        app_id = "..."
+        app_secret = "..."
+        allowed_users = ["..."]
     """
 
     config_path = Path(path).expanduser()
@@ -224,6 +239,23 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         raise TypeError("telegram.allowed_users must contain positive integers")
     telegram_allowed_users = frozenset(telegram_allowed_raw)
 
+    qq_raw = raw.get("qq", {})
+    if not isinstance(qq_raw, dict):
+        raise TypeError("qq must be a TOML table")
+    qq_app_id = qq_raw.get("app_id", "")
+    qq_app_secret = qq_raw.get("app_secret", "")
+    if not isinstance(qq_app_id, str) or not isinstance(qq_app_secret, str):
+        raise TypeError("qq.app_id and qq.app_secret must be strings")
+    if platform == "qq" and bool(qq_app_id) != bool(qq_app_secret):
+        raise ValueError("qq.app_id and qq.app_secret must be set together")
+
+    qq_allowed_raw = qq_raw.get("allowed_users", [])
+    if not isinstance(qq_allowed_raw, list):
+        raise TypeError("qq.allowed_users must be an array of strings")
+    if any(not isinstance(user, str) or not user.strip() for user in qq_allowed_raw):
+        raise TypeError("qq.allowed_users must contain non-empty strings")
+    qq_allowed_users = frozenset(qq_allowed_raw)
+
     logging.getLogger(__name__).debug("Loaded configuration from %s", config_path)
     return Config(
         platform=cast(PlatformName, platform),
@@ -244,5 +276,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         telegram=TelegramConfig(
             bot_token=bot_token,
             allowed_users=telegram_allowed_users,
+        ),
+        qq=QQConfig(
+            app_id=qq_app_id,
+            app_secret=qq_app_secret,
+            allowed_users=qq_allowed_users,
         ),
     )

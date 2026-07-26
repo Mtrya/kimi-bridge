@@ -11,11 +11,12 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 | Feishu direct messages | Supported |
 | WeChat bot | Not currently supported |
 | Telegram private chats | Experimental |
+| QQ C2C (private chats) | Supported |
 | Linux, Python ≥3.11 | Supported |
 | macOS and Windows | Experimental |
 | Voice messages | Not currently supported |
 
-Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram uses a small handwritten `httpx` Bot API transport without a Telegram framework.
+Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram and QQ use small handwritten `httpx`/`websockets` transports without a platform SDK dependency.
 
 ## Features
 
@@ -46,7 +47,7 @@ Then run:
 kimi-bridge
 ```
 
-Start with the [installation runbook](INSTALL.md), especially when asking a coding agent to configure the bridge. The [configuration reference](docs/CONFIGURATION.md) contains complete Feishu and Telegram examples.
+Start with the [installation runbook](INSTALL.md), especially when asking a coding agent to configure the bridge. The [configuration reference](docs/CONFIGURATION.md) contains complete Feishu, QQ, and Telegram examples.
 
 ## Commands
 
@@ -62,7 +63,7 @@ Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact 
 ## Architecture and security
 
 ```text
-Feishu or experimental Telegram
+Feishu, QQ, or experimental Telegram
               │
               ▼
        semantic chat router
@@ -94,7 +95,7 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-Unit tests use fake Kimi, Feishu, Telegram, WebSocket, state, and process boundaries; hosted checks use no credentials or inference.
+Unit tests use fake Kimi, Feishu, Telegram, QQ, WebSocket, state, and process boundaries; hosted checks use no credentials or inference.
 
 ## License
 

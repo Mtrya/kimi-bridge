@@ -10,6 +10,7 @@ from kimi_bridge.config import (
     Config,
     FeishuConfig,
     KimiServerConfig,
+    QQConfig,
     TelegramConfig,
     load_config,
     resolve_config_path,
@@ -97,6 +98,47 @@ def test_loads_telegram_and_ignores_partial_unselected_feishu(
     )
     assert config.feishu.app_id == "unused"
     assert "123456:secret-token" not in repr(config)
+
+
+def test_loads_qq_and_ignores_partial_unselected_feishu(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "qq"',
+                "",
+                "[feishu]",
+                'app_id = "unused"',
+                "",
+                "[qq]",
+                'app_id = "app-1"',
+                'app_secret = "secret-1"',
+                'allowed_users = ["OPENID-1", "OPENID-2"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.platform == "qq"
+    assert config.qq == QQConfig(
+        app_id="app-1",
+        app_secret="secret-1",
+        allowed_users=frozenset({"OPENID-1", "OPENID-2"}),
+    )
+    assert config.feishu.app_id == "unused"
+    assert "secret-1" not in repr(config)
+
+
+def test_rejects_partial_qq_credentials(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'platform = "qq"\n[qq]\napp_id = "app-1"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="must be set together"):
+        load_config(path)
 
 
 def test_rejects_unknown_platform(tmp_path: Path) -> None:

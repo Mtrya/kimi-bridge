@@ -30,6 +30,29 @@ DEFAULT_PERMISSION_MODE = "manual"
 
 
 class _SessionMixin:
+    def _default_permission_mode(self, adapter: PlatformAdapter) -> str:
+        return DEFAULT_PERMISSION_MODE if adapter.supports_interactions else "auto"
+
+    def _coerce_binding_capabilities(
+        self, conversation_key: str, adapter: PlatformAdapter
+    ) -> None:
+        """Force interaction-less adapters into auto mode with thinking off."""
+
+        if adapter.supports_interactions:
+            return
+        binding = self._state.bindings.get(conversation_key)
+        if binding is None or (
+            binding.permission_mode == "auto" and not binding.render_thinking
+        ):
+            return
+        self._state.bindings[conversation_key] = ConversationBinding(
+            session_id=binding.session_id,
+            workspace=binding.workspace,
+            permission_mode="auto",
+            render_thinking=False,
+        )
+        self._state_store.save(self._state)
+
     async def _require_binding(
         self,
         conversation_key: str,
@@ -120,59 +143,76 @@ class _SessionMixin:
         return workspace
 
     async def _create_and_bind(
-        self, conversation_key: str, workspace: Path, title: str
+        self,
+        conversation_key: str,
+        workspace: Path,
+        title: str,
+        adapter: PlatformAdapter,
     ) -> ConversationBinding:
+        permission_mode = self._default_permission_mode(adapter)
         session_id = await self._client.create_session(
             str(workspace),
             title=title,
             model=self._model,
-            permission_mode=DEFAULT_PERMISSION_MODE,
+            permission_mode=permission_mode,
         )
-        await self._verify_session_model(
+        await self._verify_session_profile(
             session_id,
-            DEFAULT_PERMISSION_MODE,
+            permission_mode,
             replace_existing=True,
         )
         current = self._state.bindings.get(conversation_key)
         binding = ConversationBinding(
             session_id=session_id,
             workspace=str(workspace),
-            permission_mode=DEFAULT_PERMISSION_MODE,
-            render_thinking=(current.render_thinking if current is not None else False),
+            permission_mode=permission_mode,
+            render_thinking=(
+                current is not None
+                and current.render_thinking
+                and adapter.supports_interactions
+            ),
         )
         self._state.bindings[conversation_key] = binding
         self._state_store.save(self._state)
         return binding
 
-    async def _verify_session_model(
+    async def _verify_session_profile(
         self,
         session_id: str,
         permission_mode: str,
         *,
         replace_existing: bool,
     ) -> None:
-        if session_id in self._verified_model_sessions:
+        if session_id in self._verified_session_profiles:
             return
         status = await self._client.get_session_status(session_id)
-        if status.model is None or (
+        update_model = status.model is None or (
             replace_existing and status.model != self._model
-        ):
+        )
+        update_permission = status.permission_mode != permission_mode
+        if update_model or update_permission:
             await self._client.update_profile(
                 session_id,
-                model=self._model,
+                model=self._model if update_model else None,
                 permission_mode=cast(PermissionMode, permission_mode),
             )
             status = await self._client.get_session_status(session_id)
-            if status.model != self._model:
+            if update_model and status.model != self._model:
                 raise KimiServerProtocolError(
                     f"kimi session {session_id} did not bind model {self._model!r}"
                 )
-        self._verified_model_sessions.add(session_id)
+            if status.permission_mode != permission_mode:
+                raise KimiServerProtocolError(
+                    f"kimi session {session_id} did not bind permission mode "
+                    f"{permission_mode!r}"
+                )
+        self._verified_session_profiles.add(session_id)
 
     def _binding_from_session(
         self,
         session: dict[str, Any],
         *,
+        adapter: PlatformAdapter,
         render_thinking: bool,
     ) -> ConversationBinding:
         workspace = str(session["metadata"]["cwd"])
@@ -184,6 +224,9 @@ class _SessionMixin:
         )
         if mode not in PERMISSION_MODES:
             mode = DEFAULT_PERMISSION_MODE
+        if not adapter.supports_interactions:
+            mode = "auto"
+            render_thinking = False
         binding = ConversationBinding(
             session_id=str(session["id"]),
             workspace=workspace,
@@ -224,7 +267,7 @@ class _SessionMixin:
                 if binding is not None and binding.session_id == session_id
                 else DEFAULT_PERMISSION_MODE
             )
-        await self._verify_session_model(
+        await self._verify_session_profile(
             session_id,
             permission_mode,
             replace_existing=False,

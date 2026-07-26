@@ -206,6 +206,9 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
     if config.platform == "feishu":
         credentials_present = bool(config.feishu.app_id and config.feishu.app_secret)
         allowlist_size = len(config.feishu.allowed_users)
+    elif config.platform == "qq":
+        credentials_present = bool(config.qq.app_id and config.qq.app_secret)
+        allowlist_size = len(config.qq.allowed_users)
     else:
         credentials_present = bool(config.telegram.bot_token)
         allowlist_size = len(config.telegram.allowed_users)
@@ -221,12 +224,16 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
             CheckStatus.ERROR,
             f"selected {config.platform} adapter is missing " + " and ".join(missing),
         )
-    return DoctorCheck(
-        "adapter",
-        CheckStatus.OK,
+    detail = (
         f"selected {config.platform}; credentials present; "
-        f"{allowlist_size} allowlisted user(s)",
+        f"{allowlist_size} allowlisted user(s)"
     )
+    if config.platform == "qq":
+        detail += (
+            "; QQ REST calls also require this host's egress IP on the "
+            "console IP whitelist"
+        )
+    return DoctorCheck("adapter", CheckStatus.OK, detail)
 
 
 def _check_directory_target(name: str, path: Path) -> DoctorCheck:

@@ -109,6 +109,12 @@ class _RenderingMixin:
     ) -> None:
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
+        if not active.adapter.supports_edits:
+            # A missed finalization must not lose deferred text: emit any
+            # unsent buffer before the states are replaced.
+            await self._flush(active, active.render)
+            if self._thinking_enabled(active):
+                await self._flush(active, active.thinking)
         active.pending_finalization = None
         active.step = None
         active.render = _RenderState(turn_id=turn_id, turn_active=True)
@@ -177,6 +183,10 @@ class _RenderingMixin:
         render.text += delta
 
     async def _maybe_flush(self, active: _ActiveStream, render: _RenderState) -> None:
+        if not active.adapter.supports_edits:
+            # Deferred rendering: buffer deltas and emit only at step
+            # boundaries and finalization.
+            return
         now = self._clock()
         if not render.messages or render.last_flush is None:
             await self._flush(active, render)
@@ -254,6 +264,9 @@ class _RenderingMixin:
     async def _flush(self, active: _ActiveStream, render: _RenderState) -> None:
         if not render.text:
             return
+        if not active.adapter.supports_edits:
+            await self._flush_deferred(active, render)
+            return
         async with render.lock:
             chunks = _chunk_text(
                 f"{render.prefix}{render.text}", active.adapter.message_limit
@@ -327,6 +340,33 @@ class _RenderingMixin:
             edit_limit,
         )
 
+    async def _flush_deferred(
+        self, active: _ActiveStream, render: _RenderState
+    ) -> None:
+        """Send the unsent tail of the buffer; never edit prior messages."""
+
+        async with render.lock:
+            output = f"{render.prefix}{render.text}"
+            if not output.startswith(render.emitted_text):
+                render.emitted_text = ""
+            pending = output[len(render.emitted_text) :]
+            if not pending:
+                return
+            for chunk in _chunk_text(pending, active.adapter.message_limit):
+                try:
+                    message = await active.adapter.send_text(
+                        active.conversation, chunk
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "%s deferred message send failed; keeping the Kimi event stream active",
+                        active.adapter.name,
+                    )
+                    break
+                render.messages.append(message)
+                render.emitted_text += chunk
+            render.last_flush = self._clock()
+
     async def _snapshot_stream_text(
         self,
         session_id: str,
@@ -384,9 +424,10 @@ class _RenderingMixin:
             turn_end_seq=turn_end_seq,
         )
 
-        await self._flush(active, answer)
+        if active.adapter.supports_edits:
+            await self._flush(active, answer)
         answer.turn_active = False
-        if self._thinking_enabled(active):
+        if active.adapter.supports_edits and self._thinking_enabled(active):
             await self._flush(active, thinking)
         thinking.turn_active = False
 
@@ -441,6 +482,12 @@ class _RenderingMixin:
             active.pending_finalization = None
             return
 
+        if not active.adapter.supports_edits:
+            # Deferred rendering held the last step back for the reconciled
+            # text; emit the provisional buffer rather than losing it.
+            await self._flush(active, pending.answer)
+            if self._thinking_enabled(active):
+                await self._flush(active, pending.thinking)
         LOGGER.warning(
             "final snapshot did not catch up for session %s prompt %s; "
             "keeping provisional output",
@@ -483,11 +530,13 @@ class _RenderingMixin:
             if not active.render.turn_active:
                 await self._reset_render(active, turn_id=turn_id)
             active.render.text = answer_text
-            await self._flush(active, active.render)
+            if active.adapter.supports_edits:
+                await self._flush(active, active.render)
             if self._thinking_enabled(active) and isinstance(thinking_text, str):
                 active.thinking.text = thinking_text
                 active.thinking.turn_active = True
-                await self._flush(active, active.thinking)
+                if active.adapter.supports_edits:
+                    await self._flush(active, active.thinking)
             return
 
         if not active.render.turn_active and not active.thinking.turn_active:
@@ -508,7 +557,7 @@ class _RenderingMixin:
         self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
-            await adapter.send_text(conversation, chunk)
+            await adapter.send_final_text(conversation, chunk)
 
 
 def _optional_int(value: Any) -> int | None:

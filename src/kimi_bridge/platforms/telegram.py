@@ -377,6 +377,8 @@ class TelegramAdapter:
 
     name = "telegram"
     message_limit = TELEGRAM_TEXT_LIMIT
+    supports_edits = True
+    supports_interactions = True
     message_edit_limit = None
 
     def __init__(
@@ -465,6 +467,11 @@ class TelegramAdapter:
             {"chat_id": _chat_id(conversation), "text": _message_text(text)},
         )
         return _message_ref(conversation, result, "sendMessage")
+
+    async def send_final_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        return await self.send_text(conversation, text)
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self._validate_conversation(message.conversation)

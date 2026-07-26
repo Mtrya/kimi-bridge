@@ -1,12 +1,12 @@
 # Configuration
 
-kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` selects another file, and the `KIMI_BRIDGE_CONFIG` environment variable provides an override when the flag is absent. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu and Telegram tables may coexist while one process runs exactly one of them.
+kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` selects another file, and the `KIMI_BRIDGE_CONFIG` environment variable provides an override when the flag is absent. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu, QQ and Telegram tables may coexist while one process runs exactly one of them.
 
 ## Complete schema
 
 | Key | Type | Default | Rules |
 | --- | --- | --- | --- |
-| `platform` | string | `"feishu"` | Exactly `"feishu"` or `"telegram"`. |
+| `platform` | string | `"feishu"` | Exactly `"feishu"`, `"telegram"`, or `"qq"`. |
 | `log_level` | string | `"INFO"` | Case-insensitive `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `default_workspace` | string path | `"~/.kimi-bridge/workspace"` | Non-empty; `~` is expanded and the result is resolved. |
 | `state_path` | string path | `"~/.kimi-bridge/state.json"` | Non-empty; `~` is expanded and the result is resolved. |
@@ -21,8 +21,11 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `feishu.allowed_users` | array of strings | empty | At least one non-empty Feishu `open_id` or `user_id` is required at runtime. |
 | `telegram.bot_token` | string | empty | Required when Telegram is selected. |
 | `telegram.allowed_users` | array of integers | empty | At least one positive numeric Telegram user ID is required at runtime. |
+| `qq.app_id` | string | empty | Required with `app_secret` when QQ is selected. |
+| `qq.app_secret` | string | empty | Required with `app_id` when QQ is selected. |
+| `qq.allowed_users` | array of strings | empty | At least one non-empty QQ C2C `user_openid` is required at runtime. |
 
-Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields.
+Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields. QQ forces every session into `auto` permission mode because it cannot present interactive prompts (see [Commands](COMMANDS.md)).
 
 ## Feishu example
 
@@ -75,6 +78,33 @@ allowed_users = [123456789]
 Create a bot through Telegram's [BotFather](https://core.telegram.org/bots/features#botfather) and obtain the intended user's stable numeric ID through a trusted Telegram account or Bot API flow. Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
 
 The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
+
+## QQ example
+
+```toml
+platform = "qq"
+log_level = "INFO"
+default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
+edit_throttle_seconds = 1.5
+max_output_seconds = 300
+interaction_timeout_seconds = 600
+inbox_subdir = ".kimi-bridge-inbox"
+
+[kimi_server]
+# port = 58628
+
+[qq]
+app_id = "replace-me"
+app_secret = "replace-me"
+allowed_users = ["replace-me"]
+```
+
+Register an app at [q.qq.com](https://q.qq.com/) (individual developers are allowed, up to 5 bots), obtain its `AppID`/`AppSecret`, and whitelist the intended tester's QQ number under the console's sandbox (沙箱) configuration — sandbox allows up to 20 test users and is the practical mode for a personal bridge. The console's developer settings also require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance the first time an unrecognized sender messages the bot.
+
+The supported QQ adapter is C2C (private-chat) only and is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 media uploads, inbound vision, and clean shutdown. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
+
+QQ has no interactive approvals, questions, or separate thinking stream: every session runs in `auto` permission mode, `/mode` and `/render-thinking on` are rejected with an explanatory reply, and an unexpected interactive prompt is replaced by a short notice. `/send` only delivers PNG/JPEG images and MP4 video; every other file type is rejected. Inbound attachments must use HTTPS and are downloaded with a 20 MB limit. Small inbound images reach Kimi as image prompt parts; an image whose base64-expanded prompt exceeds Kimi Code's request-body limit returns an in-chat `Prompt failed` error without stopping the bridge. Sandbox accepted ordinary external Markdown links without returning `304003`; the adapter still retries once with defanged URLs if another deployment enforces that error. See the official [QQ bot documentation](https://bot.q.qq.com/wiki/) for full protocol detail.
 
 ## Files and state
 
