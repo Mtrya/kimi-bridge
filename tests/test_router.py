@@ -331,11 +331,35 @@ class FakeKimiClient:
             for session in self.sessions
             if bool(session.get("busy")) is params["busy"]
         ]
+        ids = [str(session["id"]) for session in sessions]
+        # The list is newest-first: after_id selects newer records,
+        # before_id selects older ones.
         after_id = params.get("after_id")
         if after_id is not None:
-            ids = [str(session["id"]) for session in sessions]
-            sessions = sessions[ids.index(after_id) + 1 :] if after_id in ids else []
+            sessions = sessions[: ids.index(after_id)] if after_id in ids else []
+        before_id = params.get("before_id")
+        if before_id is not None:
+            sessions = (
+                sessions[ids.index(before_id) + 1 :] if before_id in ids else []
+            )
         return sessions[: params.get("page_size")]
+
+    async def list_all_sessions(self, **params: Any) -> list[dict[str, Any]]:
+        page_size = params.get("page_size") or 50
+        sessions: list[dict[str, Any]] = []
+        before_id: str | None = None
+        while True:
+            page = await self.list_sessions(
+                busy=params["busy"], page_size=page_size, before_id=before_id
+            )
+            if not page:
+                break
+            sessions.extend(page)
+            last_id = str(page[-1]["id"])
+            if len(page) < page_size or last_id == before_id:
+                break
+            before_id = last_id
+        return sessions
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         session = next(
@@ -3698,9 +3722,9 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     try:
         await router.handle_inbound(adapter, _message("/help"))
         await router.handle_inbound(adapter, _message("/goal ?"))
-        await router.handle_inbound(adapter, _message("/goal help"))
         await router.handle_inbound(adapter, _message("/tasks show ?"))
         await router.handle_inbound(adapter, _message("/tasks bogus ?"))
+        await router.handle_inbound(adapter, _message("/sessions search help"))
         await router.handle_inbound(adapter, _message("/bogus ?"))
     finally:
         await router.close()
@@ -3709,7 +3733,7 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     index = next(text for text in texts if text.startswith("**Commands**"))
     assert "(details: `/goal ?`)" in index
     goal_details = [text for text in texts if text.startswith("**/goal [status")]
-    assert len(goal_details) == 2  # `?` and `help` tokens both resolve
+    assert len(goal_details) == 1
     assert "/goal -- <objective>" in goal_details[0]
     assert "\nExample" in goal_details[0]
     show_details = next(
@@ -3718,11 +3742,16 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     assert "8 KiB" in show_details
     task_fallbacks = [text for text in texts if text.startswith("**/tasks [running")]
     assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
+    # `help` is not a help token: the keyword reaches the search handler.
+    assert not any(
+        text.startswith("**/sessions search <keyword>**") for text in texts
+    )
     assert any(text == "Unknown command: /bogus\nUse /help." for text in texts)
     assert client.prompts == []
 
 
 def test_help_resolver_preserves_free_form_arguments() -> None:
+    assert command_help_details("/goal", "help") is None
     assert command_help_details("/title", "hello help") is None
     assert command_help_details("/title", "hello ?") is None
     assert command_help_details("/goal", "-- help") is None
@@ -3730,6 +3759,9 @@ def test_help_resolver_preserves_free_form_arguments() -> None:
     assert command_help_details("/goal", "-- status ?") is None
     assert command_help_details("/mode", "yolo ?") is None
     assert command_help_details("/new", "/tmp/dir ?") is None
+    assert (
+        command_help_details("/sessions", "search help") is None
+    )
     assert (
         command_help_details("/goal", "status ?")
         == COMMAND_HELP["/goal status"].details
@@ -3920,7 +3952,7 @@ async def test_sessions_search_matches_title_and_workspace_across_pages(
     )
     assert "Alpha project" in alpha and "Beta" not in alpha
     # session_list_limit=1 forces paging deep enough to reach every session.
-    assert any(call.get("after_id") == "session-control" for call in client.list_calls)
+    assert any(call.get("before_id") == "session-control" for call in client.list_calls)
     assert any(text == "Switched to session-alpha" for text in texts)
     binding = store.load().bindings["feishu:cli_bot:ou_user"]
     assert binding.session_id == "session-alpha"

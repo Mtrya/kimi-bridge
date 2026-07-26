@@ -15,7 +15,7 @@ class CommandHelp:
     section: str
 
 
-HELP_TOKENS = ("?", "help")
+HELP_TOKENS = ("?",)
 
 COMMAND_HELP: dict[str, CommandHelp] = {
     "/new": CommandHelp(
@@ -58,7 +58,7 @@ Example:
         section="Sessions",
         details="""**/sessions search <keyword>**
 
-Search all Kimi sessions, not just the recent window.
+Search all active (non-archived) Kimi sessions, not just the recent window.
 
 Arguments:
 - `keyword` — case-insensitive substring matched against session titles and workspace paths.
@@ -80,7 +80,7 @@ Bind this conversation to another session. Precedence: numeric argument is a lis
 Arguments:
 - `n` — a one-based index from the most recent `/sessions` or `/sessions search` listing.
 - `id` — an explicit session ID.
-- `title` — an exact case-insensitive session title. Multiple matches produce a numbered candidate list for `/switch <n>`; no match reports `Session not found`.
+- `title` — an exact case-insensitive session title among active (non-archived) sessions. Multiple matches produce a numbered candidate list for `/switch <n>`; no match reports `Session not found`.
 
 Side effects: replaces the current binding; work running in the previously bound session is not aborted. Render-thinking preference is preserved.
 
@@ -453,7 +453,7 @@ Example:
 
 Show the compact command index.
 
-Every command also answers `/<command> ?` (or `/<command> help`) with detailed usage, including sub-forms such as `/tasks show ?`.
+Every command also answers `/<command> ?` with detailed usage, including sub-forms such as `/tasks show ?`.
 
 Example:
 - `/help`
@@ -465,13 +465,13 @@ Example:
 def command_help_details(command: str, argument: str) -> str | None:
     """Return detailed help when *argument* is a help request, else None.
 
-    A bare `?` or `help` argument (`/goal ?`) always requests help. A
-    trailing `?` or `help` token (`/tasks show ?`) requests sub-form help
-    only for commands with registered sub-forms, so free-form arguments
-    such as `/title hello help` keep their literal meaning; a sub-path
-    starting with `--` is the `/goal` objective escape and is never a
-    help request. Lookup tries the longest registered key first and falls
-    back to the parent command for unregistered sub-forms.
+    A bare `?` argument (`/goal ?`) always requests help. A trailing `?`
+    token (`/tasks show ?`) requests sub-form help only for commands with
+    registered sub-forms, so free-form arguments such as `/title hello ?`
+    keep their literal meaning; a sub-path starting with `--` is the
+    `/goal` objective escape and is never a help request. Lookup tries
+    the longest registered key first and falls back to the parent command
+    for unregistered sub-forms.
     """
     path: str | None = None
     for token in HELP_TOKENS:

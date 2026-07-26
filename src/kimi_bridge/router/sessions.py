@@ -69,25 +69,16 @@ class _SessionMixin:
         return sessions[: self._session_list_limit]
 
     async def _list_all_sessions(self) -> list[dict[str, Any]]:
-        """Page through the full session set for both busy states."""
-        by_id: dict[str, dict[str, Any]] = {}
-        for busy in (False, True):
-            after_id: str | None = None
-            while True:
-                page = await self._client.list_sessions(
-                    busy=busy,
-                    page_size=self._session_list_limit,
-                    after_id=after_id,
-                )
-                if not page:
-                    break
-                for session in page:
-                    by_id[str(session["id"])] = session
-                last_id = str(page[-1]["id"])
-                if len(page) < self._session_list_limit or last_id == after_id:
-                    break
-                after_id = last_id
-        return list(by_id.values())
+        """Full session set across both busy states, for discovery."""
+        idle, busy = await asyncio.gather(
+            self._client.list_all_sessions(
+                busy=False, page_size=self._session_list_limit
+            ),
+            self._client.list_all_sessions(
+                busy=True, page_size=self._session_list_limit
+            ),
+        )
+        return [*idle, *busy]
 
     async def _search_sessions(self, keyword: str) -> list[dict[str, Any]]:
         """Case-insensitive substring match on title and workspace path."""
