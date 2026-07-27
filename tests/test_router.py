@@ -4250,7 +4250,8 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
 
     texts = [text for _message, _conversation, text in adapter.sent]
     index = next(text for text in texts if text.startswith("**Commands**"))
-    assert "(details: `/goal ?`)" in index
+    assert "(details:" not in index
+    assert all(entry.syntax in index for entry in COMMAND_HELP.values())
     goal_details = [text for text in texts if text.startswith("**/goal [status")]
     assert len(goal_details) == 1
     assert "/goal -- <objective>" in goal_details[0]
