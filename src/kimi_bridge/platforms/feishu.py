@@ -56,6 +56,21 @@ FEISHU_IMAGE_MEDIA_TYPES = frozenset(
 VIDEO_COVER_NAME = "video-cover.png"
 
 
+def _log_non_allowlisted_user(
+    event_kind: str,
+    open_id: object,
+    user_id: object,
+) -> None:
+    LOGGER.warning(
+        "ignored a %s from a non-allowlisted Feishu user "
+        "(open_id=%r, user_id=%r); add either identity to "
+        "[feishu].allowed_users",
+        event_kind,
+        open_id,
+        user_id,
+    )
+
+
 class FeishuAPIError(RuntimeError):
     """A Feishu message operation failed."""
 
@@ -656,7 +671,11 @@ class FeishuAdapter:
             if isinstance(value, str) and value
         }
         if not identities.intersection(self._allowed_users):
-            LOGGER.info("ignored a message from a non-allowlisted Feishu user")
+            _log_non_allowlisted_user(
+                "message",
+                sender_id.open_id,
+                sender_id.user_id,
+            )
             return
 
         message_id = message.message_id
@@ -755,7 +774,11 @@ class FeishuAdapter:
             if isinstance(value, str) and value
         }
         if not identities.intersection(self._allowed_users):
-            LOGGER.info("ignored a card action from a non-allowlisted Feishu user")
+            _log_non_allowlisted_user(
+                "card action",
+                operator.open_id,
+                operator.user_id,
+            )
             return
 
         header = getattr(data, "header", None)

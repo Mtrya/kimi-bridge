@@ -52,7 +52,7 @@ allowed_users = ["ou_replace_me"]
 
 Create a custom Feishu app, enable its bot, and make the app available to the intended user. Grant tenant scopes `im:message.p2p_msg:readonly`, `im:message:readonly`, `im:message:send_as_bot`, `im:message:update`, and `im:resource` or the narrower resource upload/download scopes available to the app. Configure a WebSocket long connection, subscribe to `im.message.receive_v1`, enable `card.action.trigger` callbacks on that connection, and publish the app version. Feishu documents [long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case) and [message permission prerequisites](https://open.feishu.cn/document/server-docs/im-v1/faq).
 
-Feishu accepts only user-sent `p2p` events. Authorization compares the sender's `open_id` and `user_id` with `allowed_users`; group messages and non-allowlisted users are ignored. Use the stable identity issued for the same app/tenant context instead of a display name.
+Feishu accepts only user-sent `p2p` events. Authorization compares the sender's `open_id` and `user_id` with `allowed_users`; group messages and non-allowlisted users are ignored. Use the stable identity issued for the same app/tenant context instead of a display name. When a direct-message sender is not allowlisted, the bridge logs both identities with copy-paste configuration guidance.
 
 ## Telegram example (experimental)
 

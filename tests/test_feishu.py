@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -675,7 +676,9 @@ async def test_sdk_transport_builds_message_card_and_resource_requests() -> None
     }
 
 
-async def test_groups_bots_and_non_allowlisted_users_are_silent() -> None:
+async def test_groups_bots_and_non_allowlisted_users_are_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     transport = FakeTransport()
     received: list[InboundMessage] = []
     adapter = FeishuAdapter(
@@ -689,21 +692,36 @@ async def test_groups_bots_and_non_allowlisted_users_are_silent() -> None:
         lambda _adapter, message: _append(received, message),
         _discard_interaction,
     )
-    try:
-        await adapter.handle_event(_event(message_id="om_group", chat_type="group"))
-        await adapter.handle_event(_event(message_id="om_bot", sender_type="app"))
-        await adapter.handle_event(
-            _event(
-                message_id="om_denied",
-                open_id="ou_denied",
-                user_id="user_denied",
+    with caplog.at_level(logging.WARNING, logger="kimi_bridge.platforms.feishu"):
+        try:
+            await adapter.handle_event(
+                _event(message_id="om_group", chat_type="group")
             )
-        )
-    finally:
-        await adapter.stop()
+            await adapter.handle_event(
+                _event(message_id="om_bot", sender_type="app")
+            )
+            await adapter.handle_event(
+                _event(
+                    message_id="om_denied",
+                    open_id="ou_denied",
+                    user_id="user_denied",
+                )
+            )
+        finally:
+            await adapter.stop()
 
     assert received == []
     assert transport.sent == []
+    denied_records = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.feishu"
+    ]
+    assert len(denied_records) == 1
+    assert denied_records[0].levelno == logging.WARNING
+    assert "ou_denied" in denied_records[0].getMessage()
+    assert "user_denied" in denied_records[0].getMessage()
+    assert "[feishu].allowed_users" in denied_records[0].getMessage()
 
 
 async def test_image_file_and_multi_image_post_are_downloaded() -> None:
