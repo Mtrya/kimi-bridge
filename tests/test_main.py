@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,28 @@ from kimi_bridge.config import (
 class _Adapter:
     name = "fake"
     message_limit = 1
+
+
+def test_runtime_suppresses_credential_bearing_library_debug_logs() -> None:
+    logger_names = main_module._CREDENTIAL_BEARING_LIBRARY_LOGGERS
+    original_levels = {
+        logger_name: logging.getLogger(logger_name).level
+        for logger_name in logger_names
+    }
+    try:
+        for logger_name in logger_names:
+            logging.getLogger(logger_name).setLevel(logging.DEBUG)
+
+        main_module._configure_logging("DEBUG")
+
+        assert all(
+            logging.getLogger(logger_name).getEffectiveLevel()
+            >= logging.WARNING
+            for logger_name in logger_names
+        )
+    finally:
+        for logger_name, level in original_levels.items():
+            logging.getLogger(logger_name).setLevel(level)
 
 
 async def test_signal_handlers_prefer_the_event_loop() -> None:

@@ -118,7 +118,7 @@ Relative `default_workspace` values resolve from the bridge process's working di
 
 ## Secret handling
 
-Create the parent directory with mode `700` and the file with mode `600`. Never commit the file, paste real values into issue reports, or put credentials on command lines. Feishu's SDK can log connection URLs containing ephemeral credentials at informational levels, so the bridge suppresses that logger below warnings. Diagnostic output reports credential presence and allowlist counts only.
+Create the parent directory with mode `700` and the file with mode `600`. Never commit the file, paste real values into issue reports, or put credentials on command lines. Feishu's SDK and low-level HTTP/WebSocket protocol loggers can include connection credentials, so the bridge suppresses those dependency loggers below warnings even when bridge-owned DEBUG logging is enabled. Diagnostic output reports credential presence and allowlist counts only.
 
 ```bash
 install -d -m 700 ~/.kimi-bridge

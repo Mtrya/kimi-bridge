@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -1502,6 +1503,48 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     assert factory.calls[3][1]["start_new_session"] is True
     assert [call[0] for call in factory.calls].count(("kimi", "--version")) == 1
     assert [call[0] for call in factory.calls].count(("kimi", "--help")) == 1
+
+
+async def test_supervisor_debug_output_redacts_all_startup_token_lines(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "standalone_secret-123"
+    child = FakeProcess(
+        f"Kimi server: http://127.0.0.1:43123/#token={secret}"
+    )
+    child.stdout.feed_data(
+        f"\x1b[1mToken:\x1b[0m    {secret}\n".encode()
+    )
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("0.28.1\n"),
+            FakeCompletedProcess(KIMI_CODE_HELP),
+            FakeCompletedProcess(KIMI_WEB_HELP),
+            child,
+        ]
+    )
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="kimi_bridge.kimi_server.supervisor",
+    ):
+        try:
+            await supervisor.start()
+            await asyncio.sleep(0)
+        finally:
+            await supervisor.stop()
+
+    supervisor_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "kimi_bridge.kimi_server.supervisor"
+    ]
+    assert secret not in "\n".join(supervisor_messages)
+    assert sum("<redacted>" in message for message in supervisor_messages) >= 2
 
 
 async def test_supervisor_warns_for_unknown_official_version_and_starts(
