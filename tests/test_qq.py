@@ -1269,6 +1269,7 @@ async def test_adapter_rejects_non_https_attachment_without_fetching() -> None:
 
 async def test_adapter_stops_attachment_download_at_size_limit(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(qq_module, "QQ_ATTACHMENT_LIMIT_BYTES", 4)
 
@@ -1313,6 +1314,15 @@ async def test_adapter_stops_attachment_download_at_size_limit(
     assert delivered[0].text == "look"
     assert delivered[0].images == ()
     assert delivered[0].files == ()
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.qq"
+    ]
+    assert len(records) == 1
+    configured_reason = str(qq_module.QQAttachmentTooLarge(4))
+    assert configured_reason != str(qq_module.QQAttachmentTooLarge(5))
+    assert records[0].args[1] == configured_reason
 
 
 # --- outbound streaming --------------------------------------------------

@@ -130,6 +130,14 @@ class QQTransportError(QQError):
 class QQAttachmentTooLarge(QQError):
     """A QQ inbound attachment exceeds the bridge's download limit."""
 
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = limit_bytes
+        if limit_bytes % (1024 * 1024) == 0:
+            limit = f"{limit_bytes // (1024 * 1024)} MB"
+        else:
+            limit = f"{limit_bytes} bytes"
+        super().__init__(f"QQ attachment exceeds the {limit} download limit")
+
 
 class QQAPIError(QQError):
     """QQ returned a structured API failure."""
@@ -1509,7 +1517,7 @@ class QQAdapter:
                 data = await self._download_attachment(url)
             except (httpx.HTTPError, QQAttachmentTooLarge) as exc:
                 reason = (
-                    "exceeds the 20 MB limit"
+                    str(exc)
                     if isinstance(exc, QQAttachmentTooLarge)
                     else type(exc).__name__
                 )
@@ -1538,9 +1546,7 @@ class QQAdapter:
             async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
                 received += len(chunk)
                 if received > QQ_ATTACHMENT_LIMIT_BYTES:
-                    raise QQAttachmentTooLarge(
-                        "QQ attachment exceeds the 20 MB download limit"
-                    )
+                    raise QQAttachmentTooLarge(QQ_ATTACHMENT_LIMIT_BYTES)
                 chunks.append(chunk)
         return b"".join(chunks)
 
