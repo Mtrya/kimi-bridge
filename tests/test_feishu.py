@@ -527,14 +527,25 @@ def test_sdk_websocket_owns_a_worker_event_loop(monkeypatch: Any) -> None:
     original_loop = ws_module.loop
     observed: list[asyncio.AbstractEventLoop] = []
     started = threading.Event()
+    disconnected = threading.Event()
 
     def fake_start(_client: Any) -> None:
         observed.append(ws_module.loop)
         assert asyncio.get_event_loop() is ws_module.loop
-        started.set()
-        ws_module.loop.run_forever()
+
+        async def stay_active() -> None:
+            started.set()
+            while True:
+                await asyncio.sleep(0.01)
+
+        ws_module.loop.run_until_complete(stay_active())
+
+    async def fake_disconnect(_client: Any) -> None:
+        await asyncio.sleep(0.2)
+        disconnected.set()
 
     monkeypatch.setattr(lark.ws.Client, "start", fake_start)
+    monkeypatch.setattr(lark.ws.Client, "_disconnect", fake_disconnect)
     runner = _LarkWebSocketRunner(
         "cli_test",
         "secret",
@@ -557,6 +568,7 @@ def test_sdk_websocket_owns_a_worker_event_loop(monkeypatch: Any) -> None:
     assert observed[0] is not original_loop
     assert observed[0].is_closed()
     assert ws_module.loop is original_loop
+    assert disconnected.is_set()
 
 
 async def test_sdk_transport_builds_message_card_and_resource_requests() -> None:

@@ -403,13 +403,6 @@ class _LarkWebSocketRunner:
             self._sdk_loop = sdk_loop
             self._initialized.set()
 
-            def poll_for_stop() -> None:
-                if self._stopping:
-                    sdk_loop.stop()
-                elif not sdk_loop.is_closed():
-                    sdk_loop.call_later(0.1, poll_for_stop)
-
-            sdk_loop.call_later(0.1, poll_for_stop)
             if not self._stopping:
                 try:
                     self._client.start()
@@ -431,9 +424,11 @@ class _LarkWebSocketRunner:
                         sdk_loop.run_until_complete(
                             asyncio.wait_for(self._client._disconnect(), timeout=2.0)
                         )
-                    except Exception:
+                    except Exception as exc:
                         LOGGER.warning(
-                            "Feishu WebSocket disconnect did not complete cleanly"
+                            "Feishu WebSocket disconnect did not complete cleanly "
+                            "(%s)",
+                            type(exc).__name__,
                         )
                 sdk_loop.close()
             if ws_module.loop is sdk_loop:
