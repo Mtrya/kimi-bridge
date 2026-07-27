@@ -58,7 +58,7 @@ Commands cover:
 - tasks and tools: `/tasks`, `/skills`, `/mcp`;
 - output: `/send`, `/render-thinking`.
 
-Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact grammar, busy-session behavior, and platform media semantics.
+Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact grammar, busy-session behavior, and platform media semantics. Send `/<command> ?` for detailed in-chat usage, including sub-forms such as `/tasks show ?`.
 
 ## Architecture and security
 

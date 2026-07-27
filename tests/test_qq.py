@@ -88,6 +88,24 @@ class FakeGatewayConnect:
         return self._sockets.pop(0)
 
 
+class AutoAckGatewaySocket(FakeGatewaySocket):
+    """Script dispatch frames, then acknowledge every emitted heartbeat."""
+
+    def __init__(self, frames: list[Any]) -> None:
+        super().__init__(frames)
+        self._replies: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def recv(self) -> str:
+        if self._frames:
+            return await super().recv()
+        return json.dumps(await self._replies.get())
+
+    async def send(self, message: str) -> None:
+        await super().send(message)
+        if self.sent[-1].get("op") == 1:
+            self._replies.put_nowait({"op": 11})
+
+
 async def _wait_for(predicate: Any, timeout: float = 1.0) -> None:
     async def wait() -> None:
         while not predicate():
@@ -549,6 +567,48 @@ async def test_gateway_reconnects_when_heartbeat_is_not_acknowledged() -> None:
         "op": 6,
         "d": {"token": "QQBot fake-token", "session_id": "sess-7", "seq": 7},
     }
+
+
+async def test_gateway_heartbeats_continue_while_event_handler_is_busy() -> None:
+    socket = AutoAckGatewaySocket(
+        [
+            _hello(interval_ms=5),
+            _ready(seq=1),
+            _c2c(2, "slow attachment", "evt-1"),
+        ]
+    )
+    connect = FakeGatewayConnect([socket])
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events: list[QQGatewayEvent] = []
+
+    async def get_gateway_url() -> str:
+        return "wss://api.sgroup.qq.com/websocket/"
+
+    async def on_event(event: QQGatewayEvent) -> None:
+        entered.set()
+        await release.wait()
+        events.append(event)
+
+    client = QQGatewayClient(
+        FakeTokenProvider(),
+        get_gateway_url,
+        ws_connect=connect,
+        initial_backoff=0.01,
+        max_backoff=0.02,
+    )
+    await client.start(on_event)
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await _wait_for(
+            lambda: len([frame for frame in socket.sent if frame["op"] == 1])
+            >= 3
+        )
+        assert connect.urls == ["wss://api.sgroup.qq.com/websocket/"]
+        release.set()
+        await _wait_for(lambda: len(events) == 1)
+    finally:
+        await client.stop()
 
 
 async def test_gateway_invalid_session_reidentifies_from_scratch() -> None:
@@ -1105,6 +1165,8 @@ async def test_adapter_classifies_attachments() -> None:
 async def test_adapter_attachment_download_failure_logs_and_continues(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    signed_url = "https://qq.example/x.png?rkey=ephemeral-secret"
+
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom", request=request)
 
@@ -1128,7 +1190,8 @@ async def test_adapter_attachment_download_failure_logs_and_continues(
                     "look",
                     attachments=[
                         {
-                            "url": "https://qq.example/x.png",
+                            "url": signed_url,
+                            "filename": "x.png",
                             "content_type": "image/png",
                         }
                     ],
@@ -1144,7 +1207,16 @@ async def test_adapter_attachment_download_failure_logs_and_continues(
     message = delivered[0]
     assert message.images == ()
     assert message.files == ()
-    assert "attachment download failed" in caplog.text
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.qq"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].args == ("x.png", "ConnectError")
+    assert signed_url not in caplog.text
+    assert "ephemeral-secret" not in caplog.text
 
 
 async def test_adapter_rejects_non_https_attachment_without_fetching() -> None:
@@ -1190,12 +1262,14 @@ async def test_adapter_rejects_non_https_attachment_without_fetching() -> None:
 
     assert requests == []
     assert len(delivered) == 1
+    assert delivered[0].text == "look"
     assert delivered[0].images == ()
     assert delivered[0].files == ()
 
 
 async def test_adapter_stops_attachment_download_at_size_limit(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(qq_module, "QQ_ATTACHMENT_LIMIT_BYTES", 4)
 
@@ -1237,8 +1311,18 @@ async def test_adapter_stops_attachment_download_at_size_limit(
         await adapter.stop()
 
     assert len(delivered) == 1
+    assert delivered[0].text == "look"
     assert delivered[0].images == ()
     assert delivered[0].files == ()
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.qq"
+    ]
+    assert len(records) == 1
+    configured_reason = str(qq_module.QQAttachmentTooLarge(4))
+    assert configured_reason != str(qq_module.QQAttachmentTooLarge(5))
+    assert records[0].args[1] == configured_reason
 
 
 # --- outbound streaming --------------------------------------------------

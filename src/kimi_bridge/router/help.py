@@ -504,9 +504,9 @@ def render_help_index() -> str:
     """Render the compact `/help` index from the registry."""
     lines = ["**Commands**"]
     section = ""
-    for key, entry in COMMAND_HELP.items():
+    for entry in COMMAND_HELP.values():
         if entry.section != section:
             section = entry.section
             lines.append(f"\n**{section}**")
-        lines.append(f"- **{entry.syntax}** — {entry.summary} (details: `{key} ?`)")
+        lines.append(f"- **{entry.syntax}** — {entry.summary}")
     return "\n".join(lines)

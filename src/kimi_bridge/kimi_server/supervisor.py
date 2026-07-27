@@ -34,7 +34,10 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SERVER_URL_RE = re.compile(
     r"http://127\.0\.0\.1:(?P<port>[0-9]{1,5})/#token=(?P<token>[A-Za-z0-9_-]+)"
 )
-_TOKEN_RE = re.compile(r"(?<=#token=)[A-Za-z0-9_-]+")
+_TOKEN_RE = re.compile(
+    r"(?P<prefix>#token=|\bToken:\s*)(?P<secret>[A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 _AUTH_ERROR_MARKERS = (
     "auth.login_required",
     "authentication required",
@@ -59,7 +62,11 @@ def parse_server_startup_line(line: str) -> tuple[int, str] | None:
 
 
 def _redact_tokens(text: str) -> str:
-    return _TOKEN_RE.sub("<redacted>", _ANSI_ESCAPE_RE.sub("", text))
+    plain_text = _ANSI_ESCAPE_RE.sub("", text)
+    return _TOKEN_RE.sub(
+        lambda match: f"{match.group('prefix')}<redacted>",
+        plain_text,
+    )
 
 
 def _pick_free_port() -> int:

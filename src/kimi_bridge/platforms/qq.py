@@ -130,6 +130,14 @@ class QQTransportError(QQError):
 class QQAttachmentTooLarge(QQError):
     """A QQ inbound attachment exceeds the bridge's download limit."""
 
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = limit_bytes
+        if limit_bytes % (1024 * 1024) == 0:
+            limit = f"{limit_bytes // (1024 * 1024)} MB"
+        else:
+            limit = f"{limit_bytes} bytes"
+        super().__init__(f"QQ attachment exceeds the {limit} download limit")
+
 
 class QQAPIError(QQError):
     """QQ returned a structured API failure."""
@@ -579,6 +587,8 @@ class QQGatewayClient:
         self._backoff = initial_backoff
         self._on_event: GatewayEventHandler | None = None
         self._task: asyncio.Task[None] | None = None
+        self._event_queue: asyncio.Queue[QQGatewayEvent] | None = None
+        self._event_worker: asyncio.Task[None] | None = None
         self._closed = False
         self._session_id: str | None = None
         self._last_seq: int | None = None
@@ -616,22 +626,52 @@ class QQGatewayClient:
                 await task
 
     async def _run(self) -> None:
-        while not self._closed:
+        self._event_queue = asyncio.Queue()
+        self._event_worker = asyncio.create_task(
+            self._dispatch_events(),
+            name="qq-gateway-event-worker",
+        )
+        try:
+            while not self._closed:
+                try:
+                    url = await self._get_gateway_url()
+                    async with self._ws_connect(url) as ws:
+                        await self._run_connection(ws)
+                except asyncio.CancelledError:
+                    raise
+                except (ConnectionClosed, OSError, QQTransportError) as exc:
+                    LOGGER.warning("QQ gateway connection lost: %s", exc)
+                if self._closed:
+                    return
+                delay = self._backoff
+                self._backoff = min(self._backoff * 2, self._max_backoff)
+                await self._sleep(delay)
+        finally:
+            event_worker = self._event_worker
+            if event_worker is not None and not event_worker.done():
+                event_worker.cancel()
+            if event_worker is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await event_worker
+            self._event_worker = None
+            self._event_queue = None
+
+    async def _dispatch_events(self) -> None:
+        queue = self._event_queue
+        on_event = self._on_event
+        assert queue is not None
+        assert on_event is not None
+        while True:
+            event = await queue.get()
             try:
-                url = await self._get_gateway_url()
-                async with self._ws_connect(url) as ws:
-                    await self._run_connection(ws)
-            except asyncio.CancelledError:
-                raise
-            except (ConnectionClosed, OSError, QQTransportError) as exc:
-                LOGGER.warning("QQ gateway connection lost: %s", exc)
-            if self._closed:
-                return
-            delay = self._backoff
-            self._backoff = min(self._backoff * 2, self._max_backoff)
-            await self._sleep(delay)
+                await on_event(event)
+            finally:
+                queue.task_done()
 
     async def _run_connection(self, ws: QQGatewaySocket) -> None:
+        event_worker = self._event_worker
+        if event_worker is None:
+            raise RuntimeError("QQ gateway event worker is not running")
         heartbeat_interval = await self._expect_hello(ws)
         if self._session_id is not None and self._last_seq is not None:
             await self._send_resume(ws)
@@ -654,9 +694,25 @@ class QQGatewayClient:
                     ws.recv(), name="qq-gateway-receive"
                 )
                 done, _pending = await asyncio.wait(
-                    {receive, heartbeat},
+                    {receive, heartbeat, event_worker},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if event_worker in done:
+                    if not receive.done():
+                        receive.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await receive
+                    try:
+                        event_worker.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as exc:
+                        raise RuntimeError(
+                            "QQ gateway event handler failed"
+                        ) from exc
+                    raise RuntimeError(
+                        "QQ gateway event worker stopped unexpectedly"
+                    )
                 if heartbeat in done:
                     if not receive.done():
                         receive.cancel()
@@ -722,7 +778,10 @@ class QQGatewayClient:
         else:
             self._last_event_id = event_id
         assert self._on_event is not None
-        await self._on_event(
+        queue = self._event_queue
+        if queue is None:
+            raise RuntimeError("QQ gateway event queue is not available")
+        queue.put_nowait(
             QQGatewayEvent(
                 type=event_type, data=data, seq=seq, event_id=event_id
             )
@@ -1457,7 +1516,16 @@ class QQAdapter:
             try:
                 data = await self._download_attachment(url)
             except (httpx.HTTPError, QQAttachmentTooLarge) as exc:
-                LOGGER.warning("QQ attachment download failed for %s: %s", url, exc)
+                reason = (
+                    str(exc)
+                    if isinstance(exc, QQAttachmentTooLarge)
+                    else type(exc).__name__
+                )
+                LOGGER.warning(
+                    "QQ attachment %r download failed (%s)",
+                    name,
+                    reason,
+                )
                 continue
             if media_type.startswith("image/"):
                 images.append(InboundImage(data=data, media_type=media_type))
@@ -1478,9 +1546,7 @@ class QQAdapter:
             async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
                 received += len(chunk)
                 if received > QQ_ATTACHMENT_LIMIT_BYTES:
-                    raise QQAttachmentTooLarge(
-                        "QQ attachment exceeds the 20 MB download limit"
-                    )
+                    raise QQAttachmentTooLarge(QQ_ATTACHMENT_LIMIT_BYTES)
                 chunks.append(chunk)
         return b"".join(chunks)
 

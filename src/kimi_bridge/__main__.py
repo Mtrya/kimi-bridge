@@ -27,12 +27,26 @@ from .router import ChatRouter
 from .state import StateStore
 
 
-async def run(config_path: str | Path) -> None:
-    config = load_config(config_path)
+_CREDENTIAL_BEARING_LIBRARY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "websockets",
+    "websockets.client",
+)
+
+
+def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
-        level=config.log_level,
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    for logger_name in _CREDENTIAL_BEARING_LIBRARY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+async def run(config_path: str | Path) -> None:
+    config = load_config(config_path)
+    _configure_logging(config.log_level)
     adapter = _build_adapter(config)
 
     config.default_workspace.mkdir(parents=True, exist_ok=True)
@@ -122,9 +136,6 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             config.feishu.app_secret,
             config.feishu.allowed_users,
         )
-
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     if config.platform == "qq":
         if not config.qq.app_id or not config.qq.app_secret:
