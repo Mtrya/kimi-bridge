@@ -58,8 +58,8 @@ Verification gate: `kimi doctor config` exits 0. If the bridge later fails at st
 
 Do these after §PL, before credentials:
 
-- **Telegram**: probe `https://api.telegram.org` (e.g. `curl -fsS -m 10 https://api.telegram.org`). Unreachable → *unsupported*: Telegram is blocked from this network; the user needs a different network or a different platform.
-- **QQ**: REST calls require this host's public egress IP on the bot's console IP whitelist. Determine it (`curl -fsS ifconfig.me`) and hand it to the user for the console step in §CQ. Warn: on a dynamic-IP home connection this whitelist entry will rot.
+- **Telegram**: probe `https://api.telegram.org` with a bounded request, e.g. `curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://api.telegram.org`. Any HTTP status at all (even 4xx) means the network path works. Only a connection, DNS, or TLS failure means *unsupported*: Telegram is blocked from this network; the user needs a different network or a different platform.
+- **QQ**: REST calls require this host's public egress IP on the bot's console IP whitelist. Determine it with a bounded HTTPS request (`curl -fsS -m 10 https://ifconfig.me`) and hand it to the user for the console step in §CQ. Warn: on a dynamic-IP home connection this whitelist entry will rot.
 - **Feishu/Lark**: ask whether the tenant is Feishu (feishu.cn) or Lark international (larksuite.com) — consoles and API hosts differ. The bridge requires the WebSocket long-connection event mode; see §CF for the Lark caveat.
 
 ## I — Install
@@ -82,7 +82,7 @@ The maintained mapping of bridge releases to tested Kimi Code versions lives at 
 
 ### I3 — Downgrade abort leaf
 
-If the user downgraded kimi-bridge after a newer version had run, startup fails with `unsupported bridge state format` — the newer `state.json` schema is intentionally not downgradable. *Abort* options: restore a backup of `~/.kimi-bridge/state.json`, or delete it (loses session bindings and per-conversation settings; credentials in `config.toml` are untouched). Then re-run the matching bridge version's doctor.
+If the user downgraded kimi-bridge after a newer version had run, startup fails with `unsupported bridge state format` — the newer `state.json` schema is intentionally not downgradable. *Abort* options, using the active instance's configured `state_path` (default `~/.kimi-bridge/state.json`; multi-instance setups have one per config): restore a backup of that file, or delete it (loses session bindings and per-conversation settings; credentials in `config.toml` are untouched). Then re-run doctor for the matching bridge version and installation (uv or pipx).
 
 ## PL — Platform choice
 
@@ -149,7 +149,7 @@ Experimental adapter — repeat the not-live-validated caveat once, here.
 
 ## D — Doctor reference
 
-`kimi-bridge doctor` validates without starting services. Branch on `ERROR <check-name>:` prefixes — never on the exit code alone (exit 1 just means "some check errored").
+`kimi-bridge doctor` validates without starting services. Branch on check names paired with statuses — never on the exit code alone (exit 1 just means "some check errored"). Parse output whitespace-tolerantly: statuses are padded (e.g. `ERROR  config:` with two spaces), and a check name may appear more than once (a `config` WARN for unknown keys follows the `config` OK). Any `ERROR` entry is blocking.
 
 Checks, in emitted order: `config`, `config permissions`, `adapter`, `workspace`, `state`, `kimi`, `kimi config`. Statuses: `OK`, `WARN`, `ERROR`, `SKIP`. Exit code is 1 if and only if at least one `ERROR` exists; `WARN` and `SKIP` never fail the run.
 
@@ -195,4 +195,4 @@ One question: does the user want kimi-bridge to start on boot?
 
 ### X2 — Rollback on abort
 
-Artifacts a setup may have created, in removal order: systemd unit (disable and remove), `uv tool uninstall kimi-bridge`, `~/.kimi-bridge/state.json` and `~/.kimi-bridge/workspace/`, and `~/.kimi-bridge/config.toml`. **Never delete the config file without explicit user confirmation — it holds the credentials.** Platform-side leftovers (Feishu app versions, QQ sandbox bots, Telegram bots) are removed in their respective consoles; point the user at them.
+Artifacts a setup may have created, in removal order: systemd unit (disable and remove), the bridge installation (via whichever tool manager installed it — `uv tool uninstall kimi-bridge` or `pipx uninstall kimi-bridge`), the configured `state_path` and `default_workspace` (defaults `~/.kimi-bridge/state.json` and `~/.kimi-bridge/workspace/`; multi-instance setups have one set per config), and the config file (default `~/.kimi-bridge/config.toml`). **Never delete the config file without explicit user confirmation — it holds the credentials.** Report exactly which paths were removed. Platform-side leftovers (Feishu app versions, QQ sandbox bots, Telegram bots) are removed in their respective consoles; point the user at them.

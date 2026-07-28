@@ -274,7 +274,7 @@ def _run_compat(kimi_code: str | None) -> int:
     )
     version = kimi_code if kimi_code is not None else _probe_kimi_code_version()
     if version is None:
-        print("kimi executable not found on PATH; full compatibility map:")
+        print("could not detect a Kimi Code version; full compatibility map:")
         for entry in COMPATIBILITY_MAP:
             print(f"  kimi-bridge {entry.bridge}: {', '.join(entry.kimi_code)}")
         return 0
@@ -298,6 +298,14 @@ def _run_compat(kimi_code: str | None) -> int:
         print(
             f"kimi-code {version} is untested: older than every Kimi Code "
             "version tested by any kimi-bridge release"
+        )
+        return 1
+    if verdict.support is BridgeSupport.UNTESTED_WITHIN_TESTED_RANGE:
+        assert verdict.tested_range is not None
+        low, high = verdict.tested_range
+        print(
+            f"kimi-code {version} is untested: not tested by any kimi-bridge "
+            f"release despite falling inside the tested range {low}–{high}"
         )
         return 1
     print(

@@ -329,6 +329,16 @@ def test_compat_rejects_untested_versions_in_both_directions(
     assert "untested: older than every" in capsys.readouterr().out
 
 
+def test_compat_rejects_an_untested_version_inside_the_tested_range(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main_module.main(["compat", "--kimi-code", "0.28.2"]) == 1
+    assert (
+        "untested: not tested by any kimi-bridge release despite falling "
+        "inside the tested range 0.28.1–0.29.1"
+    ) in capsys.readouterr().out
+
+
 def test_compat_rejects_a_malformed_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -345,7 +355,7 @@ def test_compat_prints_the_map_when_kimi_is_not_detected(
     assert main_module.main(["compat"]) == 0
     output = capsys.readouterr().out
     latest = main_module.COMPATIBILITY_MAP[-1]
-    assert "kimi executable not found on PATH" in output
+    assert "could not detect a Kimi Code version" in output
     assert "kimi-bridge 0.1.0: 0.28.1, 0.29.0" in output
     assert f"kimi-bridge {latest.bridge}: {', '.join(latest.kimi_code)}" in output
 

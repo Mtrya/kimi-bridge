@@ -73,6 +73,7 @@ class BridgeSupport(str, Enum):
     SUPPORTED_BY_OTHER_RELEASES = "supported-by-other-releases"
     UNTESTED_NEWER_THAN_ALL = "untested-newer-than-all"
     UNTESTED_OLDER_THAN_ALL = "untested-older-than-all"
+    UNTESTED_WITHIN_TESTED_RANGE = "untested-within-tested-range"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +82,7 @@ class BridgeCompatibility:
 
     support: BridgeSupport
     releases: tuple[str, ...] = ()
+    tested_range: tuple[str, str] | None = None
 
 
 def _parse_compatibility_map(payload: object) -> tuple[CompatibilityMapEntry, ...]:
@@ -258,14 +260,19 @@ def classify_bridge_compatibility(
         return BridgeCompatibility(
             BridgeSupport.SUPPORTED_BY_OTHER_RELEASES, others
         )
-    tested_keys = [
-        kimi_code_version_sort_key(version)
-        for entry in entries
-        for version in entry.kimi_code
-    ]
-    if kimi_code_version_sort_key(normalized) < min(tested_keys):
+    tested = sorted(
+        {version for entry in entries for version in entry.kimi_code},
+        key=kimi_code_version_sort_key,
+    )
+    key = kimi_code_version_sort_key(normalized)
+    if key < kimi_code_version_sort_key(tested[0]):
         return BridgeCompatibility(BridgeSupport.UNTESTED_OLDER_THAN_ALL)
-    return BridgeCompatibility(BridgeSupport.UNTESTED_NEWER_THAN_ALL)
+    if key > kimi_code_version_sort_key(tested[-1]):
+        return BridgeCompatibility(BridgeSupport.UNTESTED_NEWER_THAN_ALL)
+    return BridgeCompatibility(
+        BridgeSupport.UNTESTED_WITHIN_TESTED_RANGE,
+        tested_range=(tested[0], tested[-1]),
+    )
 
 
 def unknown_version_warning(version: str) -> str:

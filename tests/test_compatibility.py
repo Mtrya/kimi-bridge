@@ -175,7 +175,7 @@ def test_compatibility_map_loader_rejects_invalid_payloads(
 
 _FAKE_RELEASES = (
     CompatibilityMapEntry("0.1.0", ("0.28.0", "0.29.0")),
-    CompatibilityMapEntry("0.2.0", ("0.29.0",)),
+    CompatibilityMapEntry("0.2.0", ("0.29.0", "0.29.1")),
 )
 
 
@@ -199,6 +199,27 @@ def test_classifier_distinguishes_untested_direction() -> None:
 
     assert newer.support is BridgeSupport.UNTESTED_NEWER_THAN_ALL
     assert older.support is BridgeSupport.UNTESTED_OLDER_THAN_ALL
+
+
+def test_classifier_marks_untested_versions_inside_the_tested_range() -> None:
+    verdict = classify_bridge_compatibility("0.28.1", releases=_FAKE_RELEASES)
+
+    assert verdict.support is BridgeSupport.UNTESTED_WITHIN_TESTED_RANGE
+    assert verdict.tested_range == ("0.28.0", "0.29.1")
+
+
+def test_classifier_requires_a_non_empty_map() -> None:
+    with pytest.raises(RuntimeError, match="no releases"):
+        classify_bridge_compatibility("0.29.0", releases=())
+
+
+def test_classifier_honors_the_current_bridge_override() -> None:
+    verdict = classify_bridge_compatibility(
+        "0.29.1", releases=_FAKE_RELEASES, current_bridge="0.1.0"
+    )
+
+    assert verdict.support is BridgeSupport.SUPPORTED_BY_OTHER_RELEASES
+    assert verdict.releases == ("0.2.0",)
 
 
 def test_classifier_rejects_malformed_versions() -> None:

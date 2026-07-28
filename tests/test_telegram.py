@@ -639,6 +639,39 @@ async def test_non_allowlisted_sender_is_logged_with_user_id(
     assert "[telegram].allowed_users" in warnings[0].getMessage()
 
 
+async def test_non_allowlisted_callback_query_is_logged_with_user_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = FakeTelegramAPI()
+    adapter = await _start_adapter(api)
+    conversation = ConversationRef("telegram", "999", "111")
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.telegram")
+    try:
+        message = await adapter.present_interaction(conversation, _approval_prompt())
+        callback_data = _button_data(_latest_markup(api), "Approve")
+        await adapter.handle_update(
+            _callback_update(
+                1,
+                data=callback_data,
+                message_id=int(message.message_id),
+                user_id=222,
+                chat_id=111,
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.telegram"
+        and "non-allowlisted Telegram user" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "callback query" in warnings[0]
+    assert "(user_id=222)" in warnings[0]
+
+
 async def test_send_and_edit_are_plain_persistent_messages() -> None:
     api = FakeTelegramAPI()
     adapter = await _start_adapter(api)
