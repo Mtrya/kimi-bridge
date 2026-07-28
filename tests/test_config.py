@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -14,7 +15,20 @@ from kimi_bridge.config import (
     TelegramConfig,
     load_config,
     resolve_config_path,
+    unknown_config_keys,
 )
+
+
+def test_unknown_config_keys_accepts_generic_mappings() -> None:
+    raw = MappingProxyType(
+        {
+            "platfrom": "feishu",
+            "feishu": MappingProxyType({"app_id": "id", "ap_id": "typo"}),
+            "kimi_server": "not-a-table",
+        }
+    )
+
+    assert unknown_config_keys(raw) == ("feishu.ap_id", "platfrom")
 
 
 def test_missing_config_uses_defaults(tmp_path: Path) -> None:

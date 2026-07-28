@@ -23,7 +23,12 @@ from .compatibility import (
     legacy_product_message,
     unknown_version_warning,
 )
-from .config import DEFAULT_CONFIG_PATH, Config, load_config, unknown_config_keys
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    Config,
+    _load_config_from_raw,
+    unknown_config_keys,
+)
 from .state import StateStore
 
 
@@ -160,7 +165,9 @@ def _check_config(
 
     checks.append(_check_config_permissions(path, platform_name))
     try:
-        config = load_config(path)
+        with path.open("rb") as config_file:
+            raw = tomllib.load(config_file)
+        config = _load_config_from_raw(raw)
     except (OSError, TypeError, ValueError) as exc:
         checks.insert(
             len(checks) - 1,
@@ -176,8 +183,6 @@ def _check_config(
         len(checks) - 1,
         DoctorCheck("config", CheckStatus.OK, f"loaded selected {config.platform} adapter"),
     )
-    with path.open("rb") as config_file:
-        raw = tomllib.load(config_file)
     unknown = unknown_config_keys(raw)
     if unknown:
         checks.insert(
