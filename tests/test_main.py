@@ -10,6 +10,7 @@ import pytest
 
 from kimi_bridge import __main__ as main_module
 from kimi_bridge import doctor as doctor_module
+from kimi_bridge.compatibility import COMPATIBILITY_MAP, kimi_code_version_sort_key
 from kimi_bridge.config import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
@@ -332,10 +333,14 @@ def test_compat_rejects_untested_versions_in_both_directions(
 def test_compat_rejects_an_untested_version_inside_the_tested_range(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    tested = sorted(
+        {version for entry in COMPATIBILITY_MAP for version in entry.kimi_code},
+        key=kimi_code_version_sort_key,
+    )
     assert main_module.main(["compat", "--kimi-code", "0.28.2"]) == 1
     assert (
         "untested: not tested by any kimi-bridge release despite falling "
-        "inside the tested range 0.28.1–0.29.1"
+        f"inside the tested range {tested[0]}–{tested[-1]}"
     ) in capsys.readouterr().out
 
 
