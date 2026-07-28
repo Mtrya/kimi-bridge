@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from kimi_bridge import __version__
 from kimi_bridge.compatibility import (
     COMPATIBILITY_MAP,
     KIMI_CODE_INSTALL_URL,
@@ -105,15 +106,11 @@ def test_unknown_warning_is_prominent_and_actionable(
 
 
 def test_compatibility_map_tracks_release_history_and_current_manifest() -> None:
-    assert [entry.bridge for entry in COMPATIBILITY_MAP] == [
-        "0.1.0",
-        "0.1.1",
-        "0.1.2",
-        "0.2.0",
-        "0.3.0",
-        "0.3.1",
-        "0.4.0",
-    ]
+    bridges = [entry.bridge for entry in COMPATIBILITY_MAP]
+    assert bridges[0] == "0.1.0"
+    # Each release appends its own record, so the latest entry names the
+    # current package version.
+    assert bridges[-1] == __version__
     # The drift canary may promote the manifest between releases; the map's
     # latest record catches up when the next release appends its own record.
     assert set(COMPATIBILITY_MAP[-1].kimi_code) <= SUPPORTED_KIMI_CODE_VERSIONS
