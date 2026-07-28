@@ -1046,6 +1046,7 @@ class TelegramAdapter:
     ) -> tuple[ConversationRef, ActorRef] | None:
         if self._bot_id is None:
             raise RuntimeError("Telegram adapter has not been started")
+        event_kind = "callback query" if sender is not None else "message"
         chat = message.get("chat")
         sender = sender if sender is not None else message.get("from")
         if not isinstance(chat, dict) or not isinstance(sender, dict):
@@ -1066,6 +1067,12 @@ class TelegramAdapter:
         ):
             return None
         if user_id not in self._allowed_users:
+            LOGGER.warning(
+                "ignored a %s from a non-allowlisted Telegram user "
+                "(user_id=%r); add it to [telegram].allowed_users",
+                event_kind,
+                user_id,
+            )
             return None
         name_parts = [
             value.strip()

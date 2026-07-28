@@ -29,25 +29,18 @@ Only one adapter runs in each bridge process. Feishu uses the official `lark-oap
 
 ## Quick start
 
-Install and authenticate official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started), then install [uv](https://docs.astral.sh/uv/getting-started/installation/) and kimi-bridge:
+The easiest path: open any CLI agent and say — *"Read https://github.com/Mtrya/kimi-bridge/blob/main/INSTALL_AI.md and help me configure kimi-bridge."* The agent interviews you and runs the setup end to end.
+
+Manual skeleton — requires authenticated [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started) and [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```bash
-uv tool install 'kimi-bridge'
+uv tool install 'kimi-bridge'     # install
+# create ~/.kimi-bridge/config.toml for one adapter, chmod 600
+kimi-bridge doctor                # validate without starting anything
+kimi-bridge                       # run
 ```
 
-Create `~/.kimi-bridge/config.toml` for one adapter, protect it with `chmod 600`, and validate the installation without starting the server or connecting to chat:
-
-```bash
-kimi-bridge doctor
-```
-
-Then run:
-
-```bash
-kimi-bridge
-```
-
-Start with the [installation runbook](INSTALL.md), especially when asking a coding agent to configure the bridge. The [configuration reference](docs/CONFIGURATION.md) contains complete Feishu, QQ, and Telegram examples.
+Full walkthrough in [INSTALL.md](INSTALL.md); complete adapter examples in the [configuration reference](docs/CONFIGURATION.md).
 
 ## Commands
 
@@ -72,15 +65,12 @@ Feishu, QQ, or experimental Telegram
   supervised local `kimi web`
 ```
 
-The Kimi client owns all REST, WebSocket, version, and process-lifecycle details. The router owns platform-neutral session and interaction behavior. Each adapter owns its native transport and UI payloads. See [Architecture](docs/ARCHITECTURE.md) for the full boundary.
-
-The managed Kimi server binds to loopback and uses its generated bearer token. Chat access is restricted by the selected adapter's allowlist, but kimi-bridge is designed for one trusted operator, not mutually untrusted tenants. A permitted Kimi agent can read, write, and execute within the authority of the host account, so protect both the host and chat credentials.
-
-Tested Kimi Code versions are recorded in a packaged compatibility manifest. An unlisted official version emits a loud warning and is attempted against the live contract; legacy Python `kimi-cli`, an unrecognized product, or an executable/server version mismatch fails. Run `kimi-bridge doctor` after every Kimi or bridge upgrade.
+The managed Kimi server binds to loopback with a generated bearer token, and chat access is restricted by the adapter's allowlist. kimi-bridge is designed for one trusted operator, not mutually untrusted tenants: a permitted Kimi agent can read, write, and execute with the host account's authority, so protect both the host and chat credentials. Component boundaries and the Kimi Code compatibility policy (`kimi-bridge compat`) live in [Architecture](docs/ARCHITECTURE.md).
 
 ## Documentation
 
 - [Install and operate](INSTALL.md)
+- [Agent-driven setup](INSTALL_AI.md)
 - [Configure](docs/CONFIGURATION.md)
 - [Commands and interactions](docs/COMMANDS.md)
 - [Architecture and compatibility](docs/ARCHITECTURE.md)

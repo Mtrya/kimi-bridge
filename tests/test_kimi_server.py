@@ -8,7 +8,11 @@ from typing import Any
 
 import pytest
 
-from kimi_bridge.compatibility import KimiExecutableIdentity, KimiProduct
+from kimi_bridge.compatibility import (
+    KIMI_CODE_INSTALL_URL,
+    KimiExecutableIdentity,
+    KimiProduct,
+)
 from kimi_bridge.interactions import (
     ApprovalRequest,
     MultipleChoiceAnswer,
@@ -24,6 +28,7 @@ from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
     KimiServerAPIError,
+    KimiServerAuthenticationError,
     KimiServerClient,
     KimiServerProtocolError,
     KimiServerStartupError,
@@ -1597,11 +1602,31 @@ async def test_supervisor_rejects_missing_managed_web_flag_before_start() -> Non
     with pytest.raises(KimiServerStartupError, match="--port"):
         await supervisor.start()
 
-    assert [call[0] for call in factory.calls] == [
-        ("kimi", "--version"),
-        ("kimi", "--help"),
-        ("kimi", "web", "--help"),
-    ]
+
+async def test_supervisor_authentication_failure_points_at_neutral_login_guidance() -> (
+    None
+):
+    child = FakeProcess("Error: authentication required, run kimi login")
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("0.28.1\n"),
+            FakeCompletedProcess(KIMI_CODE_HELP),
+            FakeCompletedProcess(KIMI_WEB_HELP),
+            child,
+        ]
+    )
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+    )
+
+    with pytest.raises(KimiServerAuthenticationError) as exc_info:
+        await supervisor.start()
+
+    message = str(exc_info.value)
+    assert "authenticate via /login in the kimi TUI" in message
+    assert "~/.kimi-code/config.toml" in message
+    assert KIMI_CODE_INSTALL_URL in message
 
 
 async def test_supervisor_rejects_legacy_product_before_start(

@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias, cast
@@ -21,6 +22,41 @@ DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 PlatformName: TypeAlias = Literal["feishu", "telegram", "qq"]
 _PLATFORMS = {"feishu", "telegram", "qq"}
+_KNOWN_SUB_KEYS = {
+    "kimi_server": frozenset({"port"}),
+    "feishu": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "telegram": frozenset({"bot_token", "allowed_users"}),
+    "qq": frozenset({"app_id", "app_secret", "allowed_users"}),
+}
+_KNOWN_TOP_LEVEL_KEYS = frozenset(
+    {
+        "platform",
+        "log_level",
+        "default_workspace",
+        "state_path",
+        "edit_throttle_seconds",
+        "max_output_seconds",
+        "interaction_timeout_seconds",
+        "inbox_subdir",
+        "session_list_limit",
+        *_KNOWN_SUB_KEYS,
+    }
+)
+
+
+def unknown_config_keys(raw: Mapping[str, object]) -> tuple[str, ...]:
+    """Return dotted names of config keys the loader silently ignores."""
+
+    unknown: list[str] = []
+    for key, value in raw.items():
+        if key not in _KNOWN_TOP_LEVEL_KEYS:
+            unknown.append(key)
+            continue
+        sub_keys = _KNOWN_SUB_KEYS.get(key)
+        if sub_keys is None or not isinstance(value, Mapping):
+            continue
+        unknown.extend(f"{key}.{sub}" for sub in value if sub not in sub_keys)
+    return tuple(sorted(unknown))
 
 
 def resolve_config_path(explicit: str | Path | None = None) -> Path:
@@ -125,7 +161,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
 
     with config_path.open("rb") as config_file:
         raw = tomllib.load(config_file)
+    logging.getLogger(__name__).debug("Loaded configuration from %s", config_path)
+    return _load_config_from_raw(raw)
 
+
+def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
     platform = raw.get("platform", "feishu")
     if not isinstance(platform, str) or platform not in _PLATFORMS:
         choices = ", ".join(sorted(_PLATFORMS))
@@ -256,7 +296,6 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         raise TypeError("qq.allowed_users must contain non-empty strings")
     qq_allowed_users = frozenset(qq_allowed_raw)
 
-    logging.getLogger(__name__).debug("Loaded configuration from %s", config_path)
     return Config(
         platform=cast(PlatformName, platform),
         log_level=log_level,

@@ -13,6 +13,7 @@ KIMI_CODE_INSTALL_URL = (
     "https://moonshotai.github.io/kimi-code/en/guides/getting-started"
 )
 SUPPORTED_VERSION_MANIFEST_RESOURCE = "supported-kimi-code-versions.json"
+COMPATIBILITY_MAP_RESOURCE = "compatibility-map.json"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _VERSION_PATTERN = (
@@ -55,6 +56,81 @@ def _load_supported_versions() -> frozenset[str]:
             "Kimi compatibility manifest versions must be unique and sorted"
         )
     return frozenset(normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class CompatibilityMapEntry:
+    """One bridge release and the Kimi Code versions it was tested with."""
+
+    bridge: str
+    kimi_code: tuple[str, ...]
+
+
+class BridgeSupport(str, Enum):
+    """How one Kimi Code version relates to the bridge release history."""
+
+    SUPPORTED_BY_CURRENT_BRIDGE = "supported-by-current-bridge"
+    SUPPORTED_BY_OTHER_RELEASES = "supported-by-other-releases"
+    UNTESTED_NEWER_THAN_ALL = "untested-newer-than-all"
+    UNTESTED_OLDER_THAN_ALL = "untested-older-than-all"
+    UNTESTED_WITHIN_TESTED_RANGE = "untested-within-tested-range"
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeCompatibility:
+    """Verdict for one Kimi Code version against the compatibility map."""
+
+    support: BridgeSupport
+    releases: tuple[str, ...] = ()
+    tested_range: tuple[str, str] | None = None
+
+
+def _parse_compatibility_map(payload: object) -> tuple[CompatibilityMapEntry, ...]:
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RuntimeError("unsupported Kimi compatibility map version")
+    releases = payload.get("releases")
+    if not isinstance(releases, list) or not releases:
+        raise RuntimeError("Kimi compatibility map has no releases")
+    entries: list[CompatibilityMapEntry] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            raise RuntimeError("Kimi compatibility map releases must be objects")
+        bridge_raw = release.get("bridge")
+        kimi_raw = release.get("kimi_code")
+        if (
+            not isinstance(bridge_raw, str)
+            or not isinstance(kimi_raw, list)
+            or not kimi_raw
+        ):
+            raise RuntimeError(
+                "Kimi compatibility map releases must name a bridge version "
+                "and a non-empty Kimi Code version list"
+            )
+        try:
+            bridge = normalize_kimi_code_version(bridge_raw)
+            kimi_code = tuple(normalize_kimi_code_version(item) for item in kimi_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Kimi compatibility map contains a malformed version"
+            ) from exc
+        if list(kimi_code) != sorted(set(kimi_code), key=kimi_code_version_sort_key):
+            raise RuntimeError(
+                "Kimi compatibility map version lists must be unique and sorted"
+            )
+        entries.append(CompatibilityMapEntry(bridge=bridge, kimi_code=kimi_code))
+    bridges = [entry.bridge for entry in entries]
+    if bridges != sorted(set(bridges), key=kimi_code_version_sort_key):
+        raise RuntimeError(
+            "Kimi compatibility map releases must be unique and sorted"
+        )
+    return tuple(entries)
+
+
+def _load_compatibility_map() -> tuple[CompatibilityMapEntry, ...]:
+    raw = files("kimi_bridge").joinpath(COMPATIBILITY_MAP_RESOURCE).read_text(
+        encoding="utf-8"
+    )
+    return _parse_compatibility_map(json.loads(raw))
 
 
 class KimiProduct(str, Enum):
@@ -155,6 +231,50 @@ def classify_kimi_code_version(version: str) -> VersionSupport:
     return VersionSupport.UNKNOWN
 
 
+def classify_bridge_compatibility(
+    kimi_version: str,
+    *,
+    releases: tuple[CompatibilityMapEntry, ...] | None = None,
+    current_bridge: str | None = None,
+) -> BridgeCompatibility:
+    """Classify one Kimi Code version against the bridge release history."""
+
+    entries = COMPATIBILITY_MAP if releases is None else releases
+    if not entries:
+        raise RuntimeError("Kimi compatibility map has no releases")
+    normalized = normalize_kimi_code_version(kimi_version)
+    current = entries[-1]
+    if current_bridge is not None:
+        current = next(
+            (entry for entry in entries if entry.bridge == current_bridge),
+            entries[-1],
+        )
+    if normalized in current.kimi_code:
+        return BridgeCompatibility(BridgeSupport.SUPPORTED_BY_CURRENT_BRIDGE)
+    others = tuple(
+        entry.bridge
+        for entry in entries
+        if entry is not current and normalized in entry.kimi_code
+    )
+    if others:
+        return BridgeCompatibility(
+            BridgeSupport.SUPPORTED_BY_OTHER_RELEASES, others
+        )
+    tested = sorted(
+        {version for entry in entries for version in entry.kimi_code},
+        key=kimi_code_version_sort_key,
+    )
+    key = kimi_code_version_sort_key(normalized)
+    if key < kimi_code_version_sort_key(tested[0]):
+        return BridgeCompatibility(BridgeSupport.UNTESTED_OLDER_THAN_ALL)
+    if key > kimi_code_version_sort_key(tested[-1]):
+        return BridgeCompatibility(BridgeSupport.UNTESTED_NEWER_THAN_ALL)
+    return BridgeCompatibility(
+        BridgeSupport.UNTESTED_WITHIN_TESTED_RANGE,
+        tested_range=(tested[0], tested[-1]),
+    )
+
+
 def unknown_version_warning(version: str) -> str:
     """Return the common actionable warning for untested official versions."""
 
@@ -185,3 +305,4 @@ def _has_markers(text: str, markers: tuple[str, ...]) -> bool:
 
 
 SUPPORTED_KIMI_CODE_VERSIONS = _load_supported_versions()
+COMPATIBILITY_MAP = _load_compatibility_map()

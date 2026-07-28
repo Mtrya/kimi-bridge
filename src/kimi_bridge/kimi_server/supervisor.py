@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from ..compatibility import (
+    KIMI_CODE_INSTALL_URL,
     KimiExecutableIdentity,
     KimiProduct,
     KimiProductFingerprintError,
@@ -423,7 +424,10 @@ class KimiServerSupervisor:
             lowered = safe_line.lower()
             if any(marker in lowered for marker in _AUTH_ERROR_MARKERS):
                 raise KimiServerAuthenticationError(
-                    "kimi-code is not authenticated; run 'kimi login' and retry"
+                    "kimi-code is not authenticated; authenticate via /login in "
+                    "the kimi TUI or configure a provider in "
+                    "~/.kimi-code/config.toml — see "
+                    f"{KIMI_CODE_INSTALL_URL}"
                 )
 
             credentials = parse_server_startup_line(line)
