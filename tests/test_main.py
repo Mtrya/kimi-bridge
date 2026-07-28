@@ -18,6 +18,7 @@ from kimi_bridge.config import (
     QQConfig,
     TelegramConfig,
 )
+from kimi_bridge.kimi_server import KimiServerAuthenticationError
 
 
 class _Adapter:
@@ -260,3 +261,122 @@ def test_config_argument_reaches_runtime(
     custom = tmp_path / "custom.toml"
     assert main_module.main(["--config", str(custom)]) == 0
     assert received == [custom]
+
+
+def test_startup_authentication_failure_is_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def failing_run(_config_path: object) -> None:
+        raise KimiServerAuthenticationError(
+            "kimi-code is not authenticated; authenticate via /login"
+        )
+
+    monkeypatch.setattr(main_module, "run", failing_run)
+
+    assert main_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip().splitlines() == [
+        "kimi-bridge: kimi-code is not authenticated; authenticate via /login"
+    ]
+
+
+def test_startup_state_error_is_rendered_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def failing_run(_config_path: object) -> None:
+        raise ValueError("unsupported bridge state format")
+
+    monkeypatch.setattr(main_module, "run", failing_run)
+
+    assert main_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "kimi-bridge: unsupported bridge state format"
+    assert "Traceback" not in captured.err
+
+
+def test_startup_keyboard_interrupt_still_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def interrupted_run(_config_path: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_module, "run", interrupted_run)
+
+    assert main_module.main([]) == 0
+
+
+def test_compat_supports_a_listed_kimi_code_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    version = main_module.__version__
+    assert main_module.main(["compat", "--kimi-code", "0.29.1"]) == 0
+    output = capsys.readouterr().out
+    assert (
+        f"kimi-bridge {version} tested Kimi Code versions: 0.28.1, 0.29.0, 0.29.1"
+        in output
+    )
+    assert f"kimi-code 0.29.1 is supported by kimi-bridge {version}" in output
+
+
+def test_compat_rejects_untested_versions_in_both_directions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main_module.main(["compat", "--kimi-code", "0.30.0"]) == 1
+    assert "untested: newer than every" in capsys.readouterr().out
+
+    assert main_module.main(["compat", "--kimi-code", "0.27.0"]) == 1
+    assert "untested: older than every" in capsys.readouterr().out
+
+
+def test_compat_rejects_a_malformed_version(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main_module.main(["compat", "--kimi-code", "not-a-version"]) == 1
+    captured = capsys.readouterr()
+    assert "malformed Kimi Code version: not-a-version" in captured.err
+
+
+def test_compat_prints_the_map_when_kimi_is_not_detected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(main_module, "_probe_kimi_code_version", lambda: None)
+
+    assert main_module.main(["compat"]) == 0
+    output = capsys.readouterr().out
+    latest = main_module.COMPATIBILITY_MAP[-1]
+    assert "kimi executable not found on PATH" in output
+    assert "kimi-bridge 0.1.0: 0.28.1, 0.29.0" in output
+    assert f"kimi-bridge {latest.bridge}: {', '.join(latest.kimi_code)}" in output
+
+
+def test_compat_uses_the_detected_kimi_code_version(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(main_module, "_probe_kimi_code_version", lambda: "0.29.0")
+
+    assert main_module.main(["compat"]) == 0
+    assert "kimi-code 0.29.0 is supported" in capsys.readouterr().out
+
+
+def test_probe_parses_plain_version_output_without_printing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Completed:
+        returncode = 0
+        stdout = "0.29.1\n"
+
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: "/fake/kimi")
+    monkeypatch.setattr(
+        main_module.subprocess, "run", lambda *args, **kwargs: Completed()
+    )
+
+    assert main_module._probe_kimi_code_version() == "0.29.1"
+
+
+def test_probe_returns_none_without_kimi_on_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: None)
+
+    assert main_module._probe_kimi_code_version() is None

@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -22,7 +23,7 @@ from .compatibility import (
     legacy_product_message,
     unknown_version_warning,
 )
-from .config import DEFAULT_CONFIG_PATH, Config, load_config
+from .config import DEFAULT_CONFIG_PATH, Config, load_config, unknown_config_keys
 from .state import StateStore
 
 
@@ -175,6 +176,18 @@ def _check_config(
         len(checks) - 1,
         DoctorCheck("config", CheckStatus.OK, f"loaded selected {config.platform} adapter"),
     )
+    with path.open("rb") as config_file:
+        raw = tomllib.load(config_file)
+    unknown = unknown_config_keys(raw)
+    if unknown:
+        checks.insert(
+            len(checks) - 1,
+            DoctorCheck(
+                "config",
+                CheckStatus.WARNING,
+                "unknown configuration keys ignored: " + ", ".join(unknown),
+            ),
+        )
     return config
 
 

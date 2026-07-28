@@ -50,7 +50,7 @@ app_secret = "replace-me"
 allowed_users = ["ou_replace_me"]
 ```
 
-Create a custom Feishu app, enable its bot, and make the app available to the intended user. Grant tenant scopes `im:message.p2p_msg:readonly`, `im:message:readonly`, `im:message:send_as_bot`, `im:message:update`, and `im:resource` or the narrower resource upload/download scopes available to the app. Configure a WebSocket long connection, subscribe to `im.message.receive_v1`, enable `card.action.trigger` callbacks on that connection, and publish the app version. Feishu documents [long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case) and [message permission prerequisites](https://open.feishu.cn/document/server-docs/im-v1/faq).
+Feishu app creation, the exact scopes and event/callback subscriptions the bridge requires, the app-version publish step, and `open_id` discovery are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CF). Feishu documents [long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case) and [message permission prerequisites](https://open.feishu.cn/document/server-docs/im-v1/faq).
 
 Feishu accepts only user-sent `p2p` events. Authorization compares the sender's `open_id` and `user_id` with `allowed_users`; group messages and non-allowlisted users are ignored. Use the stable identity issued for the same app/tenant context instead of a display name. When a direct-message sender is not allowlisted, the bridge logs both identities with copy-paste configuration guidance.
 
@@ -75,7 +75,7 @@ bot_token = "replace-me"
 allowed_users = [123456789]
 ```
 
-Create a bot through Telegram's [BotFather](https://core.telegram.org/bots/features#botfather) and obtain the intended user's stable numeric ID through a trusted Telegram account or Bot API flow. Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
+Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CT). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
 
 The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
 
@@ -100,7 +100,7 @@ app_secret = "replace-me"
 allowed_users = ["replace-me"]
 ```
 
-Register an app at [q.qq.com](https://q.qq.com/) (individual developers are allowed, up to 5 bots), obtain its `AppID`/`AppSecret`, and whitelist the intended tester's QQ number under the console's sandbox (沙箱) configuration — sandbox allows up to 20 test users and is the practical mode for a personal bridge. The console's developer settings also require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance the first time an unrecognized sender messages the bot.
+Bot registration at [q.qq.com](https://q.qq.com/), sandbox whitelisting, and `user_openid` discovery are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CQ). The console's developer settings require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance whenever an unrecognized sender messages the bot.
 
 The supported QQ adapter is C2C (private-chat) only and is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 media uploads, inbound vision, and clean shutdown. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
 
@@ -128,6 +128,6 @@ kimi-bridge doctor
 
 ## Validation and failures
 
-`kimi-bridge doctor` does not start `kimi web` or connect either adapter. It fails for a missing or malformed config, missing selected credentials or allowlist, unusable workspace/state paths, an unrecognized or legacy `kimi` executable, executable/config failures, or another blocking prerequisite. Group/other-readable config permissions and an unlisted official Kimi Code version are warnings.
+`kimi-bridge doctor` does not start `kimi web` or connect either adapter. It fails for a missing or malformed config, missing selected credentials or allowlist, unusable workspace/state paths, an unrecognized or legacy `kimi` executable, executable/config failures, or another blocking prerequisite. Group/other-readable config permissions, unknown configuration keys (silently ignored at runtime), and an unlisted official Kimi Code version are warnings.
 
 TOML type, range, and containment violations raise explicit startup errors. A future unknown `state.json` schema fails loudly rather than discarding bindings. An official but unlisted Kimi Code version receives a warning and a live protocol attempt; an executable/server version mismatch is fatal. Run `kimi doctor config` and ensure Kimi Code has an authenticated provider and `default_model` before starting the bridge.

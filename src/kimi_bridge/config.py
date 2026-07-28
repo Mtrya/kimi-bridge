@@ -21,6 +21,41 @@ DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 PlatformName: TypeAlias = Literal["feishu", "telegram", "qq"]
 _PLATFORMS = {"feishu", "telegram", "qq"}
+_KNOWN_SUB_KEYS = {
+    "kimi_server": frozenset({"port"}),
+    "feishu": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "telegram": frozenset({"bot_token", "allowed_users"}),
+    "qq": frozenset({"app_id", "app_secret", "allowed_users"}),
+}
+_KNOWN_TOP_LEVEL_KEYS = frozenset(
+    {
+        "platform",
+        "log_level",
+        "default_workspace",
+        "state_path",
+        "edit_throttle_seconds",
+        "max_output_seconds",
+        "interaction_timeout_seconds",
+        "inbox_subdir",
+        "session_list_limit",
+        *_KNOWN_SUB_KEYS,
+    }
+)
+
+
+def unknown_config_keys(raw: dict) -> tuple[str, ...]:
+    """Return dotted names of config keys the loader silently ignores."""
+
+    unknown: list[str] = []
+    for key, value in raw.items():
+        if key not in _KNOWN_TOP_LEVEL_KEYS:
+            unknown.append(key)
+            continue
+        sub_keys = _KNOWN_SUB_KEYS.get(key)
+        if sub_keys is None or not isinstance(value, dict):
+            continue
+        unknown.extend(f"{key}.{sub}" for sub in value if sub not in sub_keys)
+    return tuple(sorted(unknown))
 
 
 def resolve_config_path(explicit: str | Path | None = None) -> Path:

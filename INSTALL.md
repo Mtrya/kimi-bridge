@@ -1,6 +1,6 @@
 # Install and operate kimi-bridge
 
-This is the starting runbook for both humans and coding agents. An agent should inspect the machine first, explain what it found, and pause at every user decision or credential boundary. Do not claim success until the selected chat adapter has been exercised by its allowlisted user.
+This is the happy-path runbook for human operators. Coding agents performing an interview-driven setup should follow [INSTALL_AI.md](INSTALL_AI.md) instead; humans who leave the happy path should run `kimi-bridge doctor` and consult INSTALL_AI.md for the matching branch. Do not claim success until the selected chat adapter has been exercised by its allowlisted user.
 
 ## 1. Inspect before changing anything
 

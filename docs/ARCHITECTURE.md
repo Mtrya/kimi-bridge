@@ -62,7 +62,7 @@ The config file is `~/.kimi-bridge/config.toml` by default; `--config` or the `K
 
 ## Compatibility policy
 
-The package contains a sorted manifest of official Kimi Code versions that passed the tracked semantic contract. Startup and `doctor` identify the product from both version and help surfaces:
+The package contains a sorted manifest of official Kimi Code versions that passed the tracked semantic contract. `kimi-bridge compat` reports whether an installed or given Kimi Code version is tested with this bridge, which other bridge releases tested it, or that it is newer/older than every tested version; the bridge-release → tested-versions history lives in the packaged `compatibility-map.json`. Startup and `doctor` identify the product from both version and help surfaces:
 
 - a listed official version is supported;
 - an unlisted official version receives a loud warning and a live contract attempt;

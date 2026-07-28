@@ -234,6 +234,40 @@ def test_valid_qq_config_is_secret_safe_and_mentions_ip_whitelist(
     assert all(secret not in rendered for secret in secrets)
 
 
+def test_unknown_config_keys_warn_without_failing(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                'loglevel = "INFO"',
+                "[feishu]",
+                'app_id = "id"',
+                'app_secret = "secret"',
+                'allowed_users = ["ou_one"]',
+                'ap_id = "typo"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+    names = [check.name for check in report.checks]
+    config_checks = [check for check in report.checks if check.name == "config"]
+
+    assert report.exit_code == 0
+    assert names[:3] == ["config", "config", "config permissions"]
+    assert [check.status for check in config_checks] == [
+        CheckStatus.OK,
+        CheckStatus.WARNING,
+    ]
+    assert (
+        config_checks[1].detail
+        == "unknown configuration keys ignored: feishu.ap_id, loglevel"
+    )
+
+
 def test_missing_config_is_blocking_but_kimi_is_still_checked(tmp_path: Path) -> None:
     runner = _runner()
 

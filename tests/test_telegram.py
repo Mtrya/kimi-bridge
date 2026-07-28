@@ -608,6 +608,37 @@ async def test_private_allowlist_and_topic_filters() -> None:
     assert [message.text for message in received] == ["allowed"]
 
 
+async def test_non_allowlisted_sender_is_logged_with_user_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    received: list[InboundMessage] = []
+    api = FakeTelegramAPI()
+
+    async def on_message(_adapter: Any, message: InboundMessage) -> None:
+        received.append(message)
+
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.telegram")
+    adapter = await _start_adapter(api, on_message=on_message)
+    try:
+        await adapter.handle_update(
+            _message_update(1, user_id=222, text="not allowed")
+        )
+        await adapter.handle_update(_message_update(2, text="allowed"))
+    finally:
+        await adapter.stop()
+
+    assert [message.text for message in received] == ["allowed"]
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "kimi_bridge.platforms.telegram"
+        and "non-allowlisted Telegram user" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "(user_id=222)" in warnings[0].getMessage()
+    assert "[telegram].allowed_users" in warnings[0].getMessage()
+
+
 async def test_send_and_edit_are_plain_persistent_messages() -> None:
     api = FakeTelegramAPI()
     adapter = await _start_adapter(api)

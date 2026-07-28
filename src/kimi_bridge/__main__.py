@@ -6,13 +6,23 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import shutil
 import signal
+import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__
+from .compatibility import (
+    COMPATIBILITY_MAP,
+    BridgeSupport,
+    CompatibilityMapEntry,
+    classify_bridge_compatibility,
+    normalize_kimi_code_version,
+)
 from .config import CONFIG_PATH_ENV, Config, load_config, resolve_config_path
-from .kimi_server import KimiServerClient, KimiServerSupervisor
+from .kimi_server import KimiServerClient, KimiServerError, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
 from .platforms.feishu import FeishuAdapter
 from .platforms.qq import (
@@ -205,7 +215,96 @@ def _argument_parser() -> argparse.ArgumentParser:
             f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
         ),
     )
+    compat_command = subcommands.add_parser(
+        "compat",
+        help="show which Kimi Code versions each bridge release supports",
+        description=(
+            "Classify one Kimi Code version against the tested compatibility "
+            "map of every kimi-bridge release."
+        ),
+    )
+    compat_command.add_argument(
+        "--kimi-code",
+        metavar="VERSION",
+        default=None,
+        help="Kimi Code version to classify (default: detect the installed kimi)",
+    )
     return parser
+
+
+def _probe_kimi_code_version(executable: str = "kimi") -> str | None:
+    """Return the installed Kimi Code version, or None when undetectable."""
+
+    path = shutil.which(executable)
+    if path is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [path, "--version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        return normalize_kimi_code_version(completed.stdout)
+    except ValueError:
+        return None
+
+
+def _current_map_entry() -> CompatibilityMapEntry:
+    return next(
+        (entry for entry in COMPATIBILITY_MAP if entry.bridge == __version__),
+        COMPATIBILITY_MAP[-1],
+    )
+
+
+def _run_compat(kimi_code: str | None) -> int:
+    current = _current_map_entry()
+    print(
+        f"kimi-bridge {__version__} tested Kimi Code versions: "
+        f"{', '.join(current.kimi_code)}"
+    )
+    version = kimi_code if kimi_code is not None else _probe_kimi_code_version()
+    if version is None:
+        print("kimi executable not found on PATH; full compatibility map:")
+        for entry in COMPATIBILITY_MAP:
+            print(f"  kimi-bridge {entry.bridge}: {', '.join(entry.kimi_code)}")
+        return 0
+    try:
+        verdict = classify_bridge_compatibility(
+            version, current_bridge=current.bridge
+        )
+    except ValueError:
+        print(f"kimi-bridge: malformed Kimi Code version: {version}", file=sys.stderr)
+        return 1
+    if verdict.support is BridgeSupport.SUPPORTED_BY_CURRENT_BRIDGE:
+        print(f"kimi-code {version} is supported by kimi-bridge {__version__}")
+        return 0
+    if verdict.support is BridgeSupport.SUPPORTED_BY_OTHER_RELEASES:
+        print(
+            f"kimi-code {version} is not supported by kimi-bridge {__version__}; "
+            f"it is supported by: {', '.join(verdict.releases)}"
+        )
+        return 1
+    if verdict.support is BridgeSupport.UNTESTED_OLDER_THAN_ALL:
+        print(
+            f"kimi-code {version} is untested: older than every Kimi Code "
+            "version tested by any kimi-bridge release"
+        )
+        return 1
+    print(
+        f"kimi-code {version} is untested: newer than every Kimi Code "
+        "version tested by any kimi-bridge release"
+    )
+    return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -215,10 +314,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .doctor import run_doctor
 
         return run_doctor(config_path=config_path)
+    if arguments.command == "compat":
+        return _run_compat(arguments.kimi_code)
     try:
         asyncio.run(run(config_path))
     except KeyboardInterrupt:
         pass
+    except (KimiServerError, ValueError, TypeError) as exc:
+        print(f"kimi-bridge: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

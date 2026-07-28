@@ -3,11 +3,16 @@ from __future__ import annotations
 import pytest
 
 from kimi_bridge.compatibility import (
+    COMPATIBILITY_MAP,
     KIMI_CODE_INSTALL_URL,
     SUPPORTED_KIMI_CODE_VERSIONS,
+    BridgeSupport,
+    CompatibilityMapEntry,
     KimiProduct,
     KimiProductFingerprintError,
     VersionSupport,
+    _parse_compatibility_map,
+    classify_bridge_compatibility,
     classify_kimi_code_version,
     identify_kimi_executable,
     kimi_code_version_sort_key,
@@ -97,3 +102,105 @@ def test_unknown_warning_is_prominent_and_actionable(
     assert "UNTESTED KIMI CODE VERSION" in warning
     assert unlisted_kimi_code_version in warning
     assert KIMI_CODE_INSTALL_URL in warning
+
+
+def test_compatibility_map_tracks_release_history_and_current_manifest() -> None:
+    assert [entry.bridge for entry in COMPATIBILITY_MAP] == [
+        "0.1.0",
+        "0.1.1",
+        "0.1.2",
+        "0.2.0",
+        "0.3.0",
+        "0.3.1",
+        "0.4.0",
+    ]
+    # The drift canary may promote the manifest between releases; the map's
+    # latest record catches up when the next release appends its own record.
+    assert set(COMPATIBILITY_MAP[-1].kimi_code) <= SUPPORTED_KIMI_CODE_VERSIONS
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"schema_version": 2, "releases": []}, "unsupported"),
+        ({"schema_version": 1, "releases": []}, "no releases"),
+        (
+            {
+                "schema_version": 1,
+                "releases": [
+                    {"bridge": "0.2.0", "kimi_code": ["0.29.0"]},
+                    {"bridge": "0.1.0", "kimi_code": ["0.29.0"]},
+                ],
+            },
+            "unique and sorted",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "releases": [
+                    {"bridge": "0.1.0", "kimi_code": ["0.29.0"]},
+                    {"bridge": "0.1.0", "kimi_code": ["0.29.0"]},
+                ],
+            },
+            "unique and sorted",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "releases": [
+                    {"bridge": "0.1.0", "kimi_code": ["0.29.1", "0.29.0"]}
+                ],
+            },
+            "unique and sorted",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "releases": [{"bridge": "0.1.0", "kimi_code": ["not-semver"]}],
+            },
+            "malformed",
+        ),
+        (
+            {"schema_version": 1, "releases": [{"bridge": "0.1.0"}]},
+            "non-empty",
+        ),
+    ],
+)
+def test_compatibility_map_loader_rejects_invalid_payloads(
+    payload: dict, message: str
+) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        _parse_compatibility_map(payload)
+
+
+_FAKE_RELEASES = (
+    CompatibilityMapEntry("0.1.0", ("0.28.0", "0.29.0")),
+    CompatibilityMapEntry("0.2.0", ("0.29.0",)),
+)
+
+
+def test_classifier_supports_the_current_bridge_list() -> None:
+    verdict = classify_bridge_compatibility("0.29.0", releases=_FAKE_RELEASES)
+
+    assert verdict.support is BridgeSupport.SUPPORTED_BY_CURRENT_BRIDGE
+    assert verdict.releases == ()
+
+
+def test_classifier_names_other_supporting_releases() -> None:
+    verdict = classify_bridge_compatibility("0.28.0", releases=_FAKE_RELEASES)
+
+    assert verdict.support is BridgeSupport.SUPPORTED_BY_OTHER_RELEASES
+    assert verdict.releases == ("0.1.0",)
+
+
+def test_classifier_distinguishes_untested_direction() -> None:
+    newer = classify_bridge_compatibility("0.30.0", releases=_FAKE_RELEASES)
+    older = classify_bridge_compatibility("0.27.0", releases=_FAKE_RELEASES)
+
+    assert newer.support is BridgeSupport.UNTESTED_NEWER_THAN_ALL
+    assert older.support is BridgeSupport.UNTESTED_OLDER_THAN_ALL
+
+
+def test_classifier_rejects_malformed_versions() -> None:
+    with pytest.raises(ValueError, match="malformed"):
+        classify_bridge_compatibility("not-a-version", releases=_FAKE_RELEASES)
