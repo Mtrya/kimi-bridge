@@ -53,6 +53,13 @@ AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
 DRIFT_MARKER = "<!-- kimi-bridge:upstream-drift -->"
 DRIFT_LABEL = "upstream-drift"
+PROJECT_VERSION_RE = re.compile(
+    r'(?ms)^(\[project\]\n.*?^version = ")(\d+\.\d+\.\d+)(")$'
+)
+LOCKED_PROJECT_RE = re.compile(
+    r'(?ms)^(\[\[package\]\]\nname = "kimi-bridge"\nversion = ")'
+    r'(\d+\.\d+\.\d+)(")$'
+)
 
 _BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+")
 _FRAGMENT_TOKEN_RE = re.compile(r"(?<=#token=)[A-Za-z0-9_-]+")
@@ -211,6 +218,63 @@ class CompatibilityCheckError(RuntimeError):
     def __init__(self, category: str, detail: str) -> None:
         super().__init__(redact(detail))
         self.category = category
+
+
+def prepare_compatibility_release(
+    *,
+    kimi_code_version: str,
+    pyproject: str,
+    uv_lock: str,
+    compatibility_map: str,
+) -> tuple[str, dict[str, str]]:
+    """Build the three files for the next patch compatibility release."""
+
+    project_match = PROJECT_VERSION_RE.search(pyproject)
+    if project_match is None:
+        raise RuntimeError("pyproject.toml has no plain project version")
+    current_version = project_match.group(2)
+    major, minor, patch = (int(item) for item in current_version.split("."))
+    next_version = f"{major}.{minor}.{patch + 1}"
+
+    lock_match = LOCKED_PROJECT_RE.search(uv_lock)
+    if lock_match is None or lock_match.group(2) != current_version:
+        raise RuntimeError("uv.lock project version does not match pyproject.toml")
+
+    payload = json.loads(compatibility_map)
+    releases = payload.get("releases")
+    if not isinstance(releases, list) or not releases:
+        raise RuntimeError("compatibility map is malformed")
+    latest = releases[-1]
+    if not isinstance(latest, dict) or latest.get("bridge") != current_version:
+        raise RuntimeError(
+            "latest compatibility-map release does not match project version"
+        )
+    versions = latest.get("kimi_code")
+    if not isinstance(versions, list):
+        raise RuntimeError("compatibility map is malformed")
+    if kimi_code_version in versions:
+        raise RuntimeError("Kimi Code version is already supported")
+    releases.append(
+        {
+            "bridge": next_version,
+            "kimi_code": sorted(
+                {*versions, kimi_code_version},
+                key=kimi_code_version_sort_key,
+            ),
+        }
+    )
+
+    return next_version, {
+        "pyproject.toml": PROJECT_VERSION_RE.sub(
+            rf"\g<1>{next_version}\g<3>", pyproject, count=1
+        ),
+        "uv.lock": LOCKED_PROJECT_RE.sub(
+            rf"\g<1>{next_version}\g<3>", uv_lock, count=1
+        ),
+        "src/kimi_bridge/compatibility-map.json": (
+            json.dumps(payload, indent=2) + "\n"
+        ),
+    }
 
 
 def redact(value: str, *, limit: int = 2000) -> str:
@@ -733,44 +797,65 @@ class GitHubApiAutomation:
         pull = self._find_promotion_pull()
         if pull is not None and state_marker in str(pull.get("body", "")):
             return "unchanged-promotion-pr"
-        map_path = "src/kimi_bridge/compatibility-map.json"
-        current = self._get_content(map_path, self.default_branch)
-        payload = json.loads(_decode_content(current))
-        releases = payload.get("releases")
-        if not isinstance(releases, list) or not releases:
+        paths = (
+            "pyproject.toml",
+            "uv.lock",
+            "src/kimi_bridge/compatibility-map.json",
+        )
+        current = {
+            path: self._get_content(path, self.default_branch) for path in paths
+        }
+        map_payload = json.loads(
+            _decode_content(
+                current["src/kimi_bridge/compatibility-map.json"]
+            )
+        )
+        releases = map_payload.get("releases")
+        if (
+            not isinstance(releases, list)
+            or not releases
+            or not isinstance(releases[-1], dict)
+        ):
             raise RuntimeError("compatibility map is malformed")
         latest = releases[-1]
-        if not isinstance(latest, dict):
-            raise RuntimeError("compatibility map is malformed")
         versions = latest.get("kimi_code")
         if not isinstance(versions, list):
             raise RuntimeError("compatibility map is malformed")
         if summary.version in versions:
             return None
+        next_version, release_files = prepare_compatibility_release(
+            kimi_code_version=summary.version,
+            pyproject=_decode_content(current["pyproject.toml"]),
+            uv_lock=_decode_content(current["uv.lock"]),
+            compatibility_map=_decode_content(
+                current["src/kimi_bridge/compatibility-map.json"]
+            ),
+        )
         base_sha = self._branch_sha(self.default_branch)
         self._set_automation_branch(base_sha)
-        latest["kimi_code"] = sorted(
-            {*versions, summary.version}, key=kimi_code_version_sort_key
+        for path, content in release_files.items():
+            self._request(
+                "PUT",
+                f"/repos/{self.repository}/contents/{path}",
+                json={
+                    "message": (
+                        f"Prepare kimi-bridge {next_version} for "
+                        f"Kimi Code {summary.version}"
+                    ),
+                    "content": base64.b64encode(content.encode()).decode(),
+                    "sha": current[path]["sha"],
+                    "branch": AUTOMATION_BRANCH,
+                },
+            )
+        title = (
+            f"Prepare kimi-bridge {next_version} for Kimi Code {summary.version}"
         )
-        branch_content = self._get_content(map_path, AUTOMATION_BRANCH)
-        encoded = base64.b64encode(
-            (json.dumps(payload, indent=2) + "\n").encode()
-        ).decode()
-        self._request(
-            "PUT",
-            f"/repos/{self.repository}/contents/{map_path}",
-            json={
-                "message": f"chore: support kimi-code {summary.version}",
-                "content": encoded,
-                "sha": branch_content["sha"],
-                "branch": AUTOMATION_BRANCH,
-            },
-        )
-        title = f"chore: support kimi-code {summary.version}"
         body = (
             f"{PROMOTION_MARKER}\n{state_marker}\n\n"
             f"The credential-free compatibility canary passed for kimi-code "
-            f"{summary.version} on {', '.join(summary.platforms)}.\n\n"
+            f"{summary.version} on {', '.join(summary.platforms)}. This PR "
+            f"prepares kimi-bridge {next_version} so the promoted version is "
+            f"available through the packaged compatibility map.\n\n"
             f"Report digest: `{summary.report_digest}`."
             + self._run_link_suffix()
         )

@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/kimi-drift.yml"
+      - ".github/workflows/kimi-drift-release.yml"
+      - ".github/workflows/release.yml"
       - "scripts/check_kimi_compatibility.py"
       - "src/kimi_bridge/compatibility.py"
       - "src/kimi_bridge/compatibility-map.json"

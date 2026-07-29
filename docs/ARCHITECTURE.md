@@ -67,7 +67,9 @@ The packaged `compatibility-map.json` records the Kimi Code versions that passed
 - a listed official version is supported;
 - an unlisted official version receives a loud warning and a live contract attempt;
 - legacy Python `kimi-cli`, an unrecognized product, or an executable/server version mismatch fails;
-- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows, exercises the CLI/server contract without model inference, and quietly proposes adding it to the latest compatibility-map entry only when every platform passes with the same version; pull requests touching compatibility surfaces run the same canary and predict the same decision in dry-run mode, so only main mutates promotion or drift state;
+- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows and exercises the CLI/server contract without model inference; when every platform passes with the same unlisted version, automation prepares one PR that bumps the bridge patch version and appends a compatibility-map release entry containing the promoted Kimi Code version, then required checks gate auto-merge;
+- a marked compatibility promotion PR creates its GitHub Release after merge and directly invokes the reusable release workflow; hourly reconciliation covers GitHub token event suppression, while the protected PyPI environment retains its separate approval boundary;
+- pull requests touching compatibility or release surfaces run the same canary and predict the synchronization decision in dry-run mode, so only main mutates promotion or drift state;
 - contract failure uses one rolling issue rather than opening a new noisy issue every day.
 
 All raw protocol knowledge and the tracked semantic contract stay in `kimi_server`. Hosted tests use no Kimi account, chat credential, or inference.
