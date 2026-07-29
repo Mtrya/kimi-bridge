@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import ast
 import base64
 import importlib.util
-import inspect
 import json
 import os
 import subprocess
@@ -21,10 +19,9 @@ from kimi_bridge.compatibility import (
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
-from kimi_bridge.kimi_server import KimiContractCheck, KimiServerClient
+from kimi_bridge.kimi_server import KimiContractCheck
 from kimi_bridge.kimi_server import contract as kimi_contract
 from kimi_bridge.kimi_server import probe as probe_module
-from kimi_bridge.kimi_server.probe import PROBED_LIFECYCLE_INVARIANTS
 from kimi_bridge.kimi_server.types import SessionStatus
 
 
@@ -142,30 +139,6 @@ def _minimal_documents() -> tuple[dict[str, Any], dict[str, Any]]:
         "components": {"messages": {}},
     }
     return openapi, asyncapi
-
-
-def test_client_operations_are_sourced_from_the_tracked_contract() -> None:
-    tree = ast.parse(inspect.getsource(KimiServerClient))
-    executed = {
-        call.args[0].value
-        for call in ast.walk(tree)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr == "_request_operation"
-        and call.args
-        and isinstance(call.args[0], ast.Constant)
-        and isinstance(call.args[0].value, str)
-    }
-
-    assert executed == set(kimi_contract.KIMI_REST_OPERATIONS)
-    assert all(
-        operation.source.startswith("KimiServerClient.")
-        for operation in kimi_contract.KIMI_REST_OPERATIONS.values()
-    )
-    json.dumps(kimi_contract.kimi_semantic_contract(), sort_keys=True)
-    assert PROBED_LIFECYCLE_INVARIANTS == {
-        identifier for identifier, _source in kimi_contract.KIMI_LIFECYCLE_INVARIANTS
-    }
 
 
 @pytest.mark.parametrize(

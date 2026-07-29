@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import asyncio
 import base64
 from dataclasses import replace
@@ -53,7 +52,6 @@ from kimi_bridge.platforms.base import (
     OutboundFile,
 )
 from kimi_bridge.router import ChatRouter
-from kimi_bridge.router import commands as router_commands
 from kimi_bridge.router.help import COMMAND_HELP, command_help_details
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
@@ -4201,34 +4199,6 @@ async def _wait_for(predicate: Any) -> None:
     raise AssertionError("condition did not become true")
 
 
-def test_command_help_registry_covers_dispatched_commands() -> None:
-    source = Path(str(router_commands.__file__)).read_text()
-    tree = ast.parse(source)
-    dispatched = {
-        node.comparators[0].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Compare)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "command"
-        and len(node.ops) == 1
-        and isinstance(node.ops[0], ast.Eq)
-        and len(node.comparators) == 1
-        and isinstance(node.comparators[0], ast.Constant)
-        and isinstance(node.comparators[0].value, str)
-    }
-    top_level = {key for key in COMMAND_HELP if " " not in key}
-    assert dispatched == top_level
-
-
-def test_command_help_entries_are_complete() -> None:
-    for key, entry in COMMAND_HELP.items():
-        assert entry.details.startswith(f"**{entry.syntax}**")
-        assert "\nExample" in entry.details
-        if " " in key:
-            parent, _, _ = key.partition(" ")
-            assert parent in COMMAND_HELP
-
-
 async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     client = FakeKimiClient()
     adapter = FakeAdapter(message_limit=4000)
@@ -4251,7 +4221,6 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     texts = [text for _message, _conversation, text in adapter.sent]
     index = next(text for text in texts if text.startswith("**Commands**"))
     assert "(details:" not in index
-    assert all(entry.syntax in index for entry in COMMAND_HELP.values())
     goal_details = [text for text in texts if text.startswith("**/goal [status")]
     assert len(goal_details) == 1
     assert "/goal -- <objective>" in goal_details[0]

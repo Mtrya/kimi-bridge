@@ -43,11 +43,10 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 
 def test_latest_map_entry_defines_current_supported_versions() -> None:
     assert isinstance(SUPPORTED_KIMI_CODE_VERSIONS, frozenset)
+    assert COMPATIBILITY_MAP[-1].bridge == __version__
     assert SUPPORTED_KIMI_CODE_VERSIONS == frozenset(
         COMPATIBILITY_MAP[-1].kimi_code
     )
-    assert "0.28.1" in SUPPORTED_KIMI_CODE_VERSIONS
-    assert "0.29.1" in SUPPORTED_KIMI_CODE_VERSIONS
 
 
 def test_compatibility_version_order_is_semantic() -> None:
@@ -106,15 +105,6 @@ def test_unknown_warning_is_prominent_and_actionable(
     assert "UNTESTED KIMI CODE VERSION" in warning
     assert unlisted_kimi_code_version in warning
     assert KIMI_CODE_INSTALL_URL in warning
-
-
-def test_compatibility_map_tracks_release_history_and_current_support() -> None:
-    bridges = [entry.bridge for entry in COMPATIBILITY_MAP]
-    assert bridges[0] == "0.1.0"
-    # Each release appends its own record, so the latest entry names the
-    # current package version.
-    assert bridges[-1] == __version__
-    assert set(COMPATIBILITY_MAP[-1].kimi_code) == SUPPORTED_KIMI_CODE_VERSIONS
 
 
 @pytest.mark.parametrize(

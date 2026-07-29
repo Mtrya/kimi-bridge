@@ -341,22 +341,25 @@ def test_compat_supports_a_listed_kimi_code_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     version = main_module.__version__
-    assert main_module.main(["compat", "--kimi-code", "0.29.1"]) == 0
+    current = main_module._current_map_entry()
+    kimi_code = current.kimi_code[-1]
+    assert main_module.main(["compat", "--kimi-code", kimi_code]) == 0
     output = capsys.readouterr().out
     assert (
-        f"kimi-bridge {version} tested Kimi Code versions: 0.28.1, 0.29.0, 0.29.1"
+        f"kimi-bridge {version} tested Kimi Code versions: "
+        f"{', '.join(current.kimi_code)}"
         in output
     )
-    assert f"kimi-code 0.29.1 is supported by kimi-bridge {version}" in output
+    assert f"kimi-code {kimi_code} is supported by kimi-bridge {version}" in output
 
 
 def test_compat_rejects_untested_versions_in_both_directions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main_module.main(["compat", "--kimi-code", "0.30.0"]) == 1
+    assert main_module.main(["compat", "--kimi-code", "9999.0.0"]) == 1
     assert "untested: newer than every" in capsys.readouterr().out
 
-    assert main_module.main(["compat", "--kimi-code", "0.27.0"]) == 1
+    assert main_module.main(["compat", "--kimi-code", "0.0.1"]) == 1
     assert "untested: older than every" in capsys.readouterr().out
 
 
@@ -389,10 +392,9 @@ def test_compat_prints_the_map_when_kimi_is_not_detected(
 
     assert main_module.main(["compat"]) == 0
     output = capsys.readouterr().out
-    latest = main_module.COMPATIBILITY_MAP[-1]
     assert "could not detect a Kimi Code version" in output
-    assert "kimi-bridge 0.1.0: 0.28.1, 0.29.0" in output
-    assert f"kimi-bridge {latest.bridge}: {', '.join(latest.kimi_code)}" in output
+    for entry in main_module.COMPATIBILITY_MAP:
+        assert f"kimi-bridge {entry.bridge}: {', '.join(entry.kimi_code)}" in output
 
 
 def test_compat_uses_the_detected_kimi_code_version(
