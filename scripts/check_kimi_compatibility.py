@@ -896,8 +896,9 @@ class GitHubApiAutomation:
             "uv.lock",
             "src/kimi_bridge/compatibility-map.json",
         )
+        base_sha = self._branch_sha(self.default_branch)
         current = {
-            path: self._get_content(path, self.default_branch) for path in paths
+            path: self._get_content(path, base_sha) for path in paths
         }
         map_payload = json.loads(
             _decode_content(
@@ -925,7 +926,6 @@ class GitHubApiAutomation:
                 current["src/kimi_bridge/compatibility-map.json"]
             ),
         )
-        base_sha = self._branch_sha(self.default_branch)
         self._set_automation_branch(base_sha)
         for path, content in release_files.items():
             self._request(

@@ -34,10 +34,11 @@ jobs:
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           python-version: "3.13"
-          enable-cache: true
+          enable-cache: false
       - run: uv sync --locked --dev
       - name: Verify release identity
         run: uv run --locked python scripts/check_release.py --tag "$RELEASE_TAG" --commit "$(git rev-parse HEAD)"

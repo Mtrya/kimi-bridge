@@ -742,6 +742,7 @@ class FakeGitHub:
         self.issues: list[dict[str, Any]] = []
         self.comments: list[str] = []
         self.content_updates = 0
+        self.content_refs: list[str] = []
         self.updated_paths: list[str] = []
         self.ci_dispatches = 0
 
@@ -774,6 +775,7 @@ class FakeGitHub:
         ):
             content_path = path.split("/contents/", 1)[1]
             if method == "GET":
+                self.content_refs.append(str(request.url.params["ref"]))
                 if content_path == "pyproject.toml":
                     value = self.pyproject
                 elif content_path == "uv.lock":
@@ -919,6 +921,7 @@ def test_github_promotion_drift_dedup_and_recovery(
         "uv.lock",
         "src/kimi_bridge/compatibility-map.json",
     ]
+    assert fake.content_refs == ["base-sha", "base-sha", "base-sha"]
     assert fake.ci_dispatches == 1
     assert synchronize_reports(compatible_unknown, automation) == (
         "unchanged-promotion-pr",

@@ -300,7 +300,9 @@ def test_startup_adapter_configuration_error_is_rendered_without_traceback(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     async def failing_run(_config_path: object) -> None:
-        raise RuntimeError("telegram.allowed_users must contain at least one user")
+        raise main_module.AdapterConfigurationError(
+            "telegram.allowed_users must contain at least one user"
+        )
 
     monkeypatch.setattr(main_module, "run", failing_run)
 
@@ -310,6 +312,18 @@ def test_startup_adapter_configuration_error_is_rendered_without_traceback(
         "kimi-bridge: telegram.allowed_users must contain at least one user"
     )
     assert "Traceback" not in captured.err
+
+
+def test_unexpected_runtime_error_keeps_its_traceback_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_run(_config_path: object) -> None:
+        raise RuntimeError("unexpected defect")
+
+    monkeypatch.setattr(main_module, "run", failing_run)
+
+    with pytest.raises(RuntimeError, match="unexpected defect"):
+        main_module.main([])
 
 
 def test_startup_keyboard_interrupt_still_exits_zero(
