@@ -93,6 +93,12 @@ jobs:
   publish:
     needs: create-release
     if: needs.create-release.outputs.created == 'true'
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.create-release.outputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch tag-scoped publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.tag }}
+        run: gh workflow run release.yml --ref "$RELEASE_TAG" -f tag="$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
