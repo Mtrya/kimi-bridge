@@ -733,26 +733,32 @@ class GitHubApiAutomation:
         pull = self._find_promotion_pull()
         if pull is not None and state_marker in str(pull.get("body", "")):
             return "unchanged-promotion-pr"
-        manifest_path = "src/kimi_bridge/supported-kimi-code-versions.json"
-        current = self._get_content(manifest_path, self.default_branch)
+        map_path = "src/kimi_bridge/compatibility-map.json"
+        current = self._get_content(map_path, self.default_branch)
         payload = json.loads(_decode_content(current))
-        versions = payload.get("versions")
+        releases = payload.get("releases")
+        if not isinstance(releases, list) or not releases:
+            raise RuntimeError("compatibility map is malformed")
+        latest = releases[-1]
+        if not isinstance(latest, dict):
+            raise RuntimeError("compatibility map is malformed")
+        versions = latest.get("kimi_code")
         if not isinstance(versions, list):
-            raise RuntimeError("supported-version manifest is malformed")
+            raise RuntimeError("compatibility map is malformed")
         if summary.version in versions:
             return None
         base_sha = self._branch_sha(self.default_branch)
         self._set_automation_branch(base_sha)
-        payload["versions"] = sorted(
+        latest["kimi_code"] = sorted(
             {*versions, summary.version}, key=kimi_code_version_sort_key
         )
-        branch_content = self._get_content(manifest_path, AUTOMATION_BRANCH)
+        branch_content = self._get_content(map_path, AUTOMATION_BRANCH)
         encoded = base64.b64encode(
             (json.dumps(payload, indent=2) + "\n").encode()
         ).decode()
         self._request(
             "PUT",
-            f"/repos/{self.repository}/contents/{manifest_path}",
+            f"/repos/{self.repository}/contents/{map_path}",
             json={
                 "message": f"chore: support kimi-code {summary.version}",
                 "content": encoded,

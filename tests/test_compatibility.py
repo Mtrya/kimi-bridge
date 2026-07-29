@@ -41,13 +41,16 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 """
 
 
-def test_manifest_contains_the_verified_baseline_and_is_immutable() -> None:
+def test_latest_map_entry_defines_current_supported_versions() -> None:
     assert isinstance(SUPPORTED_KIMI_CODE_VERSIONS, frozenset)
+    assert SUPPORTED_KIMI_CODE_VERSIONS == frozenset(
+        COMPATIBILITY_MAP[-1].kimi_code
+    )
     assert "0.28.1" in SUPPORTED_KIMI_CODE_VERSIONS
     assert "0.29.1" in SUPPORTED_KIMI_CODE_VERSIONS
 
 
-def test_manifest_version_order_is_semantic() -> None:
+def test_compatibility_version_order_is_semantic() -> None:
     assert sorted(
         ["0.100.0", "0.29.0", "0.29.0-beta"],
         key=kimi_code_version_sort_key,
@@ -105,15 +108,13 @@ def test_unknown_warning_is_prominent_and_actionable(
     assert KIMI_CODE_INSTALL_URL in warning
 
 
-def test_compatibility_map_tracks_release_history_and_current_manifest() -> None:
+def test_compatibility_map_tracks_release_history_and_current_support() -> None:
     bridges = [entry.bridge for entry in COMPATIBILITY_MAP]
     assert bridges[0] == "0.1.0"
     # Each release appends its own record, so the latest entry names the
     # current package version.
     assert bridges[-1] == __version__
-    # The drift canary may promote the manifest between releases; the map's
-    # latest record catches up when the next release appends its own record.
-    assert set(COMPATIBILITY_MAP[-1].kimi_code) <= SUPPORTED_KIMI_CODE_VERSIONS
+    assert set(COMPATIBILITY_MAP[-1].kimi_code) == SUPPORTED_KIMI_CODE_VERSIONS
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ from kimi_bridge.compatibility import (
 
 @pytest.fixture
 def unlisted_kimi_code_version() -> str:
-    """Return a valid version that cannot be in the current manifest."""
+    """Return a valid version outside the current supported set."""
 
     next_major = (
         max(

@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from kimi_bridge.compatibility import (
+    COMPATIBILITY_MAP,
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
@@ -712,10 +713,15 @@ class FakeGitHub:
         self.branch_exists = False
         self.branch_content = {
             "schema_version": 1,
-            "versions": sorted(
-                SUPPORTED_KIMI_CODE_VERSIONS,
-                key=kimi_code_version_sort_key,
-            ),
+            "releases": [
+                {
+                    "bridge": COMPATIBILITY_MAP[-1].bridge,
+                    "kimi_code": sorted(
+                        SUPPORTED_KIMI_CODE_VERSIONS,
+                        key=kimi_code_version_sort_key,
+                    ),
+                }
+            ],
         }
         self.pulls: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
@@ -742,7 +748,7 @@ class FakeGitHub:
         if path.endswith("/git/refs"):
             self.branch_exists = True
             return self._json({"ref": payload["ref"]}, status=201)
-        if "/contents/src/kimi_bridge/supported-kimi-code-versions.json" in path:
+        if "/contents/src/kimi_bridge/compatibility-map.json" in path:
             if method == "GET":
                 content = base64.b64encode(
                     (json.dumps(self.branch_content) + "\n").encode()
@@ -819,7 +825,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     )
     assert AUTOMATION_BRANCH == "automation/kimi-code-compatibility"
     assert len(fake.pulls) == 1
-    assert fake.branch_content["versions"] == sorted(
+    assert fake.branch_content["releases"][-1]["kimi_code"] == sorted(
         {*SUPPORTED_KIMI_CODE_VERSIONS, unlisted_kimi_code_version},
         key=kimi_code_version_sort_key,
     )

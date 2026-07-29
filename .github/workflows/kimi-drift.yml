@@ -9,7 +9,7 @@ on:
       - ".github/workflows/kimi-drift.yml"
       - "scripts/check_kimi_compatibility.py"
       - "src/kimi_bridge/compatibility.py"
-      - "src/kimi_bridge/supported-kimi-code-versions.json"
+      - "src/kimi_bridge/compatibility-map.json"
       - "src/kimi_bridge/kimi_server/**"
 
 permissions:

@@ -328,7 +328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         asyncio.run(run(config_path))
     except KeyboardInterrupt:
         pass
-    except (KimiServerError, ValueError, TypeError) as exc:
+    except (KimiServerError, RuntimeError, ValueError, TypeError) as exc:
         print(f"kimi-bridge: {exc}", file=sys.stderr)
         return 1
     return 0
