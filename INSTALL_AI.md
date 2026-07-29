@@ -33,7 +33,7 @@ End with one of these outcomes:
 
 - **Done:** Kimi Code completed a real prompt, the platform delivered an allowlisted message, and kimi-bridge returned a complete reply.
 - **Paused:** a named user-only action, approval, publication review, or external wait is outstanding. State exactly how to resume and what you will verify.
-- **Unsupported:** the selected environment or platform cannot satisfy a documented requirement. You can still use your own knowledge to assit the user as per their requests.
+- **Unsupported:** the selected environment or platform cannot satisfy a documented requirement. You can still use your own knowledge to assist the user as per their requests.
 - **Aborted:** setup stopped at the user's request. Remove only artifacts created during this setup. Never remove pre-existing configuration, state, workspaces, sessions, bot applications, webhooks, or service files without separate explicit approval for the named targets.
 
 ## 1. Host and Kimi Code preflight
