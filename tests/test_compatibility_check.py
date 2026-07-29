@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from kimi_bridge.compatibility import (
+    COMPATIBILITY_MAP,
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
@@ -54,6 +55,7 @@ build_report = checker.build_report
 check_fixture = checker.check_fixture
 check_live = checker.check_live
 install_official_kimi = checker.install_official_kimi
+prepare_compatibility_release = checker.prepare_compatibility_release
 read_report = checker.read_report
 redact = checker.redact
 summarize_reports = checker.summarize_reports
@@ -710,17 +712,38 @@ async def test_live_checker_reports_startup_timeout_and_cleans_up() -> None:
 class FakeGitHub:
     def __init__(self) -> None:
         self.branch_exists = False
+        self.project_version = COMPATIBILITY_MAP[-1].bridge
+        self.pyproject = (
+            "[build-system]\nrequires = []\n\n"
+            "[project]\n"
+            'name = "kimi-bridge"\n'
+            f'version = "{self.project_version}"\n'
+        )
+        self.uv_lock = (
+            "version = 1\n\n"
+            "[[package]]\n"
+            'name = "kimi-bridge"\n'
+            f'version = "{self.project_version}"\n'
+            'source = { editable = "." }\n'
+        )
         self.branch_content = {
             "schema_version": 1,
-            "versions": sorted(
-                SUPPORTED_KIMI_CODE_VERSIONS,
-                key=kimi_code_version_sort_key,
-            ),
+            "releases": [
+                {
+                    "bridge": COMPATIBILITY_MAP[-1].bridge,
+                    "kimi_code": sorted(
+                        SUPPORTED_KIMI_CODE_VERSIONS,
+                        key=kimi_code_version_sort_key,
+                    ),
+                }
+            ],
         }
         self.pulls: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
         self.comments: list[str] = []
         self.content_updates = 0
+        self.content_refs: list[str] = []
+        self.updated_paths: list[str] = []
         self.ci_dispatches = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -742,14 +765,38 @@ class FakeGitHub:
         if path.endswith("/git/refs"):
             self.branch_exists = True
             return self._json({"ref": payload["ref"]}, status=201)
-        if "/contents/src/kimi_bridge/supported-kimi-code-versions.json" in path:
+        if "/contents/" in path and any(
+            path.endswith(f"/contents/{item}")
+            for item in (
+                "pyproject.toml",
+                "uv.lock",
+                "src/kimi_bridge/compatibility-map.json",
+            )
+        ):
+            content_path = path.split("/contents/", 1)[1]
             if method == "GET":
+                self.content_refs.append(str(request.url.params["ref"]))
+                if content_path == "pyproject.toml":
+                    value = self.pyproject
+                elif content_path == "uv.lock":
+                    value = self.uv_lock
+                else:
+                    value = json.dumps(self.branch_content) + "\n"
                 content = base64.b64encode(
-                    (json.dumps(self.branch_content) + "\n").encode()
+                    value.encode()
                 ).decode()
-                return self._json({"sha": "manifest-sha", "content": content})
-            self.branch_content = json.loads(base64.b64decode(payload["content"]))
+                return self._json(
+                    {"sha": f"{content_path}-sha", "content": content}
+                )
+            value = base64.b64decode(payload["content"]).decode()
+            if content_path == "pyproject.toml":
+                self.pyproject = value
+            elif content_path == "uv.lock":
+                self.uv_lock = value
+            else:
+                self.branch_content = json.loads(value)
             self.content_updates += 1
+            self.updated_paths.append(content_path)
             return self._json({"content": {"sha": "next-sha"}})
         if path.endswith("/pulls"):
             if method == "GET":
@@ -797,6 +844,45 @@ class FakeGitHub:
         return httpx.Response(status, json=value)
 
 
+def test_prepare_compatibility_release_accepts_reordered_commented_toml() -> None:
+    pyproject = (
+        "[project] # package metadata\n"
+        'description = "test"\n'
+        "version = '1.2.3' # release identity\n"
+        'name = "kimi-bridge"\n'
+    )
+    uv_lock = (
+        "version = 1\n\n"
+        "[[package]] # unrelated\n"
+        'version = "9.0.0"\n'
+        'name = "dependency"\n\n'
+        "[[package]] # editable project\n"
+        'source = { editable = "." }\n'
+        'version = "1.2.3" # release identity\n'
+        'name = "kimi-bridge"\n'
+    )
+    compatibility_map = json.dumps(
+        {
+            "schema_version": 1,
+            "releases": [
+                {"bridge": "1.2.3", "kimi_code": ["0.29.2"]}
+            ],
+        }
+    )
+
+    version, files = prepare_compatibility_release(
+        kimi_code_version="0.29.3",
+        pyproject=pyproject,
+        uv_lock=uv_lock,
+        compatibility_map=compatibility_map,
+    )
+
+    assert version == "1.2.4"
+    assert "version = '1.2.4' # release identity" in files["pyproject.toml"]
+    assert 'version = "9.0.0"' in files["uv.lock"]
+    assert 'version = "1.2.4" # release identity' in files["uv.lock"]
+
+
 def test_github_promotion_drift_dedup_and_recovery(
     unlisted_kimi_code_version: str,
 ) -> None:
@@ -813,26 +899,39 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert not fake.pulls and not fake.issues
 
     compatible_unknown = _reports_for_all_platforms(unlisted_kimi_code_version)
+    major, minor, patch = (
+        int(item) for item in COMPATIBILITY_MAP[-1].bridge.split(".")
+    )
+    next_bridge_version = f"{major}.{minor}.{patch + 1}"
 
     assert synchronize_reports(compatible_unknown, automation) == (
         "created-promotion-pr",
     )
     assert AUTOMATION_BRANCH == "automation/kimi-code-compatibility"
     assert len(fake.pulls) == 1
-    assert fake.branch_content["versions"] == sorted(
+    assert f'version = "{next_bridge_version}"' in fake.pyproject
+    assert f'version = "{next_bridge_version}"' in fake.uv_lock
+    assert fake.branch_content["releases"][-1]["bridge"] == next_bridge_version
+    assert fake.branch_content["releases"][-1]["kimi_code"] == sorted(
         {*SUPPORTED_KIMI_CODE_VERSIONS, unlisted_kimi_code_version},
         key=kimi_code_version_sort_key,
     )
+    assert fake.updated_paths == [
+        "pyproject.toml",
+        "uv.lock",
+        "src/kimi_bridge/compatibility-map.json",
+    ]
+    assert fake.content_refs == ["base-sha", "base-sha", "base-sha"]
     assert fake.ci_dispatches == 1
     assert synchronize_reports(compatible_unknown, automation) == (
         "unchanged-promotion-pr",
     )
     assert len(fake.pulls) == 1
-    assert fake.content_updates == 1
+    assert fake.content_updates == 3
     assert fake.ci_dispatches == 1
     fake.pulls.clear()
     assert synchronize_reports(compatible_unknown, automation) == ()
-    assert fake.content_updates == 1
+    assert fake.content_updates == 3
 
     broken = _reports_for_all_platforms(
         "0.30.0", failing={"windows": _failing_check()}

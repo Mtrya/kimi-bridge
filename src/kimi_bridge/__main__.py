@@ -45,6 +45,10 @@ _CREDENTIAL_BEARING_LIBRARY_LOGGERS = (
 )
 
 
+class AdapterConfigurationError(RuntimeError):
+    """Expected adapter configuration failure safe to render without traceback."""
+
+
 def _configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=log_level,
@@ -134,11 +138,11 @@ def _build_adapter(config: Config) -> PlatformAdapter:
         # credentials, at INFO. Keep those credentials out of bridge logs.
         logging.getLogger("Lark").setLevel(logging.WARNING)
         if not config.feishu.app_id or not config.feishu.app_secret:
-            raise RuntimeError(
+            raise AdapterConfigurationError(
                 "Feishu credentials are missing from ~/.kimi-bridge/config.toml"
             )
         if not config.feishu.allowed_users:
-            raise RuntimeError(
+            raise AdapterConfigurationError(
                 "feishu.allowed_users must contain at least one user"
             )
         return FeishuAdapter(
@@ -149,11 +153,13 @@ def _build_adapter(config: Config) -> PlatformAdapter:
 
     if config.platform == "qq":
         if not config.qq.app_id or not config.qq.app_secret:
-            raise RuntimeError(
+            raise AdapterConfigurationError(
                 "QQ credentials are missing from ~/.kimi-bridge/config.toml"
             )
         if not config.qq.allowed_users:
-            raise RuntimeError("qq.allowed_users must contain at least one user")
+            raise AdapterConfigurationError(
+                "qq.allowed_users must contain at least one user"
+            )
         token_manager = QQTokenManager(
             QQCredentials(config.qq.app_id, config.qq.app_secret)
         )
@@ -168,11 +174,11 @@ def _build_adapter(config: Config) -> PlatformAdapter:
         )
 
     if not config.telegram.bot_token:
-        raise RuntimeError(
+        raise AdapterConfigurationError(
             "Telegram bot token is missing from ~/.kimi-bridge/config.toml"
         )
     if not config.telegram.allowed_users:
-        raise RuntimeError(
+        raise AdapterConfigurationError(
             "telegram.allowed_users must contain at least one user"
         )
     return TelegramAdapter(
@@ -328,7 +334,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         asyncio.run(run(config_path))
     except KeyboardInterrupt:
         pass
-    except (KimiServerError, ValueError, TypeError) as exc:
+    except (
+        AdapterConfigurationError,
+        KimiServerError,
+        ValueError,
+        TypeError,
+    ) as exc:
         print(f"kimi-bridge: {exc}", file=sys.stderr)
         return 1
     return 0

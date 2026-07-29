@@ -50,7 +50,7 @@ app_secret = "replace-me"
 allowed_users = ["ou_replace_me"]
 ```
 
-Feishu app creation, the exact scopes and event/callback subscriptions the bridge requires, the app-version publish step, and `open_id` discovery are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CF). Feishu documents [long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case) and [message permission prerequisites](https://open.feishu.cn/document/server-docs/im-v1/faq).
+Feishu app creation, the exact scopes and event/callback subscriptions the bridge requires, the app-version publish step, and `open_id` discovery are covered in the [Feishu bootstrap](../INSTALL_AI.md#5-feishu-bootstrap). Feishu documents [long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case) and [message permission prerequisites](https://open.feishu.cn/document/server-docs/im-v1/faq).
 
 Feishu accepts only user-sent `p2p` events. Authorization compares the sender's `open_id` and `user_id` with `allowed_users`; group messages and non-allowlisted users are ignored. Use the stable identity issued for the same app/tenant context instead of a display name. When a direct-message sender is not allowlisted, the bridge logs both identities with copy-paste configuration guidance.
 
@@ -75,7 +75,7 @@ bot_token = "replace-me"
 allowed_users = [123456789]
 ```
 
-Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CT). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
+Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered in the [Telegram bootstrap](../INSTALL_AI.md#7-telegram-bootstrap). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
 
 The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
 
@@ -100,7 +100,7 @@ app_secret = "replace-me"
 allowed_users = ["replace-me"]
 ```
 
-Bot registration at [q.qq.com](https://q.qq.com/), sandbox whitelisting, and `user_openid` discovery are covered step by step in [INSTALL_AI.md](../INSTALL_AI.md) (§CQ). The console's developer settings require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance whenever an unrecognized sender messages the bot.
+Bot registration at [q.qq.com](https://q.qq.com/), sandbox whitelisting, and `user_openid` discovery are covered in the [QQ bootstrap](../INSTALL_AI.md#6-qq-bootstrap). The console's developer settings require an **IP whitelist**: OpenAPI calls fail until this host's egress IP is added there; `kimi-bridge doctor` only reminds you of this requirement and cannot verify it live. A dynamic egress IP must be added again after it changes. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance whenever an unrecognized sender messages the bot.
 
 The supported QQ adapter is C2C (private-chat) only and is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 media uploads, inbound vision, and clean shutdown. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
 

@@ -1,0 +1,77 @@
+name: Kimi compatibility release
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: "37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+
+concurrency:
+  group: kimi-compatibility-release
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.merged == true &&
+      github.event.pull_request.head.ref == 'automation/kimi-code-compatibility' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.body, '<!-- kimi-bridge:compatibility-promotion -->'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      created: ${{ steps.release.outputs.created }}
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - name: Verify merged release candidate
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(uv run --locked python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          tag="v${version}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists; leaving it unchanged"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release_commit="$(git log -S "\"bridge\": \"${version}\"" --format=%H -1 -- src/kimi_bridge/compatibility-map.json)"
+          if [ -z "$release_commit" ]; then
+            echo "No commit introduced compatibility record $version"
+            exit 1
+          fi
+          promotion_count="$(gh api "repos/$GITHUB_REPOSITORY/commits/$release_commit/pulls" --jq '[.[] | select(.merged_at != null and .head.ref == "automation/kimi-code-compatibility" and (.body | contains("<!-- kimi-bridge:compatibility-promotion -->")))] | length')"
+          if [ "$promotion_count" != "1" ]; then
+            echo "Release commit is not owned by one merged compatibility promotion PR"
+            exit 1
+          fi
+          git checkout --detach "$release_commit"
+          uv run --locked python scripts/check_release.py --tag "$tag" --commit "$release_commit"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$release_commit" --title "kimi-bridge $tag" --generate-notes
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: create-release
+    if: needs.create-release.outputs.created == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.create-release.outputs.tag }}

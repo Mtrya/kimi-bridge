@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,6 @@ AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
 DRIFT_MARKER = "<!-- kimi-bridge:upstream-drift -->"
 DRIFT_LABEL = "upstream-drift"
-
 _BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+")
 _FRAGMENT_TOKEN_RE = re.compile(r"(?<=#token=)[A-Za-z0-9_-]+")
 _JSON_TOKEN_RE = re.compile(
@@ -211,6 +211,164 @@ class CompatibilityCheckError(RuntimeError):
     def __init__(self, category: str, detail: str) -> None:
         super().__init__(redact(detail))
         self.category = category
+
+
+def _parse_toml(document: str, name: str) -> dict[str, Any]:
+    try:
+        return tomllib.loads(document)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError(f"{name} is not valid TOML") from exc
+
+
+def _plain_version(value: object, source: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d+\.\d+\.\d+", value) is None
+    ):
+        raise RuntimeError(f"{source} has no plain project version")
+    return value
+
+
+def _replace_version_assignment(
+    document: str,
+    *,
+    start: int,
+    end: int,
+    current_version: str,
+    next_version: str,
+    source: str,
+) -> str:
+    section = document[start:end]
+    pattern = re.compile(
+        rf'(?m)^(\s*version\s*=\s*)(["\']){re.escape(current_version)}'
+        rf'(\2\s*(?:#.*)?)$'
+    )
+    updated, count = pattern.subn(
+        rf"\g<1>\g<2>{next_version}\g<3>", section, count=1
+    )
+    if count != 1:
+        raise RuntimeError(f"{source} project version could not be updated")
+    return document[:start] + updated + document[end:]
+
+
+def _update_pyproject_version(
+    document: str, current_version: str, next_version: str
+) -> str:
+    project = re.search(r"(?m)^\[project\]\s*(?:#.*)?$", document)
+    if project is None:
+        raise RuntimeError("pyproject.toml has no [project] table")
+    next_table = re.search(r"(?m)^\[", document[project.end() :])
+    end = (
+        len(document)
+        if next_table is None
+        else project.end() + next_table.start()
+    )
+    return _replace_version_assignment(
+        document,
+        start=project.end(),
+        end=end,
+        current_version=current_version,
+        next_version=next_version,
+        source="pyproject.toml",
+    )
+
+
+def _update_lock_version(
+    document: str, current_version: str, next_version: str
+) -> str:
+    starts = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^\[\[package\]\]\s*(?:#.*)?$", document
+        )
+    ]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(document)
+        package = _parse_toml(document[start:end], "uv.lock package")
+        entries = package.get("package")
+        if (
+            isinstance(entries, list)
+            and len(entries) == 1
+            and isinstance(entries[0], dict)
+            and entries[0].get("name") == "kimi-bridge"
+        ):
+            return _replace_version_assignment(
+                document,
+                start=start,
+                end=end,
+                current_version=current_version,
+                next_version=next_version,
+                source="uv.lock",
+            )
+    raise RuntimeError("uv.lock has no kimi-bridge package")
+
+
+def prepare_compatibility_release(
+    *,
+    kimi_code_version: str,
+    pyproject: str,
+    uv_lock: str,
+    compatibility_map: str,
+) -> tuple[str, dict[str, str]]:
+    """Build the three files for the next patch compatibility release."""
+
+    project_payload = _parse_toml(pyproject, "pyproject.toml")
+    project = project_payload.get("project")
+    if not isinstance(project, dict):
+        raise RuntimeError("pyproject.toml has no [project] table")
+    current_version = _plain_version(
+        project.get("version"), "pyproject.toml"
+    )
+    major, minor, patch = (int(item) for item in current_version.split("."))
+    next_version = f"{major}.{minor}.{patch + 1}"
+
+    lock_payload = _parse_toml(uv_lock, "uv.lock")
+    packages = lock_payload.get("package")
+    if not isinstance(packages, list):
+        raise RuntimeError("uv.lock has no package list")
+    locked_versions = [
+        package.get("version")
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == "kimi-bridge"
+    ]
+    if locked_versions != [current_version]:
+        raise RuntimeError("uv.lock project version does not match pyproject.toml")
+
+    payload = json.loads(compatibility_map)
+    releases = payload.get("releases")
+    if not isinstance(releases, list) or not releases:
+        raise RuntimeError("compatibility map is malformed")
+    latest = releases[-1]
+    if not isinstance(latest, dict) or latest.get("bridge") != current_version:
+        raise RuntimeError(
+            "latest compatibility-map release does not match project version"
+        )
+    versions = latest.get("kimi_code")
+    if not isinstance(versions, list):
+        raise RuntimeError("compatibility map is malformed")
+    if kimi_code_version in versions:
+        raise RuntimeError("Kimi Code version is already supported")
+    releases.append(
+        {
+            "bridge": next_version,
+            "kimi_code": sorted(
+                {*versions, kimi_code_version},
+                key=kimi_code_version_sort_key,
+            ),
+        }
+    )
+
+    return next_version, {
+        "pyproject.toml": _update_pyproject_version(
+            pyproject, current_version, next_version
+        ),
+        "uv.lock": _update_lock_version(
+            uv_lock, current_version, next_version
+        ),
+        "src/kimi_bridge/compatibility-map.json": (
+            json.dumps(payload, indent=2) + "\n"
+        ),
+    }
 
 
 def redact(value: str, *, limit: int = 2000) -> str:
@@ -733,38 +891,65 @@ class GitHubApiAutomation:
         pull = self._find_promotion_pull()
         if pull is not None and state_marker in str(pull.get("body", "")):
             return "unchanged-promotion-pr"
-        manifest_path = "src/kimi_bridge/supported-kimi-code-versions.json"
-        current = self._get_content(manifest_path, self.default_branch)
-        payload = json.loads(_decode_content(current))
-        versions = payload.get("versions")
+        paths = (
+            "pyproject.toml",
+            "uv.lock",
+            "src/kimi_bridge/compatibility-map.json",
+        )
+        base_sha = self._branch_sha(self.default_branch)
+        current = {
+            path: self._get_content(path, base_sha) for path in paths
+        }
+        map_payload = json.loads(
+            _decode_content(
+                current["src/kimi_bridge/compatibility-map.json"]
+            )
+        )
+        releases = map_payload.get("releases")
+        if (
+            not isinstance(releases, list)
+            or not releases
+            or not isinstance(releases[-1], dict)
+        ):
+            raise RuntimeError("compatibility map is malformed")
+        latest = releases[-1]
+        versions = latest.get("kimi_code")
         if not isinstance(versions, list):
-            raise RuntimeError("supported-version manifest is malformed")
+            raise RuntimeError("compatibility map is malformed")
         if summary.version in versions:
             return None
-        base_sha = self._branch_sha(self.default_branch)
+        next_version, release_files = prepare_compatibility_release(
+            kimi_code_version=summary.version,
+            pyproject=_decode_content(current["pyproject.toml"]),
+            uv_lock=_decode_content(current["uv.lock"]),
+            compatibility_map=_decode_content(
+                current["src/kimi_bridge/compatibility-map.json"]
+            ),
+        )
         self._set_automation_branch(base_sha)
-        payload["versions"] = sorted(
-            {*versions, summary.version}, key=kimi_code_version_sort_key
+        for path, content in release_files.items():
+            self._request(
+                "PUT",
+                f"/repos/{self.repository}/contents/{path}",
+                json={
+                    "message": (
+                        f"Prepare kimi-bridge {next_version} for "
+                        f"Kimi Code {summary.version}"
+                    ),
+                    "content": base64.b64encode(content.encode()).decode(),
+                    "sha": current[path]["sha"],
+                    "branch": AUTOMATION_BRANCH,
+                },
+            )
+        title = (
+            f"Prepare kimi-bridge {next_version} for Kimi Code {summary.version}"
         )
-        branch_content = self._get_content(manifest_path, AUTOMATION_BRANCH)
-        encoded = base64.b64encode(
-            (json.dumps(payload, indent=2) + "\n").encode()
-        ).decode()
-        self._request(
-            "PUT",
-            f"/repos/{self.repository}/contents/{manifest_path}",
-            json={
-                "message": f"chore: support kimi-code {summary.version}",
-                "content": encoded,
-                "sha": branch_content["sha"],
-                "branch": AUTOMATION_BRANCH,
-            },
-        )
-        title = f"chore: support kimi-code {summary.version}"
         body = (
             f"{PROMOTION_MARKER}\n{state_marker}\n\n"
             f"The credential-free compatibility canary passed for kimi-code "
-            f"{summary.version} on {', '.join(summary.platforms)}.\n\n"
+            f"{summary.version} on {', '.join(summary.platforms)}. This PR "
+            f"prepares kimi-bridge {next_version} so the promoted version is "
+            f"available through the packaged compatibility map.\n\n"
             f"Report digest: `{summary.report_digest}`."
             + self._run_link_suffix()
         )

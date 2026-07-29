@@ -1,198 +1,402 @@
-# kimi-bridge setup — agent guide
+# kimi-bridge setup agent guide
 
-This file is a setup playbook for a coding agent helping a user install and configure kimi-bridge. Humans looking for the short version should read `INSTALL.md` instead.
+This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a user-facing tutorial. Humans installing manually should read [INSTALL.md](INSTALL.md) and [Configuration](docs/CONFIGURATION.md).
 
-## How to use this file
+## Operating contract
 
-This file is your internal mental model, not a script to recite. Run a natural interview; never mention node IDs, branches, or this file's mechanics to the user.
+Read this guide completely before changing the host or a platform app.
 
-- **Detect first, ask only at decision nodes.** Run every check yourself before asking the user anything. Ask the user only when you need a decision, a console login, or a secret.
-- **Do the legwork.** Read and fetch official documentation yourself and follow it. Never hand the user a link and ask them to bring back values you could discover or verify yourself. The user is involved only for things only they can do: logging into web consoles, approving prompts in their chat app, and typing secrets.
-- **Never touch secrets.** Never ask the user to paste credentials into chat, never read or print the config file's secret values, never echo a credential you happen to see. Verification always goes through `kimi-bridge doctor`, which reports presence and counts only.
-- **Every setup ends in exactly one outcome**: *done* (the smoke test passed — never claim done before it), *abort* (stop, clean up per §X2, report what was removed), or *unsupported* (state the blocker and the workaround hint, then stop).
-- **Official consoles and docs change.** When a console menu, doc page, or command in this file no longer matches reality, fetch the current official documentation and adapt. Do not fail, and do not guess menu names.
+Classify each setup action by ownership:
 
-Node IDs (`P2`, `CF3`, …) exist only so this file can cross-reference itself.
+- **Automatic:** inspect, research, install, write non-secret configuration, validate, diagnose, and repair without asking the user to do the work.
+- **Question then automatic:** ask only for a consequential preference or fact that cannot be discovered safely, then complete the resulting work yourself.
+- **Approval then automatic:** explain a concrete mutation or risk, obtain approval, then perform the action yourself.
+- **User-only:** guide the user through an action that technically requires their identity, private secret entry, or console authority. Research the current official interface first and give a short, mature procedure for the exact action. Resume with agent-run verification.
+- **External wait:** record what is pending, how completion is recognized, and the verification that will follow. Do not invent a workaround for review or publication delays.
+- **Unsupported:** state the exact incompatible boundary and stop that path.
 
-## R — Start
+Minimize user-only work. An official link is a source for you to research, not a substitute for instructions. Never give the user a link and ask them to configure a platform unaided.
 
-1. Read this entire file before doing anything.
-2. Work through preflight (§P), install (§I), platform choice (§PL), settings (§S), credentials (§C), verification (§D), and the smoke test (§T), in order. §PL and §S involve user decisions; everything else is detection.
-3. External handoffs are written as **EXTERNAL(url) → return when the user has X → verification step**. The link replaces instructions you would otherwise have to maintain; the checkpoint is what you verify on return.
+Additional rules:
 
-## P — Preflight
+- Detect before asking. Do not ask for information available from commands, files you may safely inspect, or platform APIs.
+- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input. 
+- Preserve existing installations, configuration, state, workspaces, bot settings, webhooks, and event consumers unless the user explicitly approves changing them.
+- Do not report success after `doctor`. Setup is complete only after a real allowlisted inbound message and a real completed reply on the selected platform.
+- If console labels or platform requirements have changed, research current official sources and adapt the instructions. Do not guess.
+- Keep implementation internals, release procedures, test history, and this guide's control model out of the user conversation unless they explain a user-visible limitation.
+- If user actions are inevitable, give them actionable guides.
 
-### P1 — uv (or the pipx branch)
+## Completion outcomes
 
-Run `uv --version`. If present, stay on the uv path; uv manages Python, so no Python check is needed.
+End with one of these outcomes:
 
-If uv is missing: **EXTERNAL(https://docs.astral.sh/uv/getting-started/installation/) → return with `uv --version` working.**
+- **Done:** Kimi Code completed a real prompt, the platform delivered an allowlisted message, and kimi-bridge returned a complete reply.
+- **Paused:** a named user-only action, approval, publication review, or external wait is outstanding. State exactly how to resume and what you will verify.
+- **Unsupported:** the selected environment or platform cannot satisfy a documented requirement. You can still use your own knowledge to assist the user as per their requests.
+- **Aborted:** setup stopped at the user's request. Remove only artifacts created during this setup. Never remove pre-existing configuration, state, workspaces, sessions, bot applications, webhooks, or service files without separate explicit approval for the named targets.
 
-If the user cannot or will not install uv, take the pipx branch:
+## 1. Host and Kimi Code preflight
 
-- Verify `python3 --version` is ≥ 3.11 (real requirement on this branch — pipx does not manage Python). Older → *unsupported*: upgrade Python or use uv.
-- Wherever this file says `uv tool install/upgrade kimi-bridge`, use `pipx install/upgrade kimi-bridge` instead. pipx is a supported fallback but less tested than uv; say so once.
+### 1.1 Inspect the host
 
-### P2 — Kimi Code identity
+Automatically determine:
 
-kimi-bridge drives the official Kimi Code CLI (the `kimi` binary). The legacy Python `kimi-cli` shipped a command with the same name and is incompatible.
+- operating system and shell;
+- whether `uv`, `kimi`, and `kimi-bridge` are installed;
+- how each command resolves on `PATH`;
+- whether an existing config, state file, workspace, or service is present;
+- whether the working paths are new or contain pre-existing data.
 
-Run `command -v kimi`, then `kimi --version` and `kimi --help`.
+Do not install, upgrade, replace, or delete anything during inspection.
 
-- **Official Kimi Code**: `--version` prints a plain semantic version and `--help` lists `web`, `doctor`, and `migrate` commands (usage line `Usage: kimi [options] [command]`). Proceed to P3.
-- **Legacy kimi-cli**: `--version` prints `kimi, version X.Y.Z` and `--help` shows Click-style usage (`Usage: kimi [OPTIONS] COMMAND [ARGS]...`). This is a hard blocker, not a warning. Install official Kimi Code (**EXTERNAL(https://moonshotai.github.io/kimi-code/en/guides/getting-started) → return with `kimi --version` printing a plain semver**), and fix PATH shadowing if both are installed — whichever `kimi` comes first on PATH wins. If the user has legacy sessions worth keeping, official Kimi Code ships `kimi migrate` to import them; mention it.
-- **Not found**: same EXTERNAL link, same checkpoint.
+### 1.2 Require uv
 
-Trap to warn about: the bare `https://code.kimi.com/` URL still serves the *legacy* kimi-cli installer. Only the `/kimi-code/install.sh` path (or npm `@moonshot-ai/kimi-code`) installs the right product — this is exactly what the fingerprint check above catches.
+Run:
 
-### P3 — Kimi Code authentication
+```bash
+uv --version
+```
 
-An unauthenticated Kimi Code lets `kimi-bridge doctor` pass but kills the bridge at startup. Two authentication paths; let the user pick:
+The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step does not involve user actions, if not user approval.
 
-- **Official OAuth**: run `kimi`, then `/login` inside the TUI. The flow is device-code — it works headless (open the link on any device, sign in, enter the code).
-- **Own provider configuration**: an API key from `platform.kimi.com` / `platform.kimi.ai`, or a custom provider, configured in `~/.kimi-code/config.toml`. Kimi Code does **not** read shell environment variables like `KIMI_API_KEY` on its own — keys must live in the config file. **EXTERNAL(https://moonshotai.github.io/kimi-code/en/configuration/config-files) → return with a working config.**
+Installing kimi-bridge without `uv` is feasible but is not tested by this project. If the user chooses another Python installation method, assist using your own packaging knowledge, state that the route is untested, and validate the resulting `kimi-bridge` executable and dependencies.
 
-Verification gate: `kimi doctor config` exits 0. If the bridge later fails at startup with `kimi-bridge: kimi-code is not authenticated; …`, loop back here. If it fails with `kimi server configuration has no default_model`, the config needs a top-level `default_model` pointing at a configured model — fix it in the same config file and re-verify.
+### 1.3 Require official Kimi Code
 
-### P4 — Network reachability (after platform choice)
+Run:
 
-Do these after §PL, before credentials:
+```bash
+command -v kimi
+kimi --version
+kimi --help
+```
 
-- **Telegram**: probe `https://api.telegram.org` with a bounded request, e.g. `curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://api.telegram.org`. Any HTTP status at all (even 4xx) means the network path works. Only a connection, DNS, or TLS failure means *unsupported*: Telegram is blocked from this network; the user needs a different network or a different platform.
-- **QQ**: REST calls require this host's public egress IP on the bot's console IP whitelist. Determine it with a bounded HTTPS request (`curl -fsS -m 10 https://ifconfig.me`) and hand it to the user for the console step in §CQ. Warn: on a dynamic-IP home connection this whitelist entry will rot.
-- **Feishu/Lark**: ask whether the tenant is Feishu (feishu.cn) or Lark international (larksuite.com) — consoles and API hosts differ. The bridge requires the WebSocket long-connection event mode; see §CF for the Lark caveat.
+kimi-bridge requires official Kimi Code. Its top-level help includes `web`, `doctor`, and `migrate`. The incompatible legacy Python `kimi-cli` uses a Click-style command surface and commonly prints `kimi, version ...`.
 
-## I — Install
+If Kimi Code is absent or the legacy product shadows it, research the current official [Kimi Code installation guide](https://moonshotai.github.io/kimi-code/en/guides/getting-started) and help the user install or expose the correct executable. Preserve legacy sessions; if migration is wanted, use Kimi Code's supported migration path.
 
-### I1 — Install or upgrade
+### 1.4 Prove Kimi Code readiness
 
-Check `kimi-bridge --version` (or `uv tool list`).
-- Already installed → `uv tool upgrade kimi-bridge`, then rejoin at §D (config and credentials already exist).
-- Fresh → `uv tool install kimi-bridge`.
+Run:
 
-### I2 — Bridge ↔ Kimi Code compatibility
+```bash
+kimi doctor config
+```
 
-Run `kimi-bridge compat --kimi-code "$(kimi --version)"` (plain `kimi-bridge compat` auto-detects the installed kimi). Verdicts:
+Then make Kimi Code complete a small, non-destructive prompt through its normal user-facing path. Configuration validation alone is insufficient: authentication, provider availability, and the default model must all work.
 
-- **Supported** → proceed.
-- **Untested, newer than every tested version** → live protocol checks are attempted; this usually works but is not guaranteed. Surface this as an explicit risk statement to the user and let them decide.
-- **Tested only by older bridge releases** → the verdict names them; either upgrade Kimi Code or install the named bridge release (`uv tool install kimi-bridge==<version>`).
+Authentication or provider selection may require the user's login or secret entry. Research the current official [Kimi Code configuration documentation](https://moonshotai.github.io/kimi-code/en/configuration/config-files), guide that user-only action precisely, and resume with both checks.
 
-The maintained mapping of bridge releases to tested Kimi Code versions lives at `https://github.com/Mtrya/kimi-bridge/raw/main/src/kimi_bridge/compatibility-map.json`; consult it when the local verdict is stale. The happy path is latest kimi-bridge + latest Kimi Code.
+Do not proceed to platform setup until a real Kimi Code response succeeds.
 
-### I3 — Downgrade abort leaf
+## 2. Install and classify compatibility
 
-If the user downgraded kimi-bridge after a newer version had run, startup fails with `unsupported bridge state format` — the newer `state.json` schema is intentionally not downgradable. *Abort* options, using the active instance's configured `state_path` (default `~/.kimi-bridge/state.json`; multi-instance setups have one per config): restore a backup of that file, or delete it (loses session bindings and per-conversation settings; credentials in `config.toml` are untouched). Then re-run doctor for the matching bridge version and installation (uv or pipx).
+### 2.1 Install or upgrade with approval
 
-## PL — Platform choice
+If kimi-bridge is absent, propose:
 
-Ask which chat app the user actually lives in, then present the tradeoffs. One adapter runs per bridge process.
+```bash
+uv tool install kimi-bridge
+```
 
-- **Feishu** (recommended default): live-validated. Richest feature set — interactive approvals and questions, optional thinking stream, file upload/download. Heaviest setup: console scopes, event subscriptions, and an app-version publish.
-- **QQ**: live-validated in sandbox. Streams answers, but permission mode is forced to `auto` — **every tool call is auto-approved, and there are no approval prompts, questions, or thinking stream**. Make sure the user explicitly accepts that security posture. Console is Chinese-only; sandbox/review overhead applies.
-- **Telegram**: experimental — full interactivity (approvals, questions) but **not yet live-validated**. Simplest credentials (one bot token). Blocked in some networks (§P4).
+If it is already installed, inspect its version and configuration before proposing an upgrade. Upgrading a working installation is a mutation and requires user approval.
 
-If the user wants more than one platform, use the multi-instance pattern: one bridge process per platform, each with its own config file (`--config`), distinct `state_path` and `default_workspace` in each config, and (on Linux) its own systemd unit. Never point two instances at the same `state_path` or workspace, and never run two instances against the same bot account — inbound messages would be split between them. Distinct platforms only.
+After installation:
 
-## S — Settings
+```bash
+command -v kimi-bridge
+kimi-bridge --version
+kimi-bridge --help
+```
 
-Create `~/.kimi-bridge/config.toml` (TOML; custom path possible via `--config` or `KIMI_BRIDGE_CONFIG`). Full key reference: `docs/CONFIGURATION.md`.
+### 2.2 Run compatibility classification
 
-Defaults are right for almost everyone. The interview normally sets only three things: `platform`, the platform credentials, and `allowed_users`. Mention, don't interrogate:
+Run:
 
-- `max_output_seconds` must be at least 46 × `edit_throttle_seconds` (Feishu's 20-edit budget) — only relevant if the user customizes either; the error names both keys.
-- `kimi_server.port`: leave unset. It only pins the loopback port of the internal Kimi server; the default is ephemeral and correct, including multi-instance.
-- Permission mode and thinking rendering are **not** config keys — they are per-conversation runtime state changed with `/mode` and `/render-thinking` in chat. Defer them to the closing report.
+```bash
+kimi-bridge compat
+```
 
-Secret-entry protocol, all platforms:
+Handle every verdict:
 
-1. You write the config file with placeholder credential values and a placeholder allowlist entry.
-2. The user fills in real secrets in their own editor. You do not watch, read, or receive them.
-3. `chmod 600` the config file.
-4. Verification is `kimi-bridge doctor` (§D) — never direct inspection.
+- **Supported by the current bridge:** continue.
+- **Supported only by other bridge releases:** explain the named release choices. Prefer upgrading Kimi Code or kimi-bridge toward the current supported pair; obtain approval before changing either.
+- **Untested and older than every tested version:** recommend upgrading Kimi Code. Proceed only if the user explicitly accepts an unsupported-risk live attempt.
+- **Untested within the tested range:** explain that no bridge release recorded this exact version despite testing versions on both sides. Recommend a tested Kimi Code version; proceed only with explicit risk acceptance.
+- **Untested and newer than every tested version:** explain that the bridge will attempt live protocol validation but compatibility is not established. Proceed only with explicit risk acceptance.
 
-## C — Credentials
+The packaged compatibility map is the source of truth. Do not maintain or consult a second supported-version list.
 
-Each platform section ends at the same verification gate: `kimi-bridge doctor` reports `OK adapter:` for the selected platform (§D). Wrong credentials discovered later loop back here.
+## 3. Platform preflight
 
-### C0 — Allowlist bootstrap (all platforms)
+Ask which platform the user wants only after host readiness is established. One process runs one adapter.
 
-`allowed_users` must be non-empty or the adapter refuses to build, but the user's platform ID is only discoverable after the bridge runs. Bootstrap with a placeholder:
+Explain the relevant choices:
 
-1. Write the config with a placeholder (`allowed_users = ["placeholder"]` for Feishu/QQ, `[1]` for Telegram).
-2. Start the bridge in the foreground (`kimi-bridge`).
-3. The user messages the bot from their own account. The bridge drops the message and logs a WARNING containing their ID with copy-paste guidance (exact formats per platform below).
-4. The user pastes the real ID into `allowed_users` (replacing the placeholder), restarts the bridge.
+- **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, and file transfer. Requires a published custom app, permissions, event subscriptions, and long-connection delivery.
+- **QQ:** supported and live-validated for C2C messaging. It has no interactive approvals, questions, or separate thinking stream, so sessions are forced into `auto` permission mode. Obtain explicit acceptance of this security posture.
+- **Telegram:** experimental and not project-live-validated. It supports private chats only. Startup uses long polling and takes over any existing webhook.
 
-### CF — Feishu
+Before configuring the selected platform, establish:
 
-1. **CF1 — App and bot**: **EXTERNAL(https://open.feishu.cn/document/develop-process/self-built-application-development-process) → return with an App ID, App Secret, the bot capability enabled, and the app made available to the intended user.** The console (open.feishu.cn/app) is login-walled and its menus change; if a menu name doesn't match, fetch current official docs instead of guessing.
-2. **CF2 — Scopes** (bridge-specific; upstream docs won't tell you this list): grant tenant scopes `im:message.p2p_msg:readonly`, `im:message:readonly`, `im:message:send_as_bot`, `im:message:update`, and `im:resource` (or the narrower resource upload/download scopes available to the app).
-3. **CF3 — Events and callbacks**: configure the WebSocket long connection (not a webhook), subscribe to `im.message.receive_v1`, and enable `card.action.trigger` callbacks on that connection. References: https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case and https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/handle-card-callbacks.
-4. **CF4 — Publish**: scope/event changes take effect only after creating a new app version and passing enterprise-admin review. If approval is pending, this is a resumable wait — note where you stopped and resume here; do not improvise a workaround.
-5. **CF5 — User identity**: §C0 placeholder flow. The log line is `ignored a message from a non-allowlisted Feishu user (open_id='ou_…', user_id='…'); add either identity to [feishu].allowed_users`. Prefer `open_id` (stable per app); `user_id` also works.
-6. **Lark international tenants**: same flow under open.larksuite.com, but the bridge requires the long-connection mode (CF3). If the Lark console does not offer it for the app → *unsupported*, no workaround claimed.
+1. Is the user familiar with creating and operating bots on this platform?
+2. Do they already have a bot application?
+3. If so, is it dedicated to kimi-bridge, and may its configuration or event consumer be changed?
+4. If not, are they willing and authorized to create and publish one?
 
-### CQ — QQ
+Do not encourage reuse merely because a bot exists. Prefer a dedicated bot when kimi-bridge would displace another webhook, long poller, gateway connection, or event consumer.
 
-1. **CQ1 — Bot registration**: **EXTERNAL(https://bot.q.qq.com/wiki/) → return with an AppID and AppSecret.** Console: q.qq.com (login-walled). The AppSecret is shown once at creation — have the user copy it immediately. The old `Token` credential is deprecated upstream. Console and wiki are Chinese-only; offer to walk the user through with translated menu names, fetching the current wiki if menus drifted.
-2. **CQ2 — IP whitelist**: put this host's egress IP (§P4) on the console IP whitelist, or REST sends fail.
-3. **CQ3 — User identity**: §C0 placeholder flow. The log line is `unauthorized sender openid: … — add it to [qq].allowed_users`. `allowed_users` entries are these `user_openid` values.
-4. **CQ4 — Sandbox vs production**: develop against the sandbox first (the bridge is live-validated there; specifics shift — check the current console/wiki rather than trusting memory). Production launch requires console review; documented timeline is same-day for submissions before 16:00 (China time), next day otherwise (FAQ: https://q.qq.com/wiki/FAQ/robot/ — volatile). Review waits are resumable: note where you stopped and resume here.
+If `lark-cli` is already installed, it may be used during Feishu setup as described below. If it is absent, do not mention, recommend, or install it.
 
-### CT — Telegram
+## 4. Prepare private local configuration
 
-Experimental adapter — repeat the not-live-validated caveat once, here.
+The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `KIMI_BRIDGE_CONFIG` select another path. Use [Configuration](docs/CONFIGURATION.md) as the schema authority.
 
-1. **CT1 — Bot token**: **EXTERNAL(https://core.telegram.org/bots/features#the-botfather) → return with a bot token from BotFather (`/newbot`).**
-2. **CT2 — User ID**: §C0 placeholder flow (`allowed_users = [1]`). The log line is `ignored a message from a non-allowlisted Telegram user (user_id=…); add it to [telegram].allowed_users`. `allowed_users` entries are numeric Telegram user IDs. Do not recommend third-party "ID bots" — the bridge log is the safe discovery path.
+Before writing:
 
-## D — Doctor reference
+- inspect whether the target file already exists;
+- inspect, without displaying secrets, which platform and paths it defines;
+- preserve unrelated adapter tables and existing custom settings;
+- determine whether `default_workspace` and `state_path` already contain data.
 
-`kimi-bridge doctor` validates without starting services. Branch on check names paired with statuses — never on the exit code alone (exit 1 just means "some check errored"). Parse output whitespace-tolerantly: statuses are padded (e.g. `ERROR  config:` with two spaces), and a check name may appear more than once (a `config` WARN for unknown keys follows the `config` OK). Any `ERROR` entry is blocking.
+Create the parent directory with private permissions when needed. Write the non-secret structure and placeholders yourself. Have the user enter only credentials that cannot be transferred through an existing secure local mechanism.
 
-Checks, in emitted order: `config`, `config permissions`, `adapter`, `workspace`, `state`, `kimi`, `kimi config`. Statuses: `OK`, `WARN`, `ERROR`, `SKIP`. Exit code is 1 if and only if at least one `ERROR` exists; `WARN` and `SKIP` never fail the run.
+On POSIX systems:
 
-SKIP cascades are expected behavior, not extra failures: a `config` failure skips `adapter`/`workspace`/`state` (`configuration unavailable`); a `kimi` failure skips `kimi config`. Fix the root check and re-run.
+```bash
+chmod 600 ~/.kimi-bridge/config.toml
+```
 
-Per-check branches:
+Do not start with a fabricated allowlist identity and call it configured. Use the selected platform's identity-discovery procedure below, then write the real identity.
 
-- `ERROR config: not found: …` → create the file (§S). `invalid configuration (…)` → fix the TOML; values are deliberately not shown.
-- `WARN config: unknown configuration keys ignored: …` → typos in key names (e.g. `feishu.ap_id`); fix them — the keys are silently ignored at runtime otherwise.
-- `WARN config permissions: … readable by group or others` → must-fix: `chmod 600`. Other WARNs are acceptable to proceed.
-- `ERROR adapter: selected … adapter is missing credentials [and allowlist]` → back to §C.
-- `ERROR workspace:` / `ERROR state:` → fix the named path problem; `state: existing state is unreadable or invalid` means `state.json` is corrupt or from a newer bridge (§I3).
-- `ERROR kimi:` → §P2 problems (not found, legacy product, unrecognized fingerprint). `WARN … UNTESTED KIMI CODE VERSION …` → §I2 risk statement; acceptable to proceed only with the user's explicit go-ahead.
-- `ERROR kimi config: noninteractive validation failed or timed out` → the check has a 15s timeout and false-fails on slow machines. Run `kimi doctor config` yourself; if it passes, treat the doctor error as environmental and continue. If it genuinely fails → §P3.
+## 5. Feishu bootstrap
 
-## T — Smoke test
+Official starting points:
 
-Only an allowlisted account can drive these. Expected behavior, so you don't "fix" a working bridge:
+- [Feishu custom app development](https://open.feishu.cn/document/develop-process/self-built-application-development-process)
+- [Long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)
+- [Card callback handling](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/handle-card-callbacks)
 
-- Fresh install: `/status` replies `No bound session.` — that **is** success.
-- The first real message silently auto-creates a session. No confirmation is expected.
+Research these sources and the current console before guiding the user. Translate console labels when useful.
 
-Sequence (Feishu / Telegram):
+### 5.1 Inspect or create the app
 
-1. Start the bridge in the foreground; wait for `kimi server is ready on 127.0.0.1:…`. Startup failures with `kimi-bridge: …` loop back to §P or §C.
-2. Send `/status` → `No bound session.`
-3. Send a normal message → a streamed reply arrives. `/status` now shows a bound session.
-4. Approval round-trip: with the default `manual` mode, ask the agent to create a file (e.g. `smoke-test.txt`) → an interactive approval card/keyboard appears → approve → the file is created.
-5. Negative test: message the bot from a **non**-allowlisted account → no reply, exactly one WARNING log line. This proves the allowlist, not just the bot.
+If an app already exists, automatically establish through available CLI/API inspection or user-guided console inspection:
 
-QQ variant: steps 1–3 and 5 only, with visible streaming in step 3. Step 4 is structurally impossible (forced `auto`, no interaction prompts) — never attempt it on QQ, and re-confirm the user accepted the forced-`auto` posture (§PL).
+- tenant and app identity;
+- whether the bot capability is enabled;
+- current published version;
+- current scopes;
+- subscribed events and callback delivery mode;
+- intended availability;
+- whether another service consumes its events.
 
-Closing report (the *done* outcome): platform, config path, where logs go, how to stop the bridge, and the runtime commands worth knowing — `/status`, `/mode`, `/render-thinking`, `/sessions`. No secrets, no mechanics of this file.
+Ask for approval before changing an existing app.
 
-## X — Persistence and rollback
+If a new app is needed, app ownership, login, consent, and any enterprise authorization are user-only. Give a researched click-by-click guide for creating a custom app and enabling its bot capability. Perform all API- or CLI-capable follow-up yourself.
 
-### X1 — Persistence
+### 5.2 Configure required permissions
 
-One question: does the user want kimi-bridge to start on boot?
+Ensure the app has these tenant permissions:
 
-- No → done.
-- Yes → recommend a per-user systemd unit on Linux (sample: `docs/kimi-bridge.service`); multi-instance means one unit per config file. Configure it with your own competence for the platform at hand — including SSH/linger quirks on Linux and launchd / Task Scheduler equivalents elsewhere — rather than expecting instructions here.
+- `im:message.p2p_msg:readonly`
+- `im:message:readonly`
+- `im:message:send_as_bot`
+- `im:message:update`
+- `im:resource`, or current narrower permissions that together cover the bridge's uploads and downloads
 
-### X2 — Rollback on abort
+Explain why each missing permission is needed. Do not ask for broad unrelated scopes.
 
-Artifacts a setup may have created, in removal order: systemd unit (disable and remove), the bridge installation (via whichever tool manager installed it — `uv tool uninstall kimi-bridge` or `pipx uninstall kimi-bridge`), the configured `state_path` and `default_workspace` (defaults `~/.kimi-bridge/state.json` and `~/.kimi-bridge/workspace/`; multi-instance setups have one set per config), and the config file (default `~/.kimi-bridge/config.toml`). **Never delete the config file without explicit user confirmation — it holds the credentials.** Report exactly which paths were removed. Platform-side leftovers (Feishu app versions, QQ sandbox bots, Telegram bots) are removed in their respective consoles; point the user at them.
+### 5.3 Configure delivery
+
+Configure WebSocket long-connection delivery, not a webhook. Subscribe to:
+
+- `im.message.receive_v1`
+- `card.action.trigger`
+
+Check that the app is available to the intended user. Scope, event, or callback changes usually require a new app version and enterprise approval. Guide the user through the exact publication action, then pause for review when necessary.
+
+### 5.4 Use lark-cli only when already present
+
+When `command -v lark-cli` succeeds, use it where helpful to inspect authentication, app metadata, required schemas, published scopes, event subscriptions, and bounded event delivery.
+
+Treat `lark-cli config init --new` as a mutating app/profile operation. Inspect its current help and profiles, explain the effect, and obtain approval before running it. Prefer a named profile when that preserves an existing setup.
+
+lark-cli can create or inspect an app and diagnose scopes or events, but it does not prove that all console permissions are granted or that an app version is published. kimi-bridge also does not read its keychain directly. Never describe lark-cli as a required dependency or a complete bootstrap.
+
+### 5.5 Obtain credentials and identity
+
+App Secret retrieval or reset is user-only when the console requires the user's identity. Have the user place it directly into the protected configuration through a private local path. Do not display it.
+
+Prefer the intended user's `open_id` from the same app and tenant. Discover it through an authenticated platform API, an already available lark-cli path, or a bounded inbound event listener. If console-side configuration makes those impossible before bridge startup, use a temporary non-matching allowlist, start the bridge in the foreground, have the intended user send one direct message, and take the logged `open_id` from the local process. Replace the temporary value immediately.
+
+### 5.6 Validate Feishu
+
+Run local validation, then perform a live round trip:
+
+1. `kimi-bridge doctor`
+2. start `kimi-bridge` in the foreground;
+3. confirm the long connection becomes ready;
+4. have the allowlisted user send `/status`;
+5. confirm the expected reply;
+6. send a normal prompt and confirm the streamed answer completes;
+7. exercise one approval or question interaction;
+8. if file support is needed, test one inbound and one outbound file;
+9. stop cleanly.
+
+Do not report Feishu ready if only a CLI event consumer or `doctor` passed.
+
+## 6. QQ bootstrap
+
+Official starting points:
+
+- [QQ bot getting started](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)
+- [Access tokens](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html)
+- [Events and intents](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)
+- [Gateway discovery](https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/url_get.html)
+- [Message model](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)
+
+Research current console and documentation before instructing the user; QQ's console, review rules, hosts, and availability can change.
+
+### 6.1 Inspect or create the bot
+
+Establish whether the user has a suitable bot, whether it is sandbox or production, who owns it, which testers can use it, and whether another gateway consumer is active.
+
+Creating the bot, accepting platform terms, selecting its owner, and submitting production review are user-only. Give a researched procedure for only those actions. Prefer a dedicated bot.
+
+### 6.2 Configure access
+
+Ensure:
+
+- AppID and AppSecret are available; do not use the deprecated Token credential;
+- the bot has the `GROUP_AND_C2C_EVENT` intent or its current documented equivalent;
+- the intended account is available as a sandbox tester when applicable;
+- this host's current public egress IP is on the OpenAPI whitelist when the console requires it.
+
+The intent is a special permission. A successful token request does not prove gateway authorization. A dynamic egress IP can invalidate a previously working REST setup.
+
+### 6.3 Discover the user identity
+
+QQ authorization uses the app-specific C2C `user_openid`, not a QQ number or display name. Prefer discovery from a bounded gateway event. If the bridge must be used to receive it, configure a temporary non-matching allowlist, start in the foreground, have the intended tester send one C2C message, and copy the rejected sender's `user_openid` from the local warning. Replace the temporary value immediately.
+
+### 6.4 Validate QQ
+
+Validate each layer independently:
+
+1. `kimi-bridge doctor`
+2. access-token exchange;
+3. gateway URL discovery;
+4. WebSocket identify with the required intent;
+5. an inbound C2C message from the real allowlisted `user_openid`;
+6. a completed passive reply through the adapter;
+7. one normal Kimi prompt with visible streaming and clean finalization;
+8. any media types the installation actually needs;
+9. clean shutdown.
+
+Reconfirm that QQ runs in forced `auto` mode and cannot present approvals or questions. Respect the platform's passive-reply budget when designing repeated tests.
+
+Do not change a working API origin solely because current documentation names a newer host. Verify the exact endpoint behavior before proposing a code or configuration change.
+
+## 7. Telegram bootstrap
+
+Official starting points:
+
+- [Telegram bots](https://core.telegram.org/bots)
+- [Telegram Bot API](https://core.telegram.org/bots/api)
+- [BotFather](https://core.telegram.org/bots/features#botfather)
+
+Telegram is experimental. State that before the user invests in setup.
+
+### 7.1 Inspect takeover risk
+
+Prefer a new dedicated bot. For an existing bot, use `getMe` and `getWebhookInfo` without exposing the token. Establish whether it has:
+
+- an active webhook;
+- queued updates;
+- another `getUpdates` consumer;
+- another production owner or integration.
+
+kimi-bridge deletes the existing webhook with `drop_pending_updates=true` and then starts long polling. Removing a webhook, discarding queued updates, or displacing another consumer requires explicit approval. If the bot cannot be dedicated to kimi-bridge, stop this path.
+
+### 7.2 Create and configure
+
+Bot creation and token issuance through BotFather are user-only. Research the current BotFather flow and guide the user through the minimum actions. Have the user put the token directly into the protected local config.
+
+Telegram authorization uses a positive numeric user ID. Prefer discovery from an authenticated Bot API update. If bridge startup is needed, use a temporary positive non-matching allowlist, have the intended user send a private message, read the rejected `user_id` locally, and replace the temporary value immediately.
+
+The current adapter accepts private user chats only. Groups, channels, topics, and messages from bots are unsupported.
+
+### 7.3 Validate Telegram
+
+After takeover approval where applicable:
+
+1. `kimi-bridge doctor`
+2. `getMe`;
+3. confirm the webhook state;
+4. start the bridge;
+5. receive a private message from the allowlisted numeric user ID;
+6. return a complete reply;
+7. test one approval interaction;
+8. stop cleanly.
+
+Report that this installation passed its own live check, while retaining the project's experimental label.
+
+## 8. Doctor and startup diagnosis
+
+Run:
+
+```bash
+kimi-bridge doctor
+```
+
+`doctor` validates local configuration, permissions, paths, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
+
+Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platform ready. Common branches:
+
+- missing or invalid config: repair the protected file;
+- unknown keys: correct typos because unknown keys are ignored at runtime;
+- unsafe config permissions: restrict the file;
+- missing credentials or allowlist: return to the selected platform bootstrap;
+- unusable workspace or state path: distinguish setup-created paths from pre-existing user data before changing anything;
+- legacy or missing `kimi`: return to Kimi Code preflight;
+- Kimi configuration failure: run `kimi doctor config` directly and prove a real prompt;
+- untested Kimi Code: follow the compatibility decision above.
+
+Start in the foreground before creating a persistent service. Route a clean `kimi-bridge: ...` startup error back to the relevant configuration or platform step. Preserve the traceback for unexpected implementation defects.
+
+## 9. Persistence
+
+After the foreground live test passes, ask whether the user wants the bridge to run persistently.
+
+If no, setup is done.
+
+If yes, inspect the host's native service mechanism. On Linux with systemd, adapt [the user-service template](docs/kimi-bridge.service) to the actual absolute executable and config paths. Creating, enabling, or starting a service is a mutation:
+
+1. show the reviewed unit without secrets;
+2. obtain approval to create it;
+3. validate it before starting;
+4. obtain approval to enable/start it;
+5. inspect logs;
+6. repeat a real platform round trip against the service.
+
+Treat `loginctl enable-linger` as a separate host-lifecycle decision requiring explicit approval.
+
+For multiple platforms, use one process, config, state path, workspace, service, and bot account per instance. Never let instances share a state file, workspace, or bot consumer.
+
+## 10. Final report and safe abort
+
+For a completed setup, report:
+
+- selected platform and its support status;
+- installed kimi-bridge and Kimi Code versions;
+- compatibility verdict;
+- config and service paths;
+- which live checks passed;
+- how to start, stop, and inspect logs;
+- important platform limitations;
+- useful chat commands from [Commands](docs/COMMANDS.md).
+
+Do not include credentials or full allowlist identities.
+
+On abort, inventory changes made during this setup. Offer to reverse only those changes. Uninstalling the executable or removing a newly created service must preserve existing config, state, workspaces, inbound files, Kimi sessions, and platform apps by default. Any deletion of user data or platform-side resources requires separate approval naming the exact targets.

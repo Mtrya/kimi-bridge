@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kimi-bridge"
-version = "0.4.1"
+version = "0.4.2"
 description = "Control a local Kimi Code agent from Feishu, QQ, or Telegram"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,7 +62,6 @@ exclude = ["/references"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/kimi_bridge/assets/video-cover.png" = "kimi_bridge/assets/video-cover.png"
-"src/kimi_bridge/supported-kimi-code-versions.json" = "kimi_bridge/supported-kimi-code-versions.json"
 "src/kimi_bridge/compatibility-map.json" = "kimi_bridge/compatibility-map.json"
 
 [tool.pytest.ini_options]

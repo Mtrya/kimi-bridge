@@ -12,7 +12,6 @@ from importlib.resources import files
 KIMI_CODE_INSTALL_URL = (
     "https://moonshotai.github.io/kimi-code/en/guides/getting-started"
 )
-SUPPORTED_VERSION_MANIFEST_RESOURCE = "supported-kimi-code-versions.json"
 COMPATIBILITY_MAP_RESOURCE = "compatibility-map.json"
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -38,24 +37,6 @@ _LEGACY_KIMI_CLI_HELP_MARKERS = (
     "--mcp-config-file",
     "moonshotai.github.io/kimi-cli/",
 )
-
-
-def _load_supported_versions() -> frozenset[str]:
-    raw = files("kimi_bridge").joinpath(
-        SUPPORTED_VERSION_MANIFEST_RESOURCE
-    ).read_text(encoding="utf-8")
-    payload = json.loads(raw)
-    if payload.get("schema_version") != 1:
-        raise RuntimeError("unsupported Kimi compatibility manifest version")
-    versions = payload.get("versions")
-    if not isinstance(versions, list) or not versions:
-        raise RuntimeError("Kimi compatibility manifest has no versions")
-    normalized = tuple(normalize_kimi_code_version(item) for item in versions)
-    if list(normalized) != sorted(set(normalized), key=kimi_code_version_sort_key):
-        raise RuntimeError(
-            "Kimi compatibility manifest versions must be unique and sorted"
-        )
-    return frozenset(normalized)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,7 +194,7 @@ def normalize_kimi_code_version(version: str) -> str:
 
 
 def kimi_code_version_sort_key(version: str) -> tuple[int, int, int, int, str]:
-    """Return a deterministic semantic ordering key for manifest updates."""
+    """Return a deterministic semantic ordering key for map updates."""
 
     normalized = normalize_kimi_code_version(version)
     without_build = normalized.split("+", 1)[0]
@@ -304,5 +285,5 @@ def _has_markers(text: str, markers: tuple[str, ...]) -> bool:
     return all(marker in text for marker in markers)
 
 
-SUPPORTED_KIMI_CODE_VERSIONS = _load_supported_versions()
 COMPATIBILITY_MAP = _load_compatibility_map()
+SUPPORTED_KIMI_CODE_VERSIONS = frozenset(COMPATIBILITY_MAP[-1].kimi_code)
