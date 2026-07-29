@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,14 +54,6 @@ AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
 DRIFT_MARKER = "<!-- kimi-bridge:upstream-drift -->"
 DRIFT_LABEL = "upstream-drift"
-PROJECT_VERSION_RE = re.compile(
-    r'(?ms)^(\[project\]\n.*?^version = ")(\d+\.\d+\.\d+)(")$'
-)
-LOCKED_PROJECT_RE = re.compile(
-    r'(?ms)^(\[\[package\]\]\nname = "kimi-bridge"\nversion = ")'
-    r'(\d+\.\d+\.\d+)(")$'
-)
-
 _BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+")
 _FRAGMENT_TOKEN_RE = re.compile(r"(?<=#token=)[A-Za-z0-9_-]+")
 _JSON_TOKEN_RE = re.compile(
@@ -220,6 +213,96 @@ class CompatibilityCheckError(RuntimeError):
         self.category = category
 
 
+def _parse_toml(document: str, name: str) -> dict[str, Any]:
+    try:
+        return tomllib.loads(document)
+    except tomllib.TOMLDecodeError as exc:
+        raise RuntimeError(f"{name} is not valid TOML") from exc
+
+
+def _plain_version(value: object, source: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d+\.\d+\.\d+", value) is None
+    ):
+        raise RuntimeError(f"{source} has no plain project version")
+    return value
+
+
+def _replace_version_assignment(
+    document: str,
+    *,
+    start: int,
+    end: int,
+    current_version: str,
+    next_version: str,
+    source: str,
+) -> str:
+    section = document[start:end]
+    pattern = re.compile(
+        rf'(?m)^(\s*version\s*=\s*)(["\']){re.escape(current_version)}'
+        rf'(\2\s*(?:#.*)?)$'
+    )
+    updated, count = pattern.subn(
+        rf"\g<1>\g<2>{next_version}\g<3>", section, count=1
+    )
+    if count != 1:
+        raise RuntimeError(f"{source} project version could not be updated")
+    return document[:start] + updated + document[end:]
+
+
+def _update_pyproject_version(
+    document: str, current_version: str, next_version: str
+) -> str:
+    project = re.search(r"(?m)^\[project\]\s*(?:#.*)?$", document)
+    if project is None:
+        raise RuntimeError("pyproject.toml has no [project] table")
+    next_table = re.search(r"(?m)^\[", document[project.end() :])
+    end = (
+        len(document)
+        if next_table is None
+        else project.end() + next_table.start()
+    )
+    return _replace_version_assignment(
+        document,
+        start=project.end(),
+        end=end,
+        current_version=current_version,
+        next_version=next_version,
+        source="pyproject.toml",
+    )
+
+
+def _update_lock_version(
+    document: str, current_version: str, next_version: str
+) -> str:
+    starts = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^\[\[package\]\]\s*(?:#.*)?$", document
+        )
+    ]
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(document)
+        package = _parse_toml(document[start:end], "uv.lock package")
+        entries = package.get("package")
+        if (
+            isinstance(entries, list)
+            and len(entries) == 1
+            and isinstance(entries[0], dict)
+            and entries[0].get("name") == "kimi-bridge"
+        ):
+            return _replace_version_assignment(
+                document,
+                start=start,
+                end=end,
+                current_version=current_version,
+                next_version=next_version,
+                source="uv.lock",
+            )
+    raise RuntimeError("uv.lock has no kimi-bridge package")
+
+
 def prepare_compatibility_release(
     *,
     kimi_code_version: str,
@@ -229,15 +312,26 @@ def prepare_compatibility_release(
 ) -> tuple[str, dict[str, str]]:
     """Build the three files for the next patch compatibility release."""
 
-    project_match = PROJECT_VERSION_RE.search(pyproject)
-    if project_match is None:
-        raise RuntimeError("pyproject.toml has no plain project version")
-    current_version = project_match.group(2)
+    project_payload = _parse_toml(pyproject, "pyproject.toml")
+    project = project_payload.get("project")
+    if not isinstance(project, dict):
+        raise RuntimeError("pyproject.toml has no [project] table")
+    current_version = _plain_version(
+        project.get("version"), "pyproject.toml"
+    )
     major, minor, patch = (int(item) for item in current_version.split("."))
     next_version = f"{major}.{minor}.{patch + 1}"
 
-    lock_match = LOCKED_PROJECT_RE.search(uv_lock)
-    if lock_match is None or lock_match.group(2) != current_version:
+    lock_payload = _parse_toml(uv_lock, "uv.lock")
+    packages = lock_payload.get("package")
+    if not isinstance(packages, list):
+        raise RuntimeError("uv.lock has no package list")
+    locked_versions = [
+        package.get("version")
+        for package in packages
+        if isinstance(package, dict) and package.get("name") == "kimi-bridge"
+    ]
+    if locked_versions != [current_version]:
         raise RuntimeError("uv.lock project version does not match pyproject.toml")
 
     payload = json.loads(compatibility_map)
@@ -265,11 +359,11 @@ def prepare_compatibility_release(
     )
 
     return next_version, {
-        "pyproject.toml": PROJECT_VERSION_RE.sub(
-            rf"\g<1>{next_version}\g<3>", pyproject, count=1
+        "pyproject.toml": _update_pyproject_version(
+            pyproject, current_version, next_version
         ),
-        "uv.lock": LOCKED_PROJECT_RE.sub(
-            rf"\g<1>{next_version}\g<3>", uv_lock, count=1
+        "uv.lock": _update_lock_version(
+            uv_lock, current_version, next_version
         ),
         "src/kimi_bridge/compatibility-map.json": (
             json.dumps(payload, indent=2) + "\n"

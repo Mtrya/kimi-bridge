@@ -55,6 +55,7 @@ build_report = checker.build_report
 check_fixture = checker.check_fixture
 check_live = checker.check_live
 install_official_kimi = checker.install_official_kimi
+prepare_compatibility_release = checker.prepare_compatibility_release
 read_report = checker.read_report
 redact = checker.redact
 summarize_reports = checker.summarize_reports
@@ -839,6 +840,45 @@ class FakeGitHub:
     @staticmethod
     def _json(value: Any, *, status: int = 200) -> httpx.Response:
         return httpx.Response(status, json=value)
+
+
+def test_prepare_compatibility_release_accepts_reordered_commented_toml() -> None:
+    pyproject = (
+        "[project] # package metadata\n"
+        'description = "test"\n'
+        "version = '1.2.3' # release identity\n"
+        'name = "kimi-bridge"\n'
+    )
+    uv_lock = (
+        "version = 1\n\n"
+        "[[package]] # unrelated\n"
+        'version = "9.0.0"\n'
+        'name = "dependency"\n\n'
+        "[[package]] # editable project\n"
+        'source = { editable = "." }\n'
+        'version = "1.2.3" # release identity\n'
+        'name = "kimi-bridge"\n'
+    )
+    compatibility_map = json.dumps(
+        {
+            "schema_version": 1,
+            "releases": [
+                {"bridge": "1.2.3", "kimi_code": ["0.29.2"]}
+            ],
+        }
+    )
+
+    version, files = prepare_compatibility_release(
+        kimi_code_version="0.29.3",
+        pyproject=pyproject,
+        uv_lock=uv_lock,
+        compatibility_map=compatibility_map,
+    )
+
+    assert version == "1.2.4"
+    assert "version = '1.2.4' # release identity" in files["pyproject.toml"]
+    assert 'version = "9.0.0"' in files["uv.lock"]
+    assert 'version = "1.2.4" # release identity' in files["uv.lock"]
 
 
 def test_github_promotion_drift_dedup_and_recovery(
