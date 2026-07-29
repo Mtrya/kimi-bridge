@@ -29,7 +29,11 @@ Only one adapter runs in each bridge process. Feishu uses the official `lark-oap
 
 ## Quick start
 
-The easiest path: open any CLI agent and say — *"Read https://github.com/Mtrya/kimi-bridge/blob/main/INSTALL_AI.md and help me configure kimi-bridge."* The agent interviews you and runs the setup end to end.
+The easiest path: open any CLI agent and say:
+```text
+Read https://github.com/Mtrya/kimi-bridge/blob/main/INSTALL_AI.md and help me configure kimi-bridge.
+```
+The agent interviews you and runs the setup end to end.
 
 Manual skeleton — requires authenticated [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started) and [uv](https://docs.astral.sh/uv/getting-started/installation/):
 
