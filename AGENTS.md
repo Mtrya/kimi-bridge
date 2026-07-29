@@ -16,7 +16,7 @@ Guidance for AI agents (and humans) working in this repo.
 - `src/kimi_bridge/platforms/telegram.py` — the handwritten Telegram Bot API transport and adapter. Telegram update dictionaries, multipart uploads, inline keyboards, callback tokens, `ForceReply` wizard state, retry policy, and file downloads stay here.
 - `src/kimi_bridge/platforms/qq.py` — the handwritten QQ official-bot transport and adapter: access-token refresh, REST client, WS gateway (identify/heartbeat/resume), markdown sanitizer, append-monotonic `stream_messages` streaming with passive/active reply budget bookkeeping, media upload, and inbound dedupe/allowlisting all stay here.
 - `src/kimi_bridge/state.py` — versioned bridge-owned conversation state. New schema changes require an explicit migration that preserves existing bindings; unknown future versions must still fail loudly.
-- `scripts/check_kimi_compatibility.py`, `.github/workflows/kimi-drift.yml`, and `.github/workflows/kimi-drift-release.yml` — credential-free semantic contract checking, compatibility-only patch preparation, and post-merge release publication. Protocol knowledge must remain in `kimi_server`; automation consumes its projection.
+- `scripts/check_kimi_compatibility.py`, `.github/workflows/kimi-compatibility-monitor.yml`, and `.github/workflows/kimi-compatibility-release.yml` — credential-free semantic contract checking, compatibility-only patch preparation, and post-merge release publication. Protocol knowledge must remain in `kimi_server`; automation consumes its projection.
 
 ## kimi server API
 

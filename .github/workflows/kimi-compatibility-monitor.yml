@@ -1,4 +1,4 @@
-name: Kimi compatibility
+name: Kimi compatibility monitor
 
 on:
   schedule:
@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - ".github/workflows/kimi-drift.yml"
-      - ".github/workflows/kimi-drift-release.yml"
+      - ".github/workflows/kimi-compatibility-monitor.yml"
+      - ".github/workflows/kimi-compatibility-release.yml"
       - ".github/workflows/release.yml"
       - "scripts/check_kimi_compatibility.py"
       - "src/kimi_bridge/compatibility.py"

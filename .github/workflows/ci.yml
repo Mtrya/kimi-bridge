@@ -31,6 +31,17 @@ jobs:
       - run: uv sync --locked --dev
       - run: uv run --locked pytest -q
 
+  tests-required:
+    name: tests
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every test job
+        env:
+          TESTS_RESULT: ${{ needs.tests.result }}
+        run: test "$TESTS_RESULT" = "success"
+
   quality:
     runs-on: ubuntu-latest
     steps:
