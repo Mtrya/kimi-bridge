@@ -65,7 +65,7 @@ jobs:
             exit 1
           fi
           git checkout --detach "$release_commit"
-          uv run --locked python scripts/check_release.py --tag "$tag" --commit "$release_commit"
+          uv run --locked python scripts/check_release.py
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$release_commit" --title "kimi-bridge $tag" --generate-notes
           echo "created=true" >> "$GITHUB_OUTPUT"
 
