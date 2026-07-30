@@ -22,9 +22,11 @@ REQUIRED_PACKAGE_FILES = {
 }
 REQUIRED_SOURCE_FILES = {
     "AGENTS.md",
+    "INSTALL.en_US.md",
     "INSTALL.md",
     "INSTALL_AI.md",
     "LICENSE",
+    "README.en_US.md",
     "README.md",
     "docs/ARCHITECTURE.md",
     "docs/COMMANDS.md",
