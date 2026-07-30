@@ -1,6 +1,6 @@
 # kimi-bridge setup agent guide
 
-This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a user-facing tutorial. Humans installing manually should read [INSTALL.md](INSTALL.md) and [Configuration](docs/CONFIGURATION.md).
+This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a user-facing tutorial. Humans installing manually should read [INSTALL.en_US.md](INSTALL.en_US.md) and [Configuration](docs/CONFIGURATION.md).
 
 ## Operating contract
 

@@ -78,4 +78,4 @@ All raw protocol knowledge and the tracked semantic contract stay in `kimi_serve
 
 kimi-bridge does not currently provide mutually untrusted multi-user isolation, simultaneous adapters in one process, a generic capability/UI/plugin framework, remote Kimi server operation, tool-call or transcript rendering, Telegram webhooks/groups/topics/albums, a Telegram framework dependency, QQ group chat or webhook transport, WeChat, or automatic semantic version selection. These are product decisions rather than missing abstractions to route around.
 
-See [Configuration](CONFIGURATION.md), [Commands](COMMANDS.md), and the [installation runbook](../INSTALL.md) for operator-facing contracts.
+See [Configuration](CONFIGURATION.md), [Commands](COMMANDS.md), and the [installation runbook](../INSTALL.en_US.md) for operator-facing contracts.

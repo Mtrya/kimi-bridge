@@ -1,28 +1,30 @@
-# Install kimi-bridge
+# 安装 kimi-bridge
 
-kimi-bridge connects one local Kimi Code installation to one supported chat bot. The recommended setup path is to give [the setup-agent guide](INSTALL_AI.md) to a capable coding agent: platform bot setup involves credentials, permissions, event delivery, identity discovery, and a real end-to-end test that cannot be validated by package installation alone.
+**English**: [INSTALL.en_US.md](INSTALL.en_US.md)
 
-## Support
+kimi-bridge 把一份本地的 Kimi Code 安装连接到一个受支持的聊天机器人。推荐的安装路径是把[智能体安装指南](INSTALL_AI.md)交给一个得力的编程智能体：平台机器人的配置涉及凭据、权限、事件投递、身份发现，以及一次真实的端到端测试，这些环节仅靠安装软件包无法验证。
 
-| Platform | Status | Important limitation |
+## 支持情况
+
+| 平台 | 状态 | 重要限制 |
 | --- | --- | --- |
-| Feishu | Supported and live-validated | Requires a published custom app, long-connection events, permissions, and an allowlist |
-| QQ | Supported and live-validated for C2C | Forced `auto` permission mode; no approval prompts, questions, or separate thinking stream |
-| Telegram | Experimental | Private chats only; startup replaces any webhook and drops pending updates |
-| Lark International | Unsupported | The current adapter uses Feishu API and WebSocket domains |
+| 飞书 | 已支持并经过真实环境验证 | 需要已发布的自建应用、长连接事件、相应权限和白名单 |
+| QQ | 已支持，C2C 场景经过真实环境验证 | 强制 `auto` 权限模式；没有审批提示、提问和独立的思考流 |
+| Telegram | 实验性 | 仅限私聊；启动时会替换已有的 webhook 并丢弃待处理的更新 |
+| Lark 国际版 | 不支持 | 当前适配器使用飞书的 API 和 WebSocket 域名 |
 
-One kimi-bridge process runs one platform adapter. Use separate processes, configs, state files, workspaces, services, and bot accounts for multiple platforms.
+一个 kimi-bridge 进程只运行一个平台适配器。如需接入多个平台，请使用各自独立的进程、配置、状态文件、工作区、服务和机器人账号。
 
-## Prerequisites
+## 前置条件
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Python 3.11 or newer, supplied or selected by uv
-- authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
-- a dedicated bot application on the selected platform
+- Python 3.11 或更高版本，由 uv 提供或选择
+- 已完成认证的官方 [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
+- 所选平台上的一个专用机器人应用
 
-The older Python `kimi-cli` product is incompatible even though it also installs a `kimi` command. Official Kimi Code's help includes `web`, `doctor`, and `migrate`.
+旧的 Python `kimi-cli` 产品虽然也安装 `kimi` 命令，但并不兼容。官方 Kimi Code 的帮助信息中包含 `web`、`doctor` 和 `migrate`。
 
-Verify Kimi Code before installing the bridge:
+安装 bridge 之前先验证 Kimi Code：
 
 ```bash
 kimi --version
@@ -30,11 +32,11 @@ kimi --help
 kimi doctor config
 ```
 
-Kimi Code must also complete a real prompt. A configuration check alone does not prove authentication or model availability.
+Kimi Code 还必须能完成一次真实的提示请求。仅通过配置检查并不能证明认证或模型可用。
 
-Installing without uv is feasible but is not tested by this project.
+不通过 uv 安装也是可行的，但本项目未测试这种方式。
 
-## Install
+## 安装
 
 ```bash
 uv tool install kimi-bridge
@@ -42,13 +44,13 @@ kimi-bridge --version
 kimi-bridge compat
 ```
 
-`compat` compares the installed Kimi Code version with the compatibility history packaged in kimi-bridge. Use a tested pair when possible. An untested version may still be attempted, but it is not established as compatible.
+`compat` 会把已安装的 Kimi Code 版本与 kimi-bridge 内置的兼容性历史进行对比。请尽量使用经过测试的版本组合。未测试的版本仍会尝试运行，但不保证兼容。
 
-## Configure
+## 配置
 
-kimi-bridge reads `~/.kimi-bridge/config.toml` by default. A different file can be selected with `--config PATH` or `KIMI_BRIDGE_CONFIG`.
+kimi-bridge 默认读取 `~/.kimi-bridge/config.toml`。可以用 `--config PATH` 或 `KIMI_BRIDGE_CONFIG` 指定其他文件。
 
-Create a private file:
+创建私有配置文件：
 
 ```bash
 install -d -m 700 ~/.kimi-bridge
@@ -56,53 +58,53 @@ touch ~/.kimi-bridge/config.toml
 chmod 600 ~/.kimi-bridge/config.toml
 ```
 
-Populate one adapter using [the complete configuration reference](docs/CONFIGURATION.md). Enter credentials through a private local editor or secret manager; do not put them on command lines, commit them, or paste them into issue reports.
+参照[完整的配置参考](docs/CONFIGURATION.md)填写一个适配器。请通过本地私有编辑器或密钥管理工具输入凭据；不要把凭据写在命令行里、提交进版本库，或粘贴到 issue 报告中。
 
-Platform setup requires more than credentials:
+平台侧的配置不止需要凭据：
 
-- Feishu needs the bot capability, exact message/resource permissions, long-connection message and card events, a published app version, and the intended user's `open_id`.
-- QQ needs AppID/AppSecret, access for the intended sandbox tester when applicable, and the intended user's app-specific `user_openid`.
-- Telegram needs a bot token, the intended user's numeric ID, and a dedicated bot whose existing webhook or update consumer may safely be replaced.
+- 飞书需要启用机器人能力、精确的消息/资源权限、长连接的消息和卡片事件、已发布的应用版本，以及目标用户的 `open_id`。
+- QQ 需要 AppID/AppSecret、在适用时为目标沙箱测试用户开通权限，以及目标用户在该应用下的 `user_openid`。
+- Telegram 需要 bot token、目标用户的数字 ID，以及一个专用机器人——它已有的 webhook 或更新消费者必须可以被安全替换。
 
-The setup agent guide contains the platform-specific bootstrap and verification procedures. Official platform references are linked from there for manual operators.
+智能体安装指南包含各平台具体的初始化与验证流程。手动操作者可以从该指南中找到官方平台文档的链接。
 
-## Validate
+## 验证
 
-Run the non-starting diagnostic:
+运行不启动任何组件的诊断：
 
 ```bash
 kimi-bridge doctor
 ```
 
-Resolve every error before startup. `doctor` checks local configuration, paths, Kimi Code, and credential presence. It does not connect to the chat platform, validate bot permissions, receive an event, or send a message.
+启动前解决所有报错。`doctor` 检查本地配置、路径、Kimi Code 和凭据是否存在。它不会连接聊天平台、验证机器人权限、接收事件或发送消息。
 
-Start in the foreground:
+前台启动：
 
 ```bash
 kimi-bridge
 ```
 
-From the allowlisted chat account:
+在白名单内的聊天账号中：
 
-1. send `/status` and confirm a reply;
-2. send a normal prompt and confirm the streamed response completes;
-3. on Feishu or Telegram, exercise an approval or question;
-4. test any file types your installation depends on.
+1. 发送 `/status`，确认收到回复；
+2. 发送一条普通提示，确认流式回复完整结束；
+3. 在飞书或 Telegram 上，实际操作一次审批或提问；
+4. 测试你的使用场景所依赖的文件类型。
 
-Do not consider setup complete until this live round trip passes.
+以上真实链路全部通过之前，不要认为安装已完成。
 
-## Run persistently
+## 常驻运行
 
-Foreground operation is fully supported. On Linux, [the systemd user-unit template](docs/kimi-bridge.service) can be adapted to the absolute paths reported by:
+前台运行是完全支持的方式。在 Linux 上，可以参照 [systemd 用户单元模板](docs/kimi-bridge.service)，把下列命令输出的绝对路径填入模板：
 
 ```bash
 command -v kimi-bridge
 command -v kimi
 ```
 
-Review the unit before placing it at `~/.config/systemd/user/kimi-bridge.service`. Do not put credentials in the unit. Creating or enabling a persistent service and enabling user lingering are separate administrative decisions.
+将单元文件放到 `~/.config/systemd/user/kimi-bridge.service` 之前请先检查其内容。不要在单元文件中写凭据。创建或启用常驻服务、开启用户 lingering 都属于独立的运维决策。
 
-Useful operations:
+常用操作：
 
 ```bash
 systemctl --user status kimi-bridge.service
@@ -111,12 +113,12 @@ kimi-bridge doctor
 uv tool upgrade kimi-bridge
 ```
 
-Stopping or uninstalling kimi-bridge should preserve `config.toml`, `state.json`, workspaces, inbound files, Kimi sessions, and platform bot applications unless you explicitly choose to remove those named resources.
+停止或卸载 kimi-bridge 时，`config.toml`、`state.json`、工作区、接收的文件、Kimi 会话以及平台机器人应用都应保留，除非你明确选择删除这些具名资源。
 
-## References
+## 参考
 
-- [Configuration](docs/CONFIGURATION.md)
-- [Chat commands](docs/COMMANDS.md)
-- [Architecture and compatibility policy](docs/ARCHITECTURE.md)
-- [Setup-agent guide](INSTALL_AI.md)
-- [Development](README.md#development)
+- [配置](docs/CONFIGURATION.md)
+- [聊天命令](docs/COMMANDS.md)
+- [架构与兼容性策略](docs/ARCHITECTURE.md)
+- [智能体安装指南](INSTALL_AI.md)
+- [开发](README.md#开发)
