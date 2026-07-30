@@ -183,6 +183,13 @@ def _check_request_contract(
             isinstance(request_body, dict)
             and request_body.get("required") is True
         )
+    if body_schema is not None:
+        ok = ok and all(
+            _field_matches(body_schema, requirement)
+            for requirement in contract.request_fields
+        )
+    elif contract.request_fields:
+        ok = False
     return _contract_check(
         f"rest.{contract.name}.request",
         "rest",
@@ -449,7 +456,11 @@ def _field_matches(
         return False
     if requirement.required and not any(required for _schema, required in states):
         return False
-    if "any" in requirement.types and not requirement.values:
+    if (
+        "any" in requirement.types
+        and not requirement.values
+        and requirement.format is None
+    ):
         return True
     return any(
         (
@@ -458,6 +469,10 @@ def _field_matches(
             or bool(
                 set(_schema_types(candidate)).intersection(requirement.types)
             )
+        )
+        and (
+            requirement.format is None
+            or candidate.get("format") == requirement.format
         )
         and all(
             _schema_accepts_instance(candidate, value)

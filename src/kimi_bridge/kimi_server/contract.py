@@ -18,12 +18,13 @@ KIMI_REQUIRED_WEB_FLAGS = frozenset({"--no-open", "--host", "--port"})
 
 @dataclass(frozen=True, slots=True)
 class SchemaFieldContract:
-    """One response/message field consumed by the bridge."""
+    """One schema field consumed by the bridge."""
 
     path: tuple[str, ...]
     types: tuple[str, ...]
     required: bool = True
     values: tuple[Any, ...] = ()
+    format: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class RestOperationContract:
     spec_path: str
     request_media_type: str = "application/json"
     request_examples: tuple[Any, ...] = ()
+    request_fields: tuple[SchemaFieldContract, ...] = ()
     query_examples: tuple[Mapping[str, Any], ...] = ()
     response_fields: tuple[SchemaFieldContract, ...] = ()
     schema_alias_note: str | None = None
@@ -88,9 +90,10 @@ def _field(
     *types: str,
     required: bool = True,
     values: tuple[Any, ...] = (),
+    format: str | None = None,
 ) -> SchemaFieldContract:
     return SchemaFieldContract(
-        tuple(path.split(".")), types, required, values
+        tuple(path.split(".")), types, required, values, format
     )
 
 
@@ -223,13 +226,9 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/api/v1/files",
             request_media_type="multipart/form-data",
             request_examples=({"file": "binary", "name": "photo.png"},),
+            request_fields=(_field("file", "string", format="binary"),),
             response_fields=(
                 _field("id", "string"),
-                _field("name", "string"),
-                _field("media_type", "string"),
-                _field("size", "integer"),
-                _field("created_at", "any"),
-                _field("expires_at", "any", required=False),
             ),
         ),
         RestOperationContract(
@@ -924,12 +923,15 @@ def kimi_semantic_contract() -> dict[str, Any]:
     """Return the stable, machine-readable contract consumed by automation."""
 
     def field_payload(item: SchemaFieldContract) -> dict[str, Any]:
-        return {
+        payload = {
             "path": list(item.path),
             "types": list(item.types),
             "required": item.required,
             "values": list(item.values),
         }
+        if item.format is not None:
+            payload["format"] = item.format
+        return payload
 
     return {
         "schema_version": KIMI_SEMANTIC_CONTRACT_VERSION,
@@ -966,6 +968,9 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "spec_path": item.spec_path,
                 "request_media_type": item.request_media_type,
                 "request_examples": list(item.request_examples),
+                "request_fields": [
+                    field_payload(field) for field in item.request_fields
+                ],
                 "query_examples": [dict(value) for value in item.query_examples],
                 "response_fields": [
                     field_payload(field) for field in item.response_fields

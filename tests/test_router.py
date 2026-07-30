@@ -739,6 +739,37 @@ async def test_first_message_creates_manual_session_and_persists_binding(
     assert binding.permission_mode == "manual"
 
 
+async def test_first_video_message_uses_a_video_session_title(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "",
+                videos=(
+                    InboundVideo(
+                        b"video",
+                        "video/mp4",
+                        "clip.mp4",
+                    ),
+                ),
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert client.created[0][1] == "Video message"
+
+
 async def test_first_message_repairs_discarded_create_model_once(
     tmp_path: Path,
 ) -> None:

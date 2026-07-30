@@ -371,6 +371,13 @@ def test_semantic_projection_checks_multipart_request_shape(
         "/api/v1/files",
         request_media_type="multipart/form-data",
         request_examples=({"file": "binary", "name": "photo.png"},),
+        request_fields=(
+            kimi_contract.SchemaFieldContract(
+                ("file",),
+                ("string",),
+                format="binary",
+            ),
+        ),
     )
     example = openapi["paths"].pop("/api/v1/example")["get"]
     example["requestBody"] = {
@@ -399,6 +406,16 @@ def test_semantic_projection_checks_multipart_request_shape(
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert not [item for item in checks if item.status == "fail"]
+
+    file_schema = example["requestBody"]["content"]["multipart/form-data"][
+        "schema"
+    ]["properties"]["file"]
+    del file_schema["format"]
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert {item.id for item in checks if item.status == "fail"} == {
+        "rest.upload_file.request"
+    }
+    file_schema["format"] = "binary"
 
     request_content = example["requestBody"]["content"]
     request_content["application/json"] = request_content.pop(
@@ -556,6 +573,30 @@ def test_report_round_trip_preserves_machine_contract(tmp_path: Path) -> None:
     write_report(report, path)
 
     assert read_report(path) == report
+
+
+def test_report_reader_rejects_an_outdated_semantic_contract(
+    tmp_path: Path,
+) -> None:
+    report = build_report(
+        mode="fixture",
+        product="kimi-code",
+        version="0.28.1",
+        checks=(_passing_check(),),
+    )
+    path = tmp_path / "report.json"
+    write_report(report, path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["contract_schema_version"] = (
+        kimi_contract.KIMI_SEMANTIC_CONTRACT_VERSION - 1
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Kimi semantic contract schema",
+    ):
+        read_report(path)
 
 
 def test_installer_failure_is_redacted(tmp_path: Path) -> None:
