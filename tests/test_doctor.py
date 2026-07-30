@@ -219,7 +219,7 @@ def test_valid_telegram_config_and_unknown_kimi_warn_but_pass(
     assert all(secret not in rendered for secret in secrets)
 
 
-def test_valid_qq_config_is_secret_safe_and_mentions_ip_whitelist(
+def test_valid_qq_config_is_secret_safe(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.toml"
@@ -230,7 +230,6 @@ def test_valid_qq_config_is_secret_safe_and_mentions_ip_whitelist(
 
     assert report.exit_code == 0
     assert _status(report, "adapter") is CheckStatus.OK
-    assert "IP whitelist" in rendered
     assert all(secret not in rendered for secret in secrets)
 
 

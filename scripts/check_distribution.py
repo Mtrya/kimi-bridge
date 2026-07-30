@@ -23,12 +23,15 @@ REQUIRED_PACKAGE_FILES = {
 REQUIRED_SOURCE_FILES = {
     "AGENTS.md",
     "INSTALL.md",
+    "INSTALL_AI.md",
     "LICENSE",
     "README.md",
     "docs/ARCHITECTURE.md",
     "docs/COMMANDS.md",
     "docs/CONFIGURATION.md",
     "docs/kimi-bridge.service",
+    "docs/setup-paths/README.md",
+    "docs/setup-paths/qq.md",
 }
 PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
     "project"
