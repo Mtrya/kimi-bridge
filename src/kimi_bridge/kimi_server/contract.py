@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 1
+KIMI_SEMANTIC_CONTRACT_VERSION = 2
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -35,6 +35,7 @@ class RestOperationContract:
     method: str
     runtime_path: str
     spec_path: str
+    request_media_type: str = "application/json"
     request_examples: tuple[Any, ...] = ()
     query_examples: tuple[Mapping[str, Any], ...] = ()
     response_fields: tuple[SchemaFieldContract, ...] = ()
@@ -215,6 +216,23 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             ),
         ),
         RestOperationContract(
+            "upload_file",
+            "KimiServerClient._upload_prompt_media",
+            "POST",
+            "/files",
+            "/api/v1/files",
+            request_media_type="multipart/form-data",
+            request_examples=({"file": "binary", "name": "photo.png"},),
+            response_fields=(
+                _field("id", "string"),
+                _field("name", "string"),
+                _field("media_type", "string"),
+                _field("size", "integer"),
+                _field("created_at", "any"),
+                _field("expires_at", "any", required=False),
+            ),
+        ),
+        RestOperationContract(
             "create_session",
             "KimiServerClient.create_session",
             "POST",
@@ -389,9 +407,15 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                         {
                             "type": "image",
                             "source": {
-                                "kind": "base64",
-                                "media_type": "image/png",
-                                "data": "aW1hZ2U=",
+                                "kind": "file",
+                                "file_id": "file-image",
+                            },
+                        },
+                        {
+                            "type": "video",
+                            "source": {
+                                "kind": "file",
+                                "file_id": "file-video",
                             },
                         },
                     ]
@@ -940,6 +964,7 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "method": item.method,
                 "runtime_path": item.runtime_path,
                 "spec_path": item.spec_path,
+                "request_media_type": item.request_media_type,
                 "request_examples": list(item.request_examples),
                 "query_examples": [dict(value) for value in item.query_examples],
                 "response_fields": [

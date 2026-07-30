@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -31,8 +30,12 @@ from kimi_bridge.kimi_server import (
     GoalInfo,
     GoalStatus,
     KimiServerAPIError,
+    KimiServerError,
     KimiServerProtocolError,
+    KimiServerTransportError,
     ModelInfo,
+    PromptContent,
+    PromptMedia,
     SessionProfile,
     SessionStatus,
     SessionUsage,
@@ -48,6 +51,7 @@ from kimi_bridge.platforms.base import (
     InboundImage,
     InboundInteraction,
     InboundMessage,
+    InboundVideo,
     MessageRef,
     OutboundFile,
 )
@@ -60,9 +64,9 @@ class FakeKimiClient:
     def __init__(self) -> None:
         self.server_version = "0.28.1"
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
-        self.prompts: list[tuple[str, str | list[dict[str, Any]], dict[str, Any]]] = []
+        self.prompts: list[tuple[str, str | PromptContent, dict[str, Any]]] = []
         self.prompt_statuses: list[str] = []
-        self.prompt_error: KimiServerAPIError | None = None
+        self.prompt_error: KimiServerError | None = None
         self.steered: list[tuple[str, list[str]]] = []
         self.steer_error: KimiServerAPIError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
@@ -78,11 +82,17 @@ class FakeKimiClient:
                 provider="kimi-code",
                 display_name="K3",
                 max_context_size=262_144,
-                capabilities=("thinking", "always_thinking"),
+                capabilities=(
+                    "thinking",
+                    "always_thinking",
+                    "image_in",
+                    "video_in",
+                ),
                 support_efforts=("low", "high", "max"),
                 default_effort="high",
             )
         ]
+        self.session_model = self.models[0]
         self.tasks: dict[str, list[TaskInfo]] = {}
         self.task_details: dict[tuple[str, str], TaskInfo] = {}
         self.task_list_calls: list[tuple[str, TaskStatus | None]] = []
@@ -147,7 +157,7 @@ class FakeKimiClient:
     async def submit_prompt(
         self,
         session_id: str,
-        content: str | list[dict[str, Any]],
+        content: str | PromptContent,
         **profile: Any,
     ) -> dict[str, Any]:
         self.call_order.append("submit")
@@ -159,6 +169,9 @@ class FakeKimiClient:
             "prompt_id": f"prompt-{len(self.prompts)}",
             "status": status,
         }
+
+    async def get_session_model(self, session_id: str) -> ModelInfo:
+        return self.session_model
 
     async def steer_prompts(self, session_id: str, prompt_ids: list[str]) -> bool:
         self.call_order.append("steer")
@@ -553,6 +566,7 @@ def _message(
     user_id: str = "ou_user",
     conversation_id: str = "oc_direct",
     images: tuple[InboundImage, ...] = (),
+    videos: tuple[InboundVideo, ...] = (),
     files: tuple[InboundFile, ...] = (),
 ) -> InboundMessage:
     conversation = ConversationRef("feishu", "cli_bot", conversation_id)
@@ -563,6 +577,7 @@ def _message(
         timestamp=1.0,
         message_id="om_inbound",
         images=images,
+        videos=videos,
         files=files,
     )
 
@@ -714,7 +729,7 @@ async def test_first_message_creates_manual_session_and_persists_binding(
     assert client.prompts == [
         (
             "session-1",
-            [{"type": "text", "text": "hello from Feishu"}],
+            PromptContent(text="hello from Feishu"),
             {"permission_mode": "manual"},
         )
     ]
@@ -871,7 +886,7 @@ async def test_persisted_selected_model_is_not_replaced_by_startup_default(
     assert client.prompts == [
         (
             "session-restored",
-            [{"type": "text", "text": "after restart"}],
+            PromptContent(text="after restart"),
             {"permission_mode": "auto"},
         )
     ]
@@ -2123,7 +2138,7 @@ async def test_switched_session_profile_is_not_overridden_by_next_prompt(
     assert client.prompts == [
         (
             "session-other",
-            [{"type": "text", "text": "after switch"}],
+            PromptContent(text="after switch"),
             {"permission_mode": "auto"},
         )
     ]
@@ -2642,7 +2657,7 @@ async def test_stale_interaction_after_restart_is_explained_without_api_call(
     assert len(adapter.sent) == 1
 
 
-async def test_images_and_files_map_to_prompt_content_and_workspace_inbox(
+async def test_supported_native_media_uses_prompt_media_while_files_use_inbox(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -2655,8 +2670,11 @@ async def test_images_and_files_map_to_prompt_content_and_workspace_inbox(
         model="kimi-code/k3",
     )
     images = (
-        InboundImage(b"one", "image/png"),
-        InboundImage(b"two", "image/jpeg"),
+        InboundImage(b"one", "image/png", "one.png"),
+        InboundImage(b"two", "image/jpeg", "two.jpg"),
+    )
+    videos = (
+        InboundVideo(b"video", "video/mp4", "clip.mp4"),
     )
     files = (
         InboundFile(b"first", "../notes.txt", "text/plain"),
@@ -2665,39 +2683,90 @@ async def test_images_and_files_map_to_prompt_content_and_workspace_inbox(
     try:
         await router.handle_inbound(
             adapter,
-            _message("inspect these", images=images, files=files),
+            _message(
+                "inspect these",
+                images=images,
+                videos=videos,
+                files=files,
+            ),
         )
     finally:
         await router.close()
 
     content = client.prompts[0][1]
-    assert isinstance(content, list)
-    text = content[0]["text"]
+    assert isinstance(content, PromptContent)
+    assert content.media == (
+        PromptMedia("image", b"one", "one.png", "image/png"),
+        PromptMedia("image", b"two", "two.jpg", "image/jpeg"),
+        PromptMedia("video", b"video", "clip.mp4", "video/mp4"),
+    )
     first_path = workspace / ".kimi-bridge-inbox" / "notes.txt"
     second_path = workspace / ".kimi-bridge-inbox" / "notes-1.txt"
-    assert str(first_path.resolve()) in text
-    assert str(second_path.resolve()) in text
+    assert content.text is not None
+    assert str(first_path.resolve()) in content.text
+    assert str(second_path.resolve()) in content.text
     assert first_path.read_bytes() == b"first"
     assert second_path.read_bytes() == b"second"
-    assert [item["source"] for item in content[1:]] == [
-        {
-            "kind": "base64",
-            "media_type": "image/png",
-            "data": base64.b64encode(b"one").decode("ascii"),
-        },
-        {
-            "kind": "base64",
-            "media_type": "image/jpeg",
-            "data": base64.b64encode(b"two").decode("ascii"),
-        },
-    ]
 
 
-async def test_prompt_api_failure_is_reported_without_escaping(
+async def test_unsupported_native_media_falls_back_to_inbox_by_capability(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
-    client.prompt_error = KimiServerAPIError(50001, "Request body is too large")
+    client.session_model = replace(
+        client.session_model,
+        capabilities=(),
+    )
+    adapter = FakeAdapter()
+    workspace = tmp_path / "workspace"
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=workspace,
+        model="kimi-code/k3",
+    )
+
+    try:
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "inspect these",
+                images=(InboundImage(b"image", "image/png", "photo.png"),),
+                videos=(InboundVideo(b"video", "video/mp4", "clip.mp4"),),
+                files=(
+                    InboundFile(
+                        b"generic-image",
+                        "attached.png",
+                        "image/png",
+                    ),
+                ),
+            ),
+        )
+    finally:
+        await router.close()
+
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.media == ()
+    image_path = workspace / ".kimi-bridge-inbox" / "photo.png"
+    video_path = workspace / ".kimi-bridge-inbox" / "clip.mp4"
+    generic_path = workspace / ".kimi-bridge-inbox" / "attached.png"
+    assert content.text is not None
+    assert str(image_path.resolve()) in content.text
+    assert str(video_path.resolve()) in content.text
+    assert str(generic_path.resolve()) in content.text
+    assert image_path.read_bytes() == b"image"
+    assert video_path.read_bytes() == b"video"
+    assert generic_path.read_bytes() == b"generic-image"
+
+
+async def test_prompt_upload_transport_failure_is_reported_without_escaping(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.prompt_error = KimiServerTransportError(
+        "kimi server POST /files failed: ReadError"
+    )
     adapter = FakeAdapter()
     router = ChatRouter(
         client,  # type: ignore[arg-type]
@@ -2714,13 +2783,15 @@ async def test_prompt_api_failure_is_reported_without_escaping(
                 images=(InboundImage(b"large-image", "image/png"),),
             ),
         )
+        client.prompt_error = None
+        await router.handle_inbound(adapter, _message("continue"))
     finally:
         await router.close()
 
-    assert len(client.prompts) == 1
+    assert len(client.prompts) == 2
     assert len(adapter.sent) == 1
     assert adapter.final_texts == adapter.sent
-    assert "50001" in adapter.sent[0][2]
+    assert "POST /files failed: ReadError" in adapter.sent[0][2]
 
 
 async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(

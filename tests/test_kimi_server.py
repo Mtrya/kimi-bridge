@@ -32,8 +32,11 @@ from kimi_bridge.kimi_server import (
     KimiServerClient,
     KimiServerProtocolError,
     KimiServerStartupError,
+    KimiServerTransportError,
     KimiServerSupervisor,
     ModelInfo,
+    PromptContent,
+    PromptMedia,
     ServerConnection,
     SessionStatus,
     SessionUsage,
@@ -456,6 +459,78 @@ async def test_rest_envelope_error_is_raised() -> None:
     assert caught.value.code == 40401
 
 
+async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> None:
+    status = {
+        "busy": False,
+        "model": "kimi-code/vision",
+        "thinking_level": "off",
+        "permission": "manual",
+        "plan_mode": False,
+        "swarm_mode": False,
+        "context_tokens": 0,
+        "max_context_tokens": 262_144,
+        "context_usage": 0,
+    }
+    model = {
+        "provider": "kimi-code",
+        "model": "kimi-code/vision",
+        "display_name": "Vision",
+        "max_context_size": 262_144,
+        "capabilities": ["image_in", "video_in"],
+    }
+    http = FakeHttpClient(
+        [
+            _envelope(status),
+            _envelope({"items": [model]}),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+    )
+
+    resolved = await client.get_session_model("session-1")
+
+    assert resolved.alias == "kimi-code/vision"
+    assert resolved.capabilities == ("image_in", "video_in")
+
+
+async def test_large_prompt_media_early_disconnect_is_a_kimi_transport_error() -> None:
+    async def disconnect_after_headers(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.transport.abort()
+
+    server = await asyncio.start_server(disconnect_after_headers, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = KimiServerClient(f"http://127.0.0.1:{port}", "token-1")
+    try:
+        with pytest.raises(
+            KimiServerTransportError,
+            match=r"POST /files failed",
+        ):
+            await client.submit_prompt(
+                "session-1",
+                PromptContent(
+                    media=(
+                        PromptMedia(
+                            "image",
+                            b"x" * 2_500_000,
+                            "large.png",
+                            "image/png",
+                        ),
+                    )
+                ),
+            )
+    finally:
+        await client.aclose()
+        server.close()
+        await server.wait_closed()
+
+
 async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> None:
     http = FakeHttpClient(
         [
@@ -740,6 +815,24 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     }
     http = FakeHttpClient(
         [
+            _envelope(
+                {
+                    "id": "file-image",
+                    "name": "photo.png",
+                    "media_type": "image/png",
+                    "size": 5,
+                    "created_at": "now",
+                }
+            ),
+            _envelope(
+                {
+                    "id": "file-video",
+                    "name": "clip.mp4",
+                    "media_type": "video/mp4",
+                    "size": 5,
+                    "created_at": "now",
+                }
+            ),
             _envelope({"prompt_id": "prompt-1", "status": "running"}),
             _envelope({"steered": True, "prompt_ids": ["prompt-1"]}),
             _envelope(_profile_payload(permission_mode="yolo")),
@@ -751,17 +844,13 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         ]
     )
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
-    content = [
-        {"type": "text", "text": "look"},
-        {
-            "type": "image",
-            "source": {
-                "kind": "base64",
-                "media_type": "image/png",
-                "data": "aW1hZ2U=",
-            },
-        },
-    ]
+    content = PromptContent(
+        text="look",
+        media=(
+            PromptMedia("image", b"image", "photo.png", "image/png"),
+            PromptMedia("video", b"video", "clip.mp4", "video/mp4"),
+        ),
+    )
 
     await client.submit_prompt(
         "session-1", content, model="kimi-code/k3", permission_mode="manual"
@@ -805,6 +894,8 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     assert await client.dismiss_question("session-1", "question-1")
 
     assert [request[0:2] for request in http.requests] == [
+        ("POST", "http://127.0.0.1:43123/api/v1/files"),
+        ("POST", "http://127.0.0.1:43123/api/v1/files"),
         (
             "POST",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
@@ -838,17 +929,35 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
             "http://127.0.0.1:43123/api/v1/sessions/session-1/questions/question-1:dismiss",
         ),
     ]
-    assert http.requests[0][2]["json"] == {
-        "content": content,
+    assert http.requests[0][2]["data"] == {"name": "photo.png"}
+    assert http.requests[0][2]["files"] == {
+        "file": ("photo.png", b"image", "image/png")
+    }
+    assert http.requests[1][2]["data"] == {"name": "clip.mp4"}
+    assert http.requests[1][2]["files"] == {
+        "file": ("clip.mp4", b"video", "video/mp4")
+    }
+    assert http.requests[2][2]["json"] == {
+        "content": [
+            {"type": "text", "text": "look"},
+            {
+                "type": "image",
+                "source": {"kind": "file", "file_id": "file-image"},
+            },
+            {
+                "type": "video",
+                "source": {"kind": "file", "file_id": "file-video"},
+            },
+        ],
         "model": "kimi-code/k3",
         "permission_mode": "manual",
     }
-    assert http.requests[1][2]["json"] == {"prompt_ids": ["prompt-1"]}
-    assert http.requests[2][2]["json"] == {"agent_config": {"permission_mode": "yolo"}}
-    assert http.requests[3][2]["params"] == {"status": "pending"}
-    assert http.requests[4][2]["json"] == {"decision": "approved"}
+    assert http.requests[3][2]["json"] == {"prompt_ids": ["prompt-1"]}
+    assert http.requests[4][2]["json"] == {"agent_config": {"permission_mode": "yolo"}}
     assert http.requests[5][2]["params"] == {"status": "pending"}
-    assert http.requests[6][2]["json"] == {
+    assert http.requests[6][2]["json"] == {"decision": "approved"}
+    assert http.requests[7][2]["params"] == {"status": "pending"}
+    assert http.requests[8][2]["json"] == {
         "answers": {
             "q1": {"kind": "single", "option_id": "one"},
             "q2": {"kind": "multi", "option_ids": ["x", "y"]},
@@ -862,7 +971,7 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         },
         "method": "click",
     }
-    assert "json" not in http.requests[7][2]
+    assert "json" not in http.requests[9][2]
 
 
 async def test_stateful_session_methods_use_public_v1_shapes() -> None:
@@ -1376,6 +1485,7 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
         {
             "additional_headers": {"Authorization": "Bearer token-1"},
             "ping_interval": None,
+            "max_size": None,
         },
     )
 
@@ -1524,6 +1634,7 @@ async def test_document_fetch_and_probe_subscription_stay_inside_client_boundary
         == {"Authorization": "Bearer token-1"}
         for call in ws_connect.calls
     )
+    assert all(call[1]["max_size"] is None for call in ws_connect.calls)
 
 
 async def test_supervisor_restarts_with_exponential_backoff() -> None:

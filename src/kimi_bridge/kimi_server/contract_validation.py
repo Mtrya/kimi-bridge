@@ -172,7 +172,7 @@ def _check_request_contract(
     contract: RestOperationContract, operation: Mapping[str, Any]
 ) -> KimiContractCheck:
     request_body = operation.get("requestBody")
-    body_schema = _json_content_schema(request_body)
+    body_schema = _content_schema(request_body, contract.request_media_type)
     if contract.request_examples:
         ok = body_schema is not None and all(
             _schema_accepts_instance(body_schema, example)
@@ -381,17 +381,21 @@ def _contract_check(
     )
 
 
-def _json_content_schema(value: Any) -> dict[str, Any] | None:
+def _content_schema(value: Any, media_type: str) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     content = value.get("content")
     if not isinstance(content, dict):
         return None
-    application_json = content.get("application/json")
-    if not isinstance(application_json, dict):
+    media = content.get(media_type)
+    if not isinstance(media, dict):
         return None
-    schema = application_json.get("schema")
+    schema = media.get("schema")
     return schema if isinstance(schema, dict) else None
+
+
+def _json_content_schema(value: Any) -> dict[str, Any] | None:
+    return _content_schema(value, "application/json")
 
 
 def _success_response_schemas(

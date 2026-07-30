@@ -1168,6 +1168,10 @@ async def test_adapter_classifies_attachments() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/image.png":
             return httpx.Response(200, content=b"PNGDATA")
+        if request.url.path == "/video.mp4":
+            return httpx.Response(200, content=b"VIDEODATA")
+        if request.url.path == "/generic.mp4":
+            return httpx.Response(200, content=b"GENERICMP4")
         return httpx.Response(200, content=b"FILEDATA")
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -1194,6 +1198,16 @@ async def test_adapter_classifies_attachments() -> None:
                             "content_type": "image/png",
                         },
                         {
+                            "url": "https://qq.example/video.mp4",
+                            "filename": "video.mp4",
+                            "content_type": "video/mp4",
+                        },
+                        {
+                            "url": "https://qq.example/generic.mp4",
+                            "filename": "generic.mp4",
+                            "content_type": "application/octet-stream",
+                        },
+                        {
                             "url": "https://qq.example/doc.txt",
                             "filename": "doc.txt",
                             "content_type": "text/plain",
@@ -1212,9 +1226,13 @@ async def test_adapter_classifies_attachments() -> None:
     assert len(message.images) == 1
     assert message.images[0].data == b"PNGDATA"
     assert message.images[0].media_type == "image/png"
-    assert len(message.files) == 1
-    assert message.files[0].name == "doc.txt"
-    assert message.files[0].data == b"FILEDATA"
+    assert message.images[0].name == "image.png"
+    assert len(message.videos) == 1
+    assert message.videos[0].data == b"VIDEODATA"
+    assert message.videos[0].media_type == "video/mp4"
+    assert message.videos[0].name == "video.mp4"
+    assert [file.name for file in message.files] == ["generic.mp4", "doc.txt"]
+    assert [file.data for file in message.files] == [b"GENERICMP4", b"FILEDATA"]
 
 
 async def test_adapter_attachment_download_failure_logs_and_continues(

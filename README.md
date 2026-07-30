@@ -24,7 +24,7 @@ Only one adapter runs in each bridge process. Feishu uses the official `lark-oap
 - Edit-in-place answer streaming, router-side chunking, and optional separate thinking output.
 - Interactive approvals and questions with timeout handling and stale-action protection.
 - Busy-turn prompt steering, cancellation, permission modes, model/effort/plan controls, goals, tasks, skills, and read-only MCP inspection.
-- Inbound images and files plus workspace-contained outbound `/send`.
+- Capability-aware native inbound images/videos, workspace-inbox fallback for other files, and workspace-contained outbound `/send`.
 - Private-chat allowlists, loopback-only Kimi server supervision, and a secret-safe non-starting doctor command.
 
 ## Quick start

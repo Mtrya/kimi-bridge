@@ -359,6 +359,57 @@ def test_semantic_projection_checks_requests_messages_and_events(
     assert "websocket.event.assistant.delta.delta" in failures
 
 
+def test_semantic_projection_checks_multipart_request_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    operation = kimi_contract.RestOperationContract(
+        "upload_file",
+        "KimiServerClient._upload_prompt_media",
+        "POST",
+        "/files",
+        "/api/v1/files",
+        request_media_type="multipart/form-data",
+        request_examples=({"file": "binary", "name": "photo.png"},),
+    )
+    example = openapi["paths"].pop("/api/v1/example")["get"]
+    example["requestBody"] = {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["file"],
+                }
+            }
+        },
+    }
+    openapi["paths"]["/api/v1/files"] = {"post": example}
+    monkeypatch.setattr(
+        kimi_contract,
+        "KIMI_REST_OPERATIONS",
+        {"upload_file": operation},
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert not [item for item in checks if item.status == "fail"]
+
+    request_content = example["requestBody"]["content"]
+    request_content["application/json"] = request_content.pop(
+        "multipart/form-data"
+    )
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert {item.id for item in checks if item.status == "fail"} == {
+        "rest.upload_file.request"
+    }
+
+
 def test_semantic_projection_accepts_an_optional_outbound_message_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

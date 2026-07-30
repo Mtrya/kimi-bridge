@@ -41,6 +41,10 @@ class KimiServerProtocolError(KimiServerError):
     """The server violated or rejected the expected REST/WebSocket protocol."""
 
 
+class KimiServerTransportError(KimiServerError):
+    """A REST request could not complete at the HTTP transport boundary."""
+
+
 @dataclass(frozen=True, slots=True)
 class ServerConnection:
     """Current endpoint for one generation of the managed child."""
@@ -59,6 +63,25 @@ TaskStatus = Literal["running", "completed", "failed", "cancelled"]
 TaskKind = Literal["subagent", "bash", "tool"]
 SkillSource = Literal["project", "user", "extra", "builtin"]
 ToolSource = Literal["builtin", "skill", "mcp"]
+PromptMediaKind = Literal["image", "video"]
+
+
+@dataclass(frozen=True, slots=True)
+class PromptMedia:
+    """One native media item to upload and reference in a prompt."""
+
+    kind: PromptMediaKind
+    data: bytes
+    name: str
+    media_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromptContent:
+    """Semantic prompt content before Kimi wire encoding."""
+
+    text: str | None = None
+    media: tuple[PromptMedia, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
