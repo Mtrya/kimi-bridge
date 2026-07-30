@@ -743,9 +743,9 @@ class KimiServerClient:
                                     must_reconnect = True
                                     break
                                 continue
-                            if frame_type == "error":
-                                self._raise_ws_error(frame)
-                            if "seq" not in frame or "payload" not in frame:
+                            if not _is_session_event_frame(frame):
+                                if frame_type == "error":
+                                    self._raise_ws_error(frame)
                                 LOGGER.debug(
                                     "ignoring unexpected WebSocket frame type %r",
                                     frame_type,
@@ -991,11 +991,11 @@ class KimiServerClient:
             if frame.get("type") == "ping":
                 await self._send_pong(ws, frame)
                 continue
-            if frame.get("type") == "error":
-                self._raise_ws_error(frame)
-            if pending_frames is not None and "seq" in frame and "payload" in frame:
+            if pending_frames is not None and _is_session_event_frame(frame):
                 pending_frames.append(frame)
                 continue
+            if frame.get("type") == "error":
+                self._raise_ws_error(frame)
             if frame.get("type") != "ack" or frame.get("id") != request_id:
                 raise KimiServerProtocolError(
                     f"expected ack for request {request_id!r}"
@@ -1085,3 +1085,7 @@ def _websocket_url(base_url: str) -> str:
     parsed = urlsplit(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, KIMI_WEBSOCKET_PATH, "", ""))
+
+
+def _is_session_event_frame(frame: dict[str, Any]) -> bool:
+    return "seq" in frame and "payload" in frame
