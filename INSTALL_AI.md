@@ -23,6 +23,7 @@ Additional rules:
 - Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input. 
 - Preserve existing installations, configuration, state, workspaces, bot settings, webhooks, and event consumers unless the user explicitly approves changing them.
 - Do not report success after `doctor`. Setup is complete only after a real allowlisted inbound message and a real completed reply on the selected platform.
+- Before researching platform setup from scratch, inspect the [verified setup paths](docs/setup-paths/README.md). Use one only when its preconditions match and its `reverify_after` date has not passed. A stale path is evidence, not instructions: research current official sources before asking the user to perform platform-side actions.
 - If console labels or platform requirements have changed, research current official sources and adapt the instructions. Do not guess.
 - Keep implementation internals, release procedures, test history, and this guide's control model out of the user conversation unless they explain a user-visible limitation.
 - If user actions are inevitable, give them actionable guides.
@@ -249,6 +250,8 @@ Do not report Feishu ready if only a CLI event consumer or `doctor` passed.
 
 ## 6. QQ bootstrap
 
+Use the [verified QQ C2C WebSocket path](docs/setup-paths/qq.md) when its preconditions and freshness metadata permit it.
+
 Official starting points:
 
 - [QQ bot getting started](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)
@@ -257,7 +260,7 @@ Official starting points:
 - [Gateway discovery](https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/url_get.html)
 - [Message model](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)
 
-Research current console and documentation before instructing the user; QQ's console, review rules, hosts, and availability can change.
+If the verified path is stale or a checkpoint diverges, research the current console and official documentation before instructing the user; QQ's console, review rules, hosts, and availability can change.
 
 ### 6.1 Inspect or create the bot
 
@@ -270,11 +273,9 @@ Creating the bot, accepting platform terms, selecting its owner, and submitting 
 Ensure:
 
 - AppID and AppSecret are available; do not use the deprecated Token credential;
-- the bot has the `GROUP_AND_C2C_EVENT` intent or its current documented equivalent;
-- the intended account is available as a sandbox tester when applicable;
-- this host's current public egress IP is on the OpenAPI whitelist when the console requires it.
+- the intended account is available as a sandbox tester when applicable.
 
-The intent is a special permission. A successful token request does not prove gateway authorization. A dynamic egress IP can invalidate a previously working REST setup.
+The adapter discovers the WebSocket gateway and identifies with the `GROUP_AND_C2C_EVENT` intent required for `C2C_MESSAGE_CREATE`. Do not ask the user to configure callbacks, event webhooks, or an IP whitelist for the verified WebSocket path. Investigate those controls only if QQ returns a specific error that requires one. A successful token request does not prove gateway authorization.
 
 ### 6.3 Discover the user identity
 

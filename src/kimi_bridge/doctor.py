@@ -246,11 +246,6 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
         f"selected {config.platform}; credentials present; "
         f"{allowlist_size} allowlisted user(s)"
     )
-    if config.platform == "qq":
-        detail += (
-            "; QQ REST calls also require this host's egress IP on the "
-            "console IP whitelist"
-        )
     return DoctorCheck("adapter", CheckStatus.OK, detail)
 
 

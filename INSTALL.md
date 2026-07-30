@@ -61,7 +61,7 @@ Populate one adapter using [the complete configuration reference](docs/CONFIGURA
 Platform setup requires more than credentials:
 
 - Feishu needs the bot capability, exact message/resource permissions, long-connection message and card events, a published app version, and the intended user's `open_id`.
-- QQ needs AppID/AppSecret, the C2C event intent, applicable sandbox and IP-whitelist configuration, and the intended user's app-specific `user_openid`.
+- QQ needs AppID/AppSecret, access for the intended sandbox tester when applicable, and the intended user's app-specific `user_openid`.
 - Telegram needs a bot token, the intended user's numeric ID, and a dedicated bot whose existing webhook or update consumer may safely be replaced.
 
 The setup agent guide contains the platform-specific bootstrap and verification procedures. Official platform references are linked from there for manual operators.
