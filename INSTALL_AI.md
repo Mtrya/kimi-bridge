@@ -401,3 +401,9 @@ For a completed setup, report:
 Do not include credentials or full allowlist identities.
 
 On abort, inventory changes made during this setup. Offer to reverse only those changes. Uninstalling the executable or removing a newly created service must preserve existing config, state, workspaces, inbound files, Kimi sessions, and platform apps by default. Any deletion of user data or platform-side resources requires separate approval naming the exact targets.
+
+## 11. Contribute setup evidence
+
+After reaching a completion outcome, offer once to contribute only if the attempt revalidated a stale path, exposed a checkpoint divergence or useful recovery, or covered an environment without a verified path. An unchanged run through a current path needs no report.
+
+Show the user a redacted summary and obtain explicit approval before creating or updating a GitHub issue under the [setup-evidence policy](docs/setup-paths/README.md#contributing-setup-evidence). Contribution is optional and never changes the setup outcome. The installation produces evidence; promoting it or advancing path dates is separate repository maintenance.

@@ -23,7 +23,7 @@ A path may be reverified only by completing a real allowlisted inbound message a
 
 ## Contributing setup evidence
 
-After a setup attempt, an agent may offer to open a GitHub issue describing the result, whether successful or not. Create the issue only with the user's permission and submit a redacted summary rather than a raw transcript.
+An agent may offer to open a GitHub issue describing useful evidence from a setup attempt, whether successful or not. Create the issue only with the user's permission and submit a redacted summary rather than a raw transcript.
 
 Include:
 
