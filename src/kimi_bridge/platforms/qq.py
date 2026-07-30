@@ -907,6 +907,10 @@ def _render_markdown(
     if len(rendered) <= QQ_TEXT_LIMIT:
         return rendered
 
+    return _render_compact_markdown(source)
+
+
+def _render_compact_markdown(source: str) -> str:
     compact = _strip_fenced_code(source)
     compact = _strip_table_separators(compact)
     compact = _strip_inline_code(compact)
@@ -919,9 +923,7 @@ def _render_markdown(
 
 def _sanitize_stable_markdown(text: str, *, final: bool = False) -> str:
     source = text if final else _stable_markdown_source(text)
-    return _render_markdown(
-        source, force_line_breaks=_force_stable_line_breaks
-    )
+    return _render_compact_markdown(source)
 
 
 def _stable_markdown_source(text: str) -> str:
@@ -1001,15 +1003,6 @@ def _force_line_breaks(text: str) -> str:
         for index, line in enumerate(lines)
     ]
     return "\n".join(forced)
-
-
-def _force_stable_line_breaks(text: str) -> str:
-    lines = text.split("\n")
-    last = len(lines) - 1
-    return "\n".join(
-        line + _ZERO_WIDTH_SPACE if index != last and line else line
-        for index, line in enumerate(lines)
-    )
 
 
 def _require_response_id(data: dict[str, Any], context: str) -> str:
@@ -1245,10 +1238,6 @@ class QQAdapter:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
                 return
-            if not text.startswith(state.last_source_text):
-                state.pending_text = text
-                self._schedule_idle_finalize(message)
-                return
             if state.finalized:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
@@ -1356,6 +1345,7 @@ class QQAdapter:
         )
 
     async def _finalize_after_idle(self, message: MessageRef) -> None:
+        retry = False
         try:
             await self._sleep(self._idle_timeout)
             state = self._streams.get(message)
@@ -1367,6 +1357,9 @@ class QQAdapter:
                 await self._flush_stream_state(state)
         except asyncio.CancelledError:
             raise
+        except QQTransportError:
+            retry = True
+            LOGGER.error("QQ stream idle flush transport failed; retrying")
         except QQAPIError as error:
             LOGGER.error("QQ stream idle flush failed (code %d)", error.code)
         except Exception:
@@ -1375,6 +1368,8 @@ class QQAdapter:
             state = self._streams.get(message)
             if state is not None and state.idle_task is asyncio.current_task():
                 state.idle_task = None
+            if retry and state is not None and not self._closed:
+                self._schedule_idle_finalize(message)
 
     async def _flush_conversation_streams(
         self, conversation: ConversationRef

@@ -767,6 +767,7 @@ class FakeQQBotAPI:
         self.fail_url_once = False
         self.fail_done_once = False
         self.fail_stream_once = False
+        self.fail_active_transport_once = False
         self.fail_withdraw = False
         self.block_done = False
         self.done_started = asyncio.Event()
@@ -809,6 +810,9 @@ class FakeQQBotAPI:
         event_id: str | None = None,
         msg_seq: int | None = None,
     ) -> dict[str, Any]:
+        if self.fail_active_transport_once:
+            self.fail_active_transport_once = False
+            raise QQTransportError("active send failed")
         self.active_sends.append(
             {
                 "openid": openid,
@@ -1435,9 +1439,7 @@ async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> No
     assert all(
         frame["stream_msg_id"] in (None, "stream-1") for frame in api.stream_frames
     )
-    assert api.stream_frames[-1]["content_raw"] == (
-        "hello\u200b\nworld\u200b\nagain\u200b\n"
-    )
+    assert api.stream_frames[-1]["content_raw"] == "hello\nworld\nagain\n"
 
 
 async def test_failed_stream_edit_does_not_commit_source_snapshot() -> None:
@@ -1476,7 +1478,32 @@ async def test_stream_buffers_incomplete_line_until_it_becomes_stable() -> None:
     await adapter.edit_text(ref, "hello world\n")
 
     assert len(api.stream_frames) == 1
-    assert api.stream_frames[0]["content_raw"] == "hello world\u200b\n"
+    assert api.stream_frames[0]["content_raw"] == "hello world\n"
+
+
+async def test_stream_accepts_revision_of_buffered_tail() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "stable\npartial")
+    await adapter.edit_text(ref, "stable\nrevised")
+
+    assert len(api.stream_frames) == 1
+    assert api.stream_frames[0]["content_raw"] == "stable\n"
+    assert adapter._streams[ref].pending_text is None
+
+    await adapter.edit_text(ref, "stable\nrevised\n")
+    await adapter.stop()
+
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
+    ]
+    assert not api.withdrawals
+    assert not api.active_sends
 
 
 async def test_stream_buffers_unclosed_fence_until_the_block_closes() -> None:
@@ -1489,7 +1516,7 @@ async def test_stream_buffers_unclosed_fence_until_the_block_closes() -> None:
     await adapter.edit_text(ref, "before\n```python\nprint('hi')\n")
 
     assert len(api.stream_frames) == 1
-    assert api.stream_frames[0]["content_raw"] == "before\u200b\n"
+    assert api.stream_frames[0]["content_raw"] == "before\n"
 
     await adapter.edit_text(
         ref, "before\n```python\nprint('hi')\n```"
@@ -1499,7 +1526,8 @@ async def test_stream_buffers_unclosed_fence_until_the_block_closes() -> None:
     assert api.stream_frames[1]["content_raw"].startswith(
         api.stream_frames[0]["content_raw"]
     )
-    assert "    print('hi')" in api.stream_frames[1]["content_raw"]
+    assert "print('hi')" in api.stream_frames[1]["content_raw"]
+    assert "```" not in api.stream_frames[1]["content_raw"]
 
 
 async def test_streaming_list_rendering_remains_prefix_stable() -> None:
@@ -1527,7 +1555,7 @@ async def test_streaming_list_rendering_remains_prefix_stable() -> None:
     assert not api.withdrawals
 
 
-async def test_stream_withdraws_when_rendering_switches_to_compact_mode() -> None:
+async def test_stream_keeps_compact_rendering_near_text_limit() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
@@ -1539,23 +1567,18 @@ async def test_stream_withdraws_when_rendering_switches_to_compact_mode() -> Non
     await adapter.edit_text(ref, final)
     await adapter.stop()
 
-    assert api.withdrawals == [
-        {"openid": "OPENID-USER", "message_id": "stream-1"}
+    assert not api.withdrawals
+    assert not api.active_sends
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
     ]
-    assert len(api.stream_frames) == 1
-    assert len(api.stream_frames[0]["content_raw"]) <= QQ_TEXT_LIMIT
-    assert api.active_sends == [
-        {
-            "openid": "OPENID-USER",
-            "msg_type": MSG_TYPE_MARKDOWN,
-            "content": None,
-            "markdown": {"content": sanitize_markdown(final)},
-            "media": None,
-            "msg_id": None,
-            "event_id": None,
-            "msg_seq": None,
-        }
-    ]
+    assert api.stream_frames[1]["content_raw"].startswith(
+        api.stream_frames[0]["content_raw"]
+    )
+    assert api.stream_frames[1]["content_raw"] == sanitize_markdown(final)
+    assert len(api.stream_frames[1]["content_raw"]) <= QQ_TEXT_LIMIT
 
 
 async def test_final_text_uses_regular_reply_without_closing_model_stream() -> None:
@@ -1645,6 +1668,39 @@ async def test_active_fallback_coalesces_snapshots_into_one_final_send() -> None
     assert api.active_sends[-1]["markdown"] == {"content": "hello again!"}
 
 
+async def test_idle_transport_failure_retries_deferred_active_send(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api = FakeQQBotAPI()
+    api.fail_active_transport_once = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor(used=QQ_PASSIVE_REPLY_LIMIT)
+
+    ref = await adapter.send_text(conversation, "complete answer")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    caplog.set_level(logging.ERROR, logger="kimi_bridge.platforms.qq")
+
+    sleep.release(0)
+    await _wait_for(lambda: len(sleep.calls) == 2)
+
+    assert not api.active_sends
+    assert not adapter._streams[ref].finalized
+
+    sleep.release(1)
+    await _wait_for(lambda: len(api.active_sends) == 1)
+    await adapter.stop()
+
+    assert api.active_sends[0]["markdown"] == {"content": "complete answer"}
+    assert any(
+        record.message == "QQ stream idle flush transport failed; retrying"
+        for record in caplog.records
+    )
+
+
 async def test_non_monotonic_source_withdraws_partial_before_corrected_final() -> None:
     api = FakeQQBotAPI()
     sleep = _GatedSleep()
@@ -1670,7 +1726,7 @@ async def test_non_monotonic_source_withdraws_partial_before_corrected_final() -
     assert api.active_sends[0]["markdown"] == {"content": "prefix two"}
 
 
-async def test_buffered_source_correction_uses_reserved_passive_reply() -> None:
+async def test_buffered_source_correction_keeps_reserved_stream() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
@@ -1680,20 +1736,16 @@ async def test_buffered_source_correction_uses_reserved_passive_reply() -> None:
     await adapter.edit_text(ref, "prefix two")
     await adapter.stop()
 
-    assert not api.stream_frames
-    assert not api.withdrawals
-    assert api.active_sends == [
-        {
-            "openid": "OPENID-USER",
-            "msg_type": MSG_TYPE_MARKDOWN,
-            "content": None,
-            "markdown": {"content": "prefix two"},
-            "media": None,
-            "msg_id": "MSGID-ANCHOR",
-            "event_id": "evt-anchor",
-            "msg_seq": 1,
-        }
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
     ]
+    assert api.stream_frames[0]["content_raw"] == "prefix two"
+    assert api.stream_frames[0]["msg_id"] == "MSGID-ANCHOR"
+    assert api.stream_frames[0]["event_id"] == "evt-anchor"
+    assert api.stream_frames[0]["msg_seq"] == 1
+    assert not api.withdrawals
+    assert not api.active_sends
 
 
 async def test_withdrawal_failure_retains_partial_and_sends_corrected_final(
