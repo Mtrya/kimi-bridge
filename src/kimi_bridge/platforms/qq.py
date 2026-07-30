@@ -893,15 +893,21 @@ def sanitize_markdown(text: str) -> str:
     exceed QQ's message limit, formatting degrades without dropping content.
     """
 
-    rendered = _flatten_fenced_code(text)
+    return _render_markdown(text, force_line_breaks=_force_line_breaks)
+
+
+def _render_markdown(
+    source: str, *, force_line_breaks: Callable[[str], str]
+) -> str:
+    rendered = _flatten_fenced_code(source)
     rendered = _flatten_tables(rendered)
     rendered = _strip_inline_code(rendered)
     rendered = _preserve_emphasis_spacing(rendered)
-    rendered = _force_line_breaks(rendered)
+    rendered = force_line_breaks(rendered)
     if len(rendered) <= QQ_TEXT_LIMIT:
         return rendered
 
-    compact = _strip_fenced_code(text)
+    compact = _strip_fenced_code(source)
     compact = _strip_table_separators(compact)
     compact = _strip_inline_code(compact)
     if len(compact) <= QQ_TEXT_LIMIT:
@@ -913,21 +919,8 @@ def sanitize_markdown(text: str) -> str:
 
 def _sanitize_stable_markdown(text: str, *, final: bool = False) -> str:
     source = text if final else _stable_markdown_source(text)
-    rendered = _flatten_fenced_code(source)
-    rendered = _flatten_tables(rendered)
-    rendered = _strip_inline_code(rendered)
-    rendered = _preserve_emphasis_spacing(rendered)
-    rendered = _force_stable_line_breaks(rendered)
-    if len(rendered) <= QQ_TEXT_LIMIT:
-        return rendered
-
-    compact = _strip_fenced_code(source)
-    compact = _strip_table_separators(compact)
-    compact = _strip_inline_code(compact)
-    if len(compact) <= QQ_TEXT_LIMIT:
-        return compact
-    raise ValueError(
-        f"QQ text exceeds {QQ_TEXT_LIMIT} characters after rendering"
+    return _render_markdown(
+        source, force_line_breaks=_force_stable_line_breaks
     )
 
 
@@ -1422,7 +1415,9 @@ class QQAdapter:
         if rendered != state.last_rendered_text:
             await self._send_stream_rendered(state, rendered)
         if state.stream_msg_id is None:
-            await self._send_active_final(state, state.last_source_text)
+            await self._send_active_final(
+                state, state.last_source_text, use_reserved_reply=True
+            )
             return
         await self._finish_stream(state)
 
@@ -1461,7 +1456,11 @@ class QQAdapter:
         state.last_rendered_text = rendered
 
     async def _send_active_final(
-        self, state: _StreamState, source: str
+        self,
+        state: _StreamState,
+        source: str,
+        *,
+        use_reserved_reply: bool = False,
     ) -> None:
         await self._stop_typing(state.conversation)
         sanitized = sanitize_markdown(source)
@@ -1470,6 +1469,9 @@ class QQAdapter:
                 state.openid,
                 msg_type=MSG_TYPE_MARKDOWN,
                 markdown={"content": content},
+                msg_id=state.anchor_msg_id if use_reserved_reply else None,
+                event_id=state.event_id if use_reserved_reply else None,
+                msg_seq=state.msg_seq if use_reserved_reply else None,
             ),
             sanitized,
         )
@@ -1514,7 +1516,13 @@ class QQAdapter:
                     "QQ could not finish retained partial response",
                     exc_info=True,
                 )
-        await self._send_active_final(state, source)
+        await self._send_active_final(
+            state,
+            source,
+            use_reserved_reply=(
+                state.streamable and state.delivered_message_id is None
+            ),
+        )
 
     async def _finish_stream(self, state: _StreamState) -> None:
         if state.stream_msg_id is None:

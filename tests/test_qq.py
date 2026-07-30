@@ -1670,6 +1670,32 @@ async def test_non_monotonic_source_withdraws_partial_before_corrected_final() -
     assert api.active_sends[0]["markdown"] == {"content": "prefix two"}
 
 
+async def test_buffered_source_correction_uses_reserved_passive_reply() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "prefix one")
+    await adapter.edit_text(ref, "prefix two")
+    await adapter.stop()
+
+    assert not api.stream_frames
+    assert not api.withdrawals
+    assert api.active_sends == [
+        {
+            "openid": "OPENID-USER",
+            "msg_type": MSG_TYPE_MARKDOWN,
+            "content": None,
+            "markdown": {"content": "prefix two"},
+            "media": None,
+            "msg_id": "MSGID-ANCHOR",
+            "event_id": "evt-anchor",
+            "msg_seq": 1,
+        }
+    ]
+
+
 async def test_withdrawal_failure_retains_partial_and_sends_corrected_final(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
