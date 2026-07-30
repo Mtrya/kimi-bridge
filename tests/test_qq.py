@@ -367,6 +367,20 @@ async def test_bot_api_withdraws_c2c_message() -> None:
     assert request.headers["authorization"] == "QQBot tok-1"
 
 
+async def test_bot_api_rejects_empty_c2c_message_id() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("validation should happen before the request")
+
+    api, manager, http = _api_pair(handler)
+    try:
+        with pytest.raises(ValueError, match="message_id must be non-empty"):
+            await api.delete_c2c_message("OPENID-USER", "")
+    finally:
+        await api.close()
+        await manager.close()
+        await http.aclose()
+
+
 async def test_bot_api_uploads_media_for_passive_send() -> None:
     requests: list[httpx.Request] = []
 
@@ -752,6 +766,7 @@ class FakeQQBotAPI:
         self.upload_file_info = "OPAQUE-FILE-INFO"
         self.fail_url_once = False
         self.fail_done_once = False
+        self.fail_stream_once = False
         self.fail_withdraw = False
         self.block_done = False
         self.done_started = asyncio.Event()
@@ -827,6 +842,9 @@ class FakeQQBotAPI:
         if self.block_done and input_state == STREAM_INPUT_STATE_DONE:
             self.done_started.set()
             await self.release_done.wait()
+        if self.fail_stream_once and input_state == STREAM_INPUT_STATE_GENERATING:
+            self.fail_stream_once = False
+            raise QQAPIError("stream_messages", 40000, "stream failed")
         if self.fail_url_once:
             self.fail_url_once = False
             raise QQAPIError("stream_messages", 304003, "url \u672a\u62a5\u5907")
@@ -1422,6 +1440,28 @@ async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> No
     )
 
 
+async def test_failed_stream_edit_does_not_commit_source_snapshot() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = "hello\n"
+    final = "hello\nworld\n"
+
+    ref = await adapter.send_text(conversation, first)
+    api.fail_stream_once = True
+
+    with pytest.raises(QQAPIError, match="stream failed"):
+        await adapter.edit_text(ref, final)
+
+    assert adapter._streams[ref].last_source_text == first
+
+    await adapter.edit_text(ref, final)
+
+    assert adapter._streams[ref].last_source_text == final
+    assert len(api.stream_frames) == 2
+
+
 async def test_stream_buffers_incomplete_line_until_it_becomes_stable() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
@@ -1485,6 +1525,37 @@ async def test_streaming_list_rendering_remains_prefix_stable() -> None:
     assert api.stream_frames[-1]["input_state"] == STREAM_INPUT_STATE_DONE
     assert not api.active_sends
     assert not api.withdrawals
+
+
+async def test_stream_withdraws_when_rendering_switches_to_compact_mode() -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = "```\n" + "\n".join("x" for _ in range(600)) + "\n```\n"
+    final = first + "tail\n" * 200
+
+    ref = await adapter.send_text(conversation, first)
+    await adapter.edit_text(ref, final)
+    await adapter.stop()
+
+    assert api.withdrawals == [
+        {"openid": "OPENID-USER", "message_id": "stream-1"}
+    ]
+    assert len(api.stream_frames) == 1
+    assert len(api.stream_frames[0]["content_raw"]) <= QQ_TEXT_LIMIT
+    assert api.active_sends == [
+        {
+            "openid": "OPENID-USER",
+            "msg_type": MSG_TYPE_MARKDOWN,
+            "content": None,
+            "markdown": {"content": sanitize_markdown(final)},
+            "media": None,
+            "msg_id": None,
+            "event_id": None,
+            "msg_seq": None,
+        }
+    ]
 
 
 async def test_final_text_uses_regular_reply_without_closing_model_stream() -> None:

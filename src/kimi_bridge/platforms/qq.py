@@ -1256,7 +1256,6 @@ class QQAdapter:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
                 return
-            state.last_source_text = text
             if state.finalized:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
@@ -1268,6 +1267,7 @@ class QQAdapter:
                 return
             if state.streamable and rendered != state.last_rendered_text:
                 await self._send_stream_rendered(state, rendered)
+            state.last_source_text = text
             self._schedule_idle_finalize(message)
 
     async def send_file(
@@ -1430,7 +1430,7 @@ class QQAdapter:
         self, state: _StreamState, rendered: str
     ) -> None:
         if not rendered.startswith(state.last_rendered_text):
-            raise ValueError("QQ rendered stream prefix changed")
+            raise QQProtocolError("QQ rendered stream prefix changed")
         continuation = (
             state.last_text
             + rendered[len(state.last_rendered_text) :]
