@@ -1099,6 +1099,74 @@ async def test_materializes_session_before_initial_subscription() -> None:
     assert subscribe["payload"]["agent_filter"] == {"session-1": ["main"]}
 
 
+async def test_sequenced_error_before_ack_is_yielded_and_stream_continues() -> None:
+    error_event = _session_event(1, "epoch-1", "error")
+    error_event["payload"] = {
+        "type": "error",
+        "code": "model.not_configured",
+        "message": "No model configured",
+        "retryable": False,
+    }
+    completed_event = _session_event(2, "epoch-1", "prompt.completed")
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[error_event, completed_event],
+        events_before_ack=True,
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    events = client.subscribe_events("session-1")
+
+    assert await asyncio.wait_for(anext(events), 1) == error_event
+    assert await asyncio.wait_for(anext(events), 1) == completed_event
+    await events.aclose()
+
+
+async def test_unsequenced_websocket_error_before_ack_remains_fatal() -> None:
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        events=[
+            {
+                "type": "error",
+                "payload": {
+                    "code": 40001,
+                    "msg": "invalid subscription",
+                    "fatal": True,
+                },
+            }
+        ],
+        events_before_ack=True,
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    events = client.subscribe_events("session-1")
+
+    with pytest.raises(
+        KimiServerProtocolError,
+        match="WebSocket error 40001: invalid subscription",
+    ):
+        await asyncio.wait_for(anext(events), 1)
+    await events.aclose()
+
+
 async def test_main_agent_filter_allows_global_sequence_gaps() -> None:
     socket = FakeWebSocket(
         subscribe_payload={
