@@ -359,6 +359,74 @@ def test_semantic_projection_checks_requests_messages_and_events(
     assert "websocket.event.assistant.delta.delta" in failures
 
 
+def test_semantic_projection_checks_multipart_request_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    operation = kimi_contract.RestOperationContract(
+        "upload_file",
+        "KimiServerClient._upload_prompt_media",
+        "POST",
+        "/files",
+        "/api/v1/files",
+        request_media_type="multipart/form-data",
+        request_examples=({"file": "binary", "name": "photo.png"},),
+        request_fields=(
+            kimi_contract.SchemaFieldContract(
+                ("file",),
+                ("string",),
+                format="binary",
+            ),
+        ),
+    )
+    example = openapi["paths"].pop("/api/v1/example")["get"]
+    example["requestBody"] = {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string", "format": "binary"},
+                        "name": {"type": "string"},
+                    },
+                    "required": ["file"],
+                }
+            }
+        },
+    }
+    openapi["paths"]["/api/v1/files"] = {"post": example}
+    monkeypatch.setattr(
+        kimi_contract,
+        "KIMI_REST_OPERATIONS",
+        {"upload_file": operation},
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert not [item for item in checks if item.status == "fail"]
+
+    file_schema = example["requestBody"]["content"]["multipart/form-data"][
+        "schema"
+    ]["properties"]["file"]
+    del file_schema["format"]
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert {item.id for item in checks if item.status == "fail"} == {
+        "rest.upload_file.request"
+    }
+    file_schema["format"] = "binary"
+
+    request_content = example["requestBody"]["content"]
+    request_content["application/json"] = request_content.pop(
+        "multipart/form-data"
+    )
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert {item.id for item in checks if item.status == "fail"} == {
+        "rest.upload_file.request"
+    }
+
+
 def test_semantic_projection_accepts_an_optional_outbound_message_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -505,6 +573,30 @@ def test_report_round_trip_preserves_machine_contract(tmp_path: Path) -> None:
     write_report(report, path)
 
     assert read_report(path) == report
+
+
+def test_report_reader_rejects_an_outdated_semantic_contract(
+    tmp_path: Path,
+) -> None:
+    report = build_report(
+        mode="fixture",
+        product="kimi-code",
+        version="0.28.1",
+        checks=(_passing_check(),),
+    )
+    path = tmp_path / "report.json"
+    write_report(report, path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["contract_schema_version"] = (
+        kimi_contract.KIMI_SEMANTIC_CONTRACT_VERSION - 1
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="unsupported Kimi semantic contract schema",
+    ):
+        read_report(path)
 
 
 def test_installer_failure_is_redacted(tmp_path: Path) -> None:

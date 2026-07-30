@@ -41,6 +41,8 @@ def _title_from_message(message: InboundMessage) -> str:
         return _title_from_text(message.text)
     if message.files:
         return _title_from_text(f"File: {message.files[0].name}")
+    if message.videos:
+        return "Video message"
     return "Image message"
 
 

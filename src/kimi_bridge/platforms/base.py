@@ -36,6 +36,14 @@ class MessageRef:
 class InboundImage:
     data: bytes
     media_type: str
+    name: str = "image"
+
+
+@dataclass(frozen=True, slots=True)
+class InboundVideo:
+    data: bytes
+    media_type: str
+    name: str = "video"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +70,7 @@ class InboundMessage:
     text: str
     timestamp: float
     images: tuple[InboundImage, ...] = ()
+    videos: tuple[InboundVideo, ...] = ()
     files: tuple[InboundFile, ...] = ()
 
     @property

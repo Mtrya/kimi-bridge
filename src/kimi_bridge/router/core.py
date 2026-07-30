@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -13,8 +12,10 @@ from ..kimi_server import (
     KimiServerAPIError,
     KimiServerClient,
     KimiServerError,
+    PromptContent,
+    PromptMedia,
 )
-from ..platforms.base import InboundMessage, PlatformAdapter
+from ..platforms.base import InboundFile, InboundMessage, PlatformAdapter
 from ..state import BridgeState, ConversationBinding, StateStore
 from .commands import _CommandMixin
 from .files import _save_inbound_files
@@ -101,13 +102,18 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self, adapter: PlatformAdapter, msg: InboundMessage
     ) -> None:
         text = msg.text.strip()
-        if not text and not msg.images and not msg.files:
+        if not text and not msg.images and not msg.videos and not msg.files:
             return
         conversation_key = _conversation_key(msg)
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
         async with lock:
             self._coerce_binding_capabilities(conversation_key, adapter)
-            if text.startswith("/") and not msg.images and not msg.files:
+            if (
+                text.startswith("/")
+                and not msg.images
+                and not msg.videos
+                and not msg.files
+            ):
                 try:
                     await self._handle_command(
                         conversation_key,
@@ -140,8 +146,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 msg.conversation,
                 msg.actor,
             )
-            content = await self._build_prompt_content(binding, msg)
             try:
+                content = await self._build_prompt_content(binding, msg)
                 result = await self._client.submit_prompt(
                     binding.session_id,
                     content,
@@ -164,30 +170,52 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
 
     async def _build_prompt_content(
         self, binding: ConversationBinding, msg: InboundMessage
-    ) -> list[dict[str, Any]]:
+    ) -> PromptContent:
         text_parts: list[str] = []
         if msg.text.strip():
             text_parts.append(msg.text.strip())
-        if msg.files:
+        prompt_media: list[PromptMedia] = []
+        inbox_files = list(msg.files)
+        if msg.images or msg.videos:
+            capabilities = set(
+                (await self._client.get_session_model(binding.session_id)).capabilities
+            )
+            for image in msg.images:
+                if "image_in" in capabilities:
+                    prompt_media.append(
+                        PromptMedia(
+                            kind="image",
+                            data=image.data,
+                            name=image.name,
+                            media_type=image.media_type,
+                        )
+                    )
+                else:
+                    inbox_files.append(
+                        InboundFile(image.data, image.name, image.media_type)
+                    )
+            for video in msg.videos:
+                if "video_in" in capabilities:
+                    prompt_media.append(
+                        PromptMedia(
+                            kind="video",
+                            data=video.data,
+                            name=video.name,
+                            media_type=video.media_type,
+                        )
+                    )
+                else:
+                    inbox_files.append(
+                        InboundFile(video.data, video.name, video.media_type)
+                    )
+        if inbox_files:
             saved_paths = _save_inbound_files(
                 Path(binding.workspace),
                 self._inbox_subdir,
-                msg.files,
+                tuple(inbox_files),
             )
             text_parts.extend(f"Attached file saved at: {path}" for path in saved_paths)
-
-        content: list[dict[str, Any]] = []
-        if text_parts:
-            content.append({"type": "text", "text": "\n\n".join(text_parts)})
-        content.extend(
-            {
-                "type": "image",
-                "source": {
-                    "kind": "base64",
-                    "media_type": image.media_type,
-                    "data": base64.b64encode(image.data).decode("ascii"),
-                },
-            }
-            for image in msg.images
+        return PromptContent(
+            text="\n\n".join(text_parts) if text_parts else None,
+            media=tuple(prompt_media),
         )
-        return content

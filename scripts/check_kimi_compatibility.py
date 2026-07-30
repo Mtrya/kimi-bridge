@@ -127,6 +127,11 @@ class CompatibilityReport:
     def from_dict(cls, value: Mapping[str, Any]) -> CompatibilityReport:
         if value.get("schema_version") != REPORT_SCHEMA_VERSION:
             raise ValueError("unsupported compatibility report schema")
+        if (
+            value.get("contract_schema_version")
+            != KIMI_SEMANTIC_CONTRACT_VERSION
+        ):
+            raise ValueError("unsupported Kimi semantic contract schema")
         checks = tuple(
             KimiContractCheck(
                 id=str(item["id"]),

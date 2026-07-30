@@ -669,7 +669,13 @@ class TelegramAdapter:
                 file_id = _required_str(selected_photo, "file_id", "Telegram photo")
                 size = _optional_size(selected_photo, "Telegram photo")
                 data = await self._api.get_file(file_id, known_size=size)
-                images = (InboundImage(data=data, media_type="image/jpeg"),)
+                images = (
+                    InboundImage(
+                        data=data,
+                        media_type="image/jpeg",
+                        name="photo.jpg",
+                    ),
+                )
                 inbound_text = caption
             elif document is not None:
                 if not isinstance(document, dict):

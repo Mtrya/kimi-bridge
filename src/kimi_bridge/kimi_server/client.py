@@ -41,8 +41,11 @@ from .types import (
     KimiServerAPIError,
     KimiServerProtocolError,
     KimiServerStartupError,
+    KimiServerTransportError,
     ModelInfo,
     PermissionMode,
+    PromptContent,
+    PromptMedia,
     ServerConnection,
     SessionProfile,
     SessionStatus,
@@ -211,6 +214,24 @@ class KimiServerClient:
         data = await self._request_operation("models")
         return [_model_info_from_wire(item) for item in data["items"]]
 
+    async def get_session_model(self, session_id: str) -> ModelInfo:
+        """Resolve the exact model currently bound to a session."""
+
+        status, models = await asyncio.gather(
+            self.get_session_status(session_id),
+            self.list_models(),
+        )
+        if status.model is None:
+            raise KimiServerProtocolError(
+                f"kimi session {session_id} has no configured model"
+            )
+        for model in models:
+            if model.alias == status.model:
+                return model
+        raise KimiServerProtocolError(
+            f"kimi session {session_id} uses unavailable model {status.model!r}"
+        )
+
     async def create_session(
         self,
         workspace: str,
@@ -355,16 +376,14 @@ class KimiServerClient:
     async def submit_prompt(
         self,
         session_id: str,
-        content: str | list[dict[str, Any]],
+        content: str | PromptContent,
         *,
         model: str | None = None,
         thinking: str | None = None,
         permission_mode: PermissionMode | None = None,
         plan_mode: bool | None = None,
     ) -> dict[str, Any]:
-        content_items = (
-            [{"type": "text", "text": content}] if isinstance(content, str) else content
-        )
+        content_items = await self._prompt_content_to_wire(content)
         payload: dict[str, Any] = {"content": content_items}
         if model is not None:
             payload["model"] = model
@@ -379,6 +398,43 @@ class KimiServerClient:
             path_parameters={"session_id": session_id},
             json_body=payload,
         )
+
+    async def _prompt_content_to_wire(
+        self, content: str | PromptContent
+    ) -> list[dict[str, Any]]:
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}]
+        items: list[dict[str, Any]] = []
+        if content.text:
+            items.append({"type": "text", "text": content.text})
+        for media in content.media:
+            file_id = await self._upload_prompt_media(media)
+            items.append(
+                {
+                    "type": media.kind,
+                    "source": {"kind": "file", "file_id": file_id},
+                }
+            )
+        return items
+
+    async def _upload_prompt_media(self, media: PromptMedia) -> str:
+        data = await self._request_operation(
+            "upload_file",
+            form_body={"name": media.name},
+            files={
+                "file": (
+                    media.name,
+                    media.data,
+                    media.media_type,
+                )
+            },
+        )
+        file_id = data.get("id") if isinstance(data, dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise KimiServerProtocolError(
+                "kimi server file upload returned no file id"
+            )
+        return file_id
 
     async def steer_prompts(self, session_id: str, prompt_ids: list[str]) -> bool:
         data = await self._request_operation(
@@ -636,6 +692,7 @@ class KimiServerClient:
                 "Authorization": f"Bearer {connection.token}"
             },
             ping_interval=None,
+            max_size=None,
         ) as ws:
             await self._expect_server_hello(ws)
             await self._send_client_hello(ws)
@@ -685,6 +742,10 @@ class KimiServerClient:
                             "Authorization": f"Bearer {connection.token}"
                         },
                         ping_interval=None,
+                        # Kimi re-emits uploaded prompt media as data URLs in
+                        # session events, so valid frames can exceed the
+                        # websockets library's 1 MiB default.
+                        max_size=None,
                     ) as ws:
                         self._active_ws = ws
                         await self._expect_server_hello(ws)
@@ -837,6 +898,8 @@ class KimiServerClient:
         *,
         path_parameters: dict[str, str] | None = None,
         json_body: Any = None,
+        form_body: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
     ) -> Any:
@@ -857,6 +920,8 @@ class KimiServerClient:
             operation.method,
             path,
             json_body=json_body,
+            form_body=form_body,
+            files=files,
             params=params,
             connection=connection,
         )
@@ -869,12 +934,12 @@ class KimiServerClient:
     ) -> dict[str, Any]:
         if connection is None:
             connection = await self._connection_info()
-        response = await self._http.request(
+        response = await self._send_http_request(
             "GET",
             f"{connection.base_url}{path}",
             headers={"Authorization": f"Bearer {connection.token}"},
+            operation=path,
         )
-        response.raise_for_status()
         document = response.json()
         if not isinstance(document, dict):
             raise KimiServerProtocolError(f"{path} did not return a JSON object")
@@ -886,6 +951,8 @@ class KimiServerClient:
         path: str,
         *,
         json_body: Any = None,
+        form_body: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
     ) -> Any:
@@ -896,12 +963,18 @@ class KimiServerClient:
         }
         if json_body is not None:
             kwargs["json"] = json_body
+        if form_body is not None:
+            kwargs["data"] = form_body
+        if files is not None:
+            kwargs["files"] = files
         if params is not None:
             kwargs["params"] = params
-        response = await self._http.request(
-            method, f"{connection.base_url}/api/v1{path}", **kwargs
+        response = await self._send_http_request(
+            method,
+            f"{connection.base_url}/api/v1{path}",
+            operation=path,
+            **kwargs,
         )
-        response.raise_for_status()
         envelope = response.json()
         if envelope["code"] != 0:
             raise KimiServerAPIError(
@@ -911,6 +984,23 @@ class KimiServerClient:
                 details=envelope.get("details"),
             )
         return envelope["data"]
+
+    async def _send_http_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        operation: str,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            response = await self._http.request(method, url, **kwargs)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise KimiServerTransportError(
+                f"kimi server {method} {operation} failed: {type(exc).__name__}"
+            ) from exc
+        return response
 
     async def _materialize_session(
         self, session_id: str, connection: ServerConnection
