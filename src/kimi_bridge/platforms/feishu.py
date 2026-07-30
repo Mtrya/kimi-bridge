@@ -24,6 +24,7 @@ from .base import (
     InboundImage,
     InboundInteraction,
     InboundMessage,
+    InboundVideo,
     InteractionHandler,
     MessageRef,
     OutboundFile,
@@ -37,7 +38,9 @@ from .feishu_cards import (
 
 
 LOGGER = logging.getLogger(__name__)
-UNSUPPORTED_MESSAGE = "Unsupported message type; send text, an image, or a file."
+UNSUPPORTED_MESSAGE = (
+    "Unsupported message type; send text, an image, a video, or a file."
+)
 FEISHU_TEXT_LIMIT = 7000
 FEISHU_MESSAGE_EDIT_LIMIT = 20
 FEISHU_IMAGE_MEDIA_TYPES = frozenset(
@@ -704,6 +707,7 @@ class FeishuAdapter:
             raise ValueError("Feishu message content must be an object")
         text = ""
         image_keys: list[str] = []
+        video_specs: list[tuple[str, str | None]] = []
         file_specs: list[tuple[str, str | None]] = []
         if message.message_type == "text":
             text_value = content.get("text")
@@ -714,6 +718,15 @@ class FeishuAdapter:
             image_keys = [_required_string(content, "image_key")]
         elif message.message_type == "file":
             file_specs = [
+                (
+                    _required_string(content, "file_key"),
+                    content.get("file_name")
+                    if isinstance(content.get("file_name"), str)
+                    else None,
+                )
+            ]
+        elif message.message_type == "media":
+            video_specs = [
                 (
                     _required_string(content, "file_key"),
                     content.get("file_name")
@@ -743,6 +756,14 @@ class FeishuAdapter:
                 )
             )
         )
+        videos = tuple(
+            await asyncio.gather(
+                *(
+                    self._download_video(message_id, file_key, filename)
+                    for file_key, filename in video_specs
+                )
+            )
+        )
         if self._on_message is None:
             raise RuntimeError("Feishu adapter is not started")
         await self._on_message(
@@ -754,6 +775,7 @@ class FeishuAdapter:
                 text=text,
                 timestamp=create_time / 1000,
                 images=images,
+                videos=videos,
                 files=files,
             ),
         )
@@ -830,7 +852,16 @@ class FeishuAdapter:
         resource = await self._transport.download_resource(
             message_id, image_key, "image"
         )
-        return InboundImage(resource.data, resource.media_type)
+        return InboundImage(resource.data, resource.media_type, resource.name)
+
+    async def _download_video(
+        self, message_id: str, file_key: str, filename: str | None
+    ) -> InboundVideo:
+        assert self._transport is not None
+        resource = await self._transport.download_resource(
+            message_id, file_key, "file", name=filename
+        )
+        return InboundVideo(resource.data, resource.media_type, resource.name)
 
     async def _download_file(
         self, message_id: str, file_key: str, filename: str | None

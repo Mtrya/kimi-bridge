@@ -64,6 +64,7 @@ from .base import (
     InboundHandler,
     InboundImage,
     InboundMessage,
+    InboundVideo,
     InteractionHandler,
     MessageRef,
     OutboundFile,
@@ -1577,7 +1578,9 @@ class QQAdapter:
         conversation = ConversationRef(
             platform="qq", bot_id=self._app_id, conversation_id=openid
         )
-        images, files = await self._collect_attachments(data.get("attachments"))
+        images, videos, files = await self._collect_attachments(
+            data.get("attachments")
+        )
 
         self._anchors[conversation] = _ReplyAnchor(
             msg_id=msg_id, event_id=event_id, received_at=self._clock()
@@ -1591,6 +1594,7 @@ class QQAdapter:
             text=text,
             timestamp=timestamp,
             images=images,
+            videos=videos,
             files=files,
         )
         assert self._on_message is not None
@@ -1598,10 +1602,15 @@ class QQAdapter:
 
     async def _collect_attachments(
         self, raw: object
-    ) -> tuple[tuple[InboundImage, ...], tuple[InboundFile, ...]]:
+    ) -> tuple[
+        tuple[InboundImage, ...],
+        tuple[InboundVideo, ...],
+        tuple[InboundFile, ...],
+    ]:
         if not isinstance(raw, list):
-            return (), ()
+            return (), (), ()
         images: list[InboundImage] = []
+        videos: list[InboundVideo] = []
         files: list[InboundFile] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -1636,10 +1645,16 @@ class QQAdapter:
                 )
                 continue
             if media_type.startswith("image/"):
-                images.append(InboundImage(data=data, media_type=media_type))
+                images.append(
+                    InboundImage(data=data, media_type=media_type, name=name)
+                )
+            elif media_type.startswith("video/"):
+                videos.append(
+                    InboundVideo(data=data, media_type=media_type, name=name)
+                )
             else:
                 files.append(InboundFile(data=data, name=name, media_type=media_type))
-        return tuple(images), tuple(files)
+        return tuple(images), tuple(videos), tuple(files)
 
     async def _download_attachment(self, url: str) -> bytes:
         chunks: list[bytes] = []

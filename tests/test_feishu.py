@@ -736,11 +736,16 @@ async def test_groups_bots_and_non_allowlisted_users_are_silent(
     assert "[feishu].allowed_users" in denied_records[0].getMessage()
 
 
-async def test_image_file_and_multi_image_post_are_downloaded() -> None:
+async def test_native_images_video_file_and_multi_image_post_are_downloaded() -> None:
     transport = FakeTransport()
     transport.resources = {
         "img_one": _DownloadedResource(b"one", "one.png", "image/png"),
         "img_two": _DownloadedResource(b"two", "two.jpg", "image/jpeg"),
+        "video_one": _DownloadedResource(
+            b"video",
+            "server-video.mp4",
+            "video/mp4",
+        ),
         "file_one": _DownloadedResource(b"file", "server-name.txt", "text/plain"),
     }
     received: list[InboundMessage] = []
@@ -761,6 +766,17 @@ async def test_image_file_and_multi_image_post_are_downloaded() -> None:
                 message_id="om_image",
                 message_type="image",
                 content={"image_key": "img_one"},
+            )
+        )
+        await adapter.handle_event(
+            _event(
+                message_id="om_video",
+                message_type="media",
+                content={
+                    "file_key": "video_one",
+                    "file_name": "clip.mp4",
+                    "image_key": "video_cover",
+                },
             )
         )
         await adapter.handle_event(
@@ -790,12 +806,16 @@ async def test_image_file_and_multi_image_post_are_downloaded() -> None:
         await adapter.stop()
 
     assert received[0].images[0].data == b"one"
-    assert received[1].files[0].name == "notes.txt"
-    assert received[1].files[0].data == b"file"
-    assert received[2].text == "Compare\n and "
-    assert [image.data for image in received[2].images] == [b"one", b"two"]
+    assert received[0].images[0].name == "one.png"
+    assert received[1].videos[0].name == "clip.mp4"
+    assert received[1].videos[0].data == b"video"
+    assert received[2].files[0].name == "notes.txt"
+    assert received[2].files[0].data == b"file"
+    assert received[3].text == "Compare\n and "
+    assert [image.data for image in received[3].images] == [b"one", b"two"]
     assert transport.downloads == [
         ("om_image", "img_one", "image", None),
+        ("om_video", "video_one", "file", "clip.mp4"),
         ("om_file", "file_one", "file", "notes.txt"),
         ("om_post", "img_one", "image", None),
         ("om_post", "img_two", "image", None),

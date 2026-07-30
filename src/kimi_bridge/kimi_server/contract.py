@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 1
+KIMI_SEMANTIC_CONTRACT_VERSION = 2
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -18,12 +18,13 @@ KIMI_REQUIRED_WEB_FLAGS = frozenset({"--no-open", "--host", "--port"})
 
 @dataclass(frozen=True, slots=True)
 class SchemaFieldContract:
-    """One response/message field consumed by the bridge."""
+    """One schema field consumed by the bridge."""
 
     path: tuple[str, ...]
     types: tuple[str, ...]
     required: bool = True
     values: tuple[Any, ...] = ()
+    format: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +36,9 @@ class RestOperationContract:
     method: str
     runtime_path: str
     spec_path: str
+    request_media_type: str = "application/json"
     request_examples: tuple[Any, ...] = ()
+    request_fields: tuple[SchemaFieldContract, ...] = ()
     query_examples: tuple[Mapping[str, Any], ...] = ()
     response_fields: tuple[SchemaFieldContract, ...] = ()
     schema_alias_note: str | None = None
@@ -87,9 +90,10 @@ def _field(
     *types: str,
     required: bool = True,
     values: tuple[Any, ...] = (),
+    format: str | None = None,
 ) -> SchemaFieldContract:
     return SchemaFieldContract(
-        tuple(path.split(".")), types, required, values
+        tuple(path.split(".")), types, required, values, format
     )
 
 
@@ -212,6 +216,19 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                 _field("items.[].support_efforts", "array", required=False),
                 _field("items.[].support_efforts.[]", "string", required=False),
                 _field("items.[].default_effort", "string", required=False),
+            ),
+        ),
+        RestOperationContract(
+            "upload_file",
+            "KimiServerClient._upload_prompt_media",
+            "POST",
+            "/files",
+            "/api/v1/files",
+            request_media_type="multipart/form-data",
+            request_examples=({"file": "binary", "name": "photo.png"},),
+            request_fields=(_field("file", "string", format="binary"),),
+            response_fields=(
+                _field("id", "string"),
             ),
         ),
         RestOperationContract(
@@ -389,9 +406,15 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                         {
                             "type": "image",
                             "source": {
-                                "kind": "base64",
-                                "media_type": "image/png",
-                                "data": "aW1hZ2U=",
+                                "kind": "file",
+                                "file_id": "file-image",
+                            },
+                        },
+                        {
+                            "type": "video",
+                            "source": {
+                                "kind": "file",
+                                "file_id": "file-video",
                             },
                         },
                     ]
@@ -900,12 +923,15 @@ def kimi_semantic_contract() -> dict[str, Any]:
     """Return the stable, machine-readable contract consumed by automation."""
 
     def field_payload(item: SchemaFieldContract) -> dict[str, Any]:
-        return {
+        payload = {
             "path": list(item.path),
             "types": list(item.types),
             "required": item.required,
             "values": list(item.values),
         }
+        if item.format is not None:
+            payload["format"] = item.format
+        return payload
 
     return {
         "schema_version": KIMI_SEMANTIC_CONTRACT_VERSION,
@@ -940,7 +966,11 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "method": item.method,
                 "runtime_path": item.runtime_path,
                 "spec_path": item.spec_path,
+                "request_media_type": item.request_media_type,
                 "request_examples": list(item.request_examples),
+                "request_fields": [
+                    field_payload(field) for field in item.request_fields
+                ],
                 "query_examples": [dict(value) for value in item.query_examples],
                 "response_fields": [
                     field_payload(field) for field in item.response_fields
