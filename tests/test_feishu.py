@@ -1089,7 +1089,7 @@ async def test_other_message_type_gets_supported_types_notice() -> None:
 async def test_audio_message_download_defers_native_transcription() -> None:
     transport = FakeTransport()
     transport.resources = {
-        "audio_one": _DownloadedResource(b"opus-bytes", "voice.opus", "audio/ogg"),
+        "audio_one": _DownloadedResource(b"opus-bytes", "voice.ogg", "audio/ogg"),
     }
     received: list[InboundMessage] = []
     adapter = FeishuAdapter(
@@ -1122,7 +1122,7 @@ async def test_audio_message_download_defers_native_transcription() -> None:
     assert len(message.audios) == 1
     audio = message.audios[0]
     assert audio.data == b"opus-bytes"
-    assert audio.media_type == "audio/ogg"
+    assert audio.media_type == "audio/opus"
     assert audio.name == "voice.opus"
     assert audio.transcript is None
 

@@ -333,6 +333,8 @@ def test_loads_voice_asr_and_hides_api_key(tmp_path: Path) -> None:
                 'base_url = "https://asr.example/v1"',
                 'api_key = "sk-secret"',
                 'model = "whisper-1"',
+                'request_format = "json"',
+                'language = "en"',
             ]
         ),
         encoding="utf-8",
@@ -344,6 +346,8 @@ def test_loads_voice_asr_and_hides_api_key(tmp_path: Path) -> None:
         base_url="https://asr.example/v1",
         model="whisper-1",
         api_key="sk-secret",
+        request_format="json",
+        language="en",
     )
     assert "sk-secret" not in repr(config)
 
@@ -363,6 +367,60 @@ def test_voice_asr_api_key_is_optional(tmp_path: Path) -> None:
         base_url="http://127.0.0.1:8080/v1",
         model="whisper-1",
     )
+
+
+def test_voice_asr_api_key_can_come_from_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_ASR_KEY", "secret-from-env")
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[voice.asr]\n"
+        'base_url = "https://asr.example/v1"\n'
+        'model = "asr-model"\n'
+        'api_key_env = "TEST_ASR_KEY"\n',
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.voice.asr == VoiceAsrConfig(
+        base_url="https://asr.example/v1",
+        model="asr-model",
+        api_key="secret-from-env",
+    )
+    assert "secret-from-env" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    ("api_key_lines", "error"),
+    [
+        (
+            'api_key = "inline"\napi_key_env = "TEST_ASR_KEY"',
+            "mutually exclusive",
+        ),
+        ('api_key_env = "MISSING_ASR_KEY"', "unset or empty"),
+    ],
+)
+def test_rejects_invalid_voice_asr_api_key_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    api_key_lines: str,
+    error: str,
+) -> None:
+    monkeypatch.delenv("MISSING_ASR_KEY", raising=False)
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[voice.asr]\n"
+        'base_url = "https://asr.example/v1"\n'
+        'model = "asr-model"\n'
+        f"{api_key_lines}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=error):
+        load_config(path)
 
 
 def test_absent_voice_table_defaults_to_no_asr(tmp_path: Path) -> None:
@@ -395,6 +453,20 @@ def test_rejects_non_string_voice_asr_values(tmp_path: Path) -> None:
     )
 
     with pytest.raises(TypeError, match="voice.asr"):
+        load_config(path)
+
+
+def test_rejects_unknown_voice_asr_request_format(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[voice.asr]\n"
+        'base_url = "https://asr.example/v1"\n'
+        'model = "asr-model"\n'
+        'request_format = "xml"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="request_format"):
         load_config(path)
 
 

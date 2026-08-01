@@ -30,7 +30,7 @@ from .sessions import _SessionMixin
 # ASR output inevitably contains recognition errors; the prefix marks the
 # text as machine-transcribed speech so the agent does not nitpick or
 # "correct" transcription mistakes in its reply.
-VOICE_TRANSCRIPT_PREFIX = "[语音]"
+VOICE_TRANSCRIPT_PREFIX = "[语音转写]"
 VOICE_UNTRANSCRIBED_NOTICE = (
     "[System: A voice message was received but could not be transcribed.]"
 )

@@ -24,9 +24,12 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `qq.app_id` | string | empty | Required with `app_secret` when QQ is selected. |
 | `qq.app_secret` | string | empty | Required with `app_id` when QQ is selected. |
 | `qq.allowed_users` | array of strings | empty | At least one non-empty QQ C2C `user_openid` is required at runtime. |
-| `voice.asr.base_url` | string | table omitted | Required non-empty when `[voice.asr]` is present; base of a Whisper-compatible transcription endpoint. |
+| `voice.asr.base_url` | string | table omitted | Required non-empty when `[voice.asr]` is present; base URL before `/audio/transcriptions`. |
 | `voice.asr.model` | string | table omitted | Required non-empty when `[voice.asr]` is present. |
 | `voice.asr.api_key` | string | empty | Optional Bearer token; may stay empty for local servers that do not check one. |
+| `voice.asr.api_key_env` | string | empty | Optional environment-variable name containing the Bearer token; mutually exclusive with `api_key`. |
+| `voice.asr.request_format` | `"multipart"` or `"json"` | `"multipart"` | `multipart` sends an OpenAI/Whisper-compatible file upload; `json` sends base64 in `input_audio`. |
+| `voice.asr.language` | string | empty | Optional language hint forwarded to the external service. |
 
 Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields. QQ forces every session into `auto` permission mode because it cannot present interactive prompts (see [Commands](COMMANDS.md)).
 
@@ -117,7 +120,7 @@ Generic file messages always use the workspace inbox, even when the filename or 
 
 ## Voice messages
 
-Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` Whisper-compatible endpoint is tried first when present, and the selected adapter's native transcription method is called only when the external endpoint yields no transcript. QQ uses `asr_refer_text`; Feishu converts the downloaded Opus resource to 16 kHz mono signed 16-bit PCM with FFmpeg and calls `speech_to_text` file recognition. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音]` to mark it as machine-transcribed speech.
+Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` HTTP endpoint is tried first when present, and the selected adapter's native transcription method is called only when the external endpoint yields no transcript. QQ uses `asr_refer_text`; Feishu converts the downloaded Opus resource to 16 kHz mono signed 16-bit PCM with FFmpeg and calls `speech_to_text` file recognition. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音转写]` to mark it explicitly as machine-transcribed speech.
 
 Speech recognition is best-effort text, not an exact command channel: native services may normalize punctuation, casing, abbreviations, or unfamiliar tokens even when the audio conversion and request succeed.
 
@@ -125,8 +128,24 @@ Speech recognition is best-effort text, not an exact command channel: native ser
 [voice.asr]
 base_url = "https://api.openai.com/v1"
 api_key = "sk-replace-me"  # optional for local servers
+# api_key_env = "ASR_API_KEY"  # alternative to api_key
 model = "whisper-1"
+request_format = "multipart"
+# language = "en"
 ```
+
+For a JSON/base64 endpoint, use `request_format = "json"`; the bridge derives `input_audio.format` from the inbound filename or media type and sends `model`, `input_audio`, and the optional `language` field. Feishu audio is identified as Opus and QQ uses its WAV conversion when available. For example:
+
+```toml
+[voice.asr]
+base_url = "https://zenmux.ai/api/v1"
+api_key_env = "ZENMUX_API_KEY"
+model = "qwen/qwen3-asr-flash"
+request_format = "json"
+language = "en"
+```
+
+`api_key_env` resolves the external ASR token when the configuration is loaded and fails startup if the named variable is absent or empty. It does not change the rule that adapter credentials are read from the protected TOML file.
 
 Selecting Feishu requires a working `ffmpeg` executable on `PATH`; startup fails and `doctor` reports an error when it is missing. Feishu-native recognition also requires the exact tenant scope `speech_to_text:speech`. Without that scope the bridge logs a warning and relies on `[voice.asr]` when configured, or reports the message as untranscribable. See the [Feishu bootstrap](../INSTALL_AI.md#5-feishu-bootstrap) for prerequisite, permission, and live-validation steps. QQ voice attachments download the platform-provided WAV conversion (`voice_wav_url`) when available, otherwise the original encoding.
 

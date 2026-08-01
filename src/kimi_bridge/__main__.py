@@ -34,7 +34,7 @@ from .platforms.qq import (
 )
 from .platforms.telegram import TelegramAdapter
 from .router import ChatRouter
-from .speech import WhisperTranscriber
+from .speech import HttpSpeechTranscriber
 from .state import StateStore
 
 
@@ -76,10 +76,12 @@ async def run(config_path: str | Path) -> None:
             model = await client.get_default_model()
             transcriber = None
             if config.voice.asr is not None:
-                transcriber = WhisperTranscriber(
+                transcriber = HttpSpeechTranscriber(
                     base_url=config.voice.asr.base_url,
                     model=config.voice.asr.model,
                     api_key=config.voice.asr.api_key,
+                    request_format=config.voice.asr.request_format,
+                    language=config.voice.asr.language,
                 )
             router = ChatRouter(
                 client,

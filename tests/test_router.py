@@ -4727,7 +4727,7 @@ async def test_configured_asr_wins_over_platform_transcript(
     assert adapter.transcribed_audio == []
     content = client.prompts[0][1]
     assert isinstance(content, PromptContent)
-    assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} asr words"
+    assert content.text == "[语音转写] asr words"
     assert "platform words" not in content.text
     assert content.media == ()
 

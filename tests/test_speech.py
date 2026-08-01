@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import base64
+import json
+
 import httpx
 import pytest
 
 from kimi_bridge.platforms.base import InboundAudio
-from kimi_bridge.speech import WhisperTranscriber
+from kimi_bridge.speech import HttpSpeechTranscriber
 
 
 def _audio() -> InboundAudio:
@@ -15,9 +18,9 @@ def _transcriber(
     handler: httpx.MockTransport,
     *,
     api_key: str = "sk-test",
-) -> WhisperTranscriber:
+) -> HttpSpeechTranscriber:
     client = httpx.AsyncClient(transport=handler)
-    return WhisperTranscriber(
+    return HttpSpeechTranscriber(
         base_url="https://asr.example/v1/",
         model="whisper-1",
         api_key=api_key,
@@ -57,6 +60,60 @@ async def test_transcribe_omits_authorization_without_api_key() -> None:
 
     assert await transcriber.transcribe(_audio()) == "local"
     assert "Authorization" not in requests[0].headers
+
+
+async def test_transcribe_posts_json_base64_with_language() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": "  external words  "})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    transcriber = HttpSpeechTranscriber(
+        base_url="https://zenmux.example/api/v1",
+        model="qwen/qwen3-asr-flash",
+        api_key="zen-test",
+        request_format="json",
+        language="en",
+        client=client,
+    )
+
+    assert await transcriber.transcribe(_audio()) == "external words"
+    request = requests[0]
+    assert request.url == "https://zenmux.example/api/v1/audio/transcriptions"
+    assert request.headers["Authorization"] == "Bearer zen-test"
+    assert request.headers["Content-Type"] == "application/json"
+    payload = json.loads(request.content)
+    assert payload == {
+        "model": "qwen/qwen3-asr-flash",
+        "input_audio": {
+            "data": base64.b64encode(b"RIFF....").decode("ascii"),
+            "format": "wav",
+        },
+        "language": "en",
+    }
+
+
+async def test_json_audio_format_prefers_opus_filename() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": "voice"})
+
+    transcriber = HttpSpeechTranscriber(
+        base_url="https://asr.example/v1",
+        model="asr-model",
+        request_format="json",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    audio = InboundAudio(b"OPUS", "audio/ogg", "voice.opus")
+
+    assert await transcriber.transcribe(audio) == "voice"
+    payload = json.loads(requests[0].content)
+    assert payload["input_audio"]["format"] == "opus"
+    assert "language" not in payload
 
 
 async def test_transcribe_empty_text_returns_empty() -> None:
@@ -106,6 +163,12 @@ async def test_transcribe_malformed_response_returns_empty() -> None:
 
 def test_transcriber_requires_base_url_and_model() -> None:
     with pytest.raises(ValueError, match="base_url"):
-        WhisperTranscriber(base_url=" ", model="whisper-1")
+        HttpSpeechTranscriber(base_url=" ", model="whisper-1")
     with pytest.raises(ValueError, match="model"):
-        WhisperTranscriber(base_url="https://asr.example/v1", model="")
+        HttpSpeechTranscriber(base_url="https://asr.example/v1", model="")
+    with pytest.raises(ValueError, match="request_format"):
+        HttpSpeechTranscriber(
+            base_url="https://asr.example/v1",
+            model="asr-model",
+            request_format="xml",  # type: ignore[arg-type]
+        )

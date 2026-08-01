@@ -995,10 +995,14 @@ class FeishuAdapter:
         resource = await self._transport.download_resource(
             message_id, file_key, "file"
         )
+        name = resource.name
+        if not name.lower().endswith(".opus"):
+            stem, separator, _suffix = name.rpartition(".")
+            name = f"{stem if separator else name}.opus"
         return InboundAudio(
             data=resource.data,
-            media_type=resource.media_type,
-            name=resource.name,
+            media_type="audio/opus",
+            name=name,
         )
 
     def _dispatch_sdk_event(self, data: Any) -> None:
