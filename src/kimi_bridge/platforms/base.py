@@ -54,6 +54,20 @@ class InboundFile:
 
 
 @dataclass(frozen=True, slots=True)
+class InboundAudio:
+    """One inbound voice message, with an optional platform-native transcript.
+
+    ``data`` may be empty only when a platform transcript survived an audio
+    download failure.
+    """
+
+    data: bytes
+    media_type: str
+    name: str = "audio"
+    transcript: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OutboundFile:
     """One platform-neutral file selected for outbound delivery."""
 
@@ -72,6 +86,7 @@ class InboundMessage:
     images: tuple[InboundImage, ...] = ()
     videos: tuple[InboundVideo, ...] = ()
     files: tuple[InboundFile, ...] = ()
+    audios: tuple[InboundAudio, ...] = ()
 
     @property
     def source(self) -> MessageRef:
@@ -111,6 +126,7 @@ class PlatformAdapter(Protocol):
     ) -> None: ...
     async def wait(self) -> None: ...
     async def stop(self) -> None: ...
+    async def transcribe_audio(self, audio: InboundAudio) -> str: ...
     async def send_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef: ...

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
 import mimetypes
+import secrets
 import threading
 import time
 from collections import deque
@@ -19,6 +21,7 @@ from ..interactions import InteractionOutcome, InteractionPrompt
 from .base import (
     ActorRef,
     ConversationRef,
+    InboundAudio,
     InboundFile,
     InboundHandler,
     InboundImage,
@@ -39,10 +42,12 @@ from .feishu_cards import (
 
 LOGGER = logging.getLogger(__name__)
 UNSUPPORTED_MESSAGE = (
-    "Unsupported message type; send text, an image, a video, or a file."
+    "Unsupported message type; send text, an image, a video, a voice message, "
+    "or a file."
 )
 FEISHU_TEXT_LIMIT = 7000
 FEISHU_MESSAGE_EDIT_LIMIT = 20
+FEISHU_FFMPEG_TIMEOUT_SECONDS = 30.0
 FEISHU_IMAGE_MEDIA_TYPES = frozenset(
     {
         "image/bmp",
@@ -57,6 +62,7 @@ FEISHU_IMAGE_MEDIA_TYPES = frozenset(
     }
 )
 VIDEO_COVER_NAME = "video-cover.png"
+FEISHU_FFMPEG_EXECUTABLE = "ffmpeg"
 
 
 def _log_non_allowlisted_user(
@@ -119,6 +125,8 @@ class _FeishuTransport(Protocol):
         name: str | None = None,
     ) -> _DownloadedResource: ...
 
+    async def recognize_speech(self, data: bytes) -> str: ...
+
 
 class _WebSocketRunner(Protocol):
     def run(self) -> None: ...
@@ -126,9 +134,16 @@ class _WebSocketRunner(Protocol):
 
 
 class _LarkTransport:
-    def __init__(self, app_id: str, app_secret: str) -> None:
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        *,
+        ffmpeg_executable: str = FEISHU_FFMPEG_EXECUTABLE,
+    ) -> None:
         self._app_id = app_id
         self._app_secret = app_secret
+        self._ffmpeg_executable = ffmpeg_executable
         self._client: Any | None = None
 
     def _get_client(self) -> Any:
@@ -356,6 +371,98 @@ class _LarkTransport:
             media_type=media_type,
         )
 
+    async def recognize_speech(self, data: bytes) -> str:
+        """Convert Opus to PCM and transcribe it via Feishu-native ASR.
+
+        Requires the tenant's ``speech_to_text`` scope; callers treat a
+        raised :class:`FeishuAPIError` as "no platform transcript".
+        """
+
+        from lark_oapi.api.speech_to_text.v1 import (
+            FileConfig,
+            FileRecognizeSpeechRequest,
+            FileRecognizeSpeechRequestBody,
+            Speech,
+        )
+
+        pcm = await _convert_opus_to_pcm(data, self._ffmpeg_executable)
+        body = (
+            FileRecognizeSpeechRequestBody.builder()
+            .speech(
+                Speech.builder()
+                .speech(base64.b64encode(pcm).decode("ascii"))
+                .build()
+            )
+            .config(
+                FileConfig.builder()
+                .file_id(secrets.token_hex(8))
+                .format("pcm")
+                .engine_type("16k_auto")
+                .build()
+            )
+            .build()
+        )
+        request = FileRecognizeSpeechRequest.builder().request_body(body).build()
+        client = self._get_client()
+        try:
+            response = await client.speech_to_text.v1.speech.afile_recognize(request)
+        except Exception as exc:
+            raise FeishuAPIError("Feishu speech recognition request failed") from exc
+        _raise_for_response(response, "recognize speech")
+        text = getattr(getattr(response, "data", None), "recognition_text", None)
+        return text.strip() if isinstance(text, str) else ""
+
+
+async def _convert_opus_to_pcm(
+    data: bytes,
+    executable: str,
+    *,
+    timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
+) -> bytes:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-acodec",
+            "pcm_s16le",
+            "-f",
+            "s16le",
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            pcm, _stderr = await asyncio.wait_for(
+                process.communicate(data), timeout=timeout
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise FeishuAPIError(
+                "FFmpeg Opus-to-PCM conversion timed out"
+            ) from exc
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
+    except OSError as exc:
+        raise FeishuAPIError(
+            "Could not run FFmpeg for Opus-to-PCM conversion"
+        ) from exc
+    if process.returncode != 0 or not pcm:
+        raise FeishuAPIError("FFmpeg Opus-to-PCM conversion failed")
+    return pcm
+
 
 class _LarkWebSocketRunner:
     """Run the SDK's blocking WebSocket client in a worker thread."""
@@ -475,6 +582,7 @@ class FeishuAdapter:
         allowed_users: set[str] | frozenset[str],
         *,
         message_limit: int = FEISHU_TEXT_LIMIT,
+        ffmpeg_executable: str = FEISHU_FFMPEG_EXECUTABLE,
         transport: _FeishuTransport | None = None,
         ws_factory: Callable[
             [Callable[[Any], None], Callable[[Any], Any]], _WebSocketRunner
@@ -489,6 +597,7 @@ class FeishuAdapter:
         self._app_secret = app_secret
         self._allowed_users = frozenset(allowed_users)
         self.message_limit = message_limit
+        self._ffmpeg_executable = ffmpeg_executable
         self._transport = transport
         self._ws_factory = ws_factory
 
@@ -516,7 +625,11 @@ class FeishuAdapter:
         self._main_loop = asyncio.get_running_loop()
         self._started_at_ms = int(time.time() * 1000)
         if self._transport is None:
-            self._transport = _LarkTransport(self._app_id, self._app_secret)
+            self._transport = _LarkTransport(
+                self._app_id,
+                self._app_secret,
+                ffmpeg_executable=self._ffmpeg_executable,
+            )
         factory = self._ws_factory or (
             lambda message_callback, card_callback: _LarkWebSocketRunner(
                 self._app_id,
@@ -563,6 +676,21 @@ class FeishuAdapter:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         self._raise_ws_error()
+
+    async def transcribe_audio(self, audio: InboundAudio) -> str:
+        if audio.transcript:
+            return audio.transcript.strip()
+        if self._transport is None:
+            raise RuntimeError("Feishu adapter is not started")
+        try:
+            return await self._transport.recognize_speech(audio.data)
+        except FeishuAPIError as exc:
+            LOGGER.warning(
+                "Feishu speech recognition failed (%s); check FFmpeg and the "
+                "app's speech_to_text:speech scope",
+                type(exc).__name__,
+            )
+            return ""
 
     async def send_text(
         self, conversation: ConversationRef, text: str
@@ -709,6 +837,7 @@ class FeishuAdapter:
         image_keys: list[str] = []
         video_specs: list[tuple[str, str | None]] = []
         file_specs: list[tuple[str, str | None]] = []
+        audio_keys: list[str] = []
         if message.message_type == "text":
             text_value = content.get("text")
             if not isinstance(text_value, str):
@@ -716,6 +845,8 @@ class FeishuAdapter:
             text = text_value
         elif message.message_type == "image":
             image_keys = [_required_string(content, "image_key")]
+        elif message.message_type == "audio":
+            audio_keys = [_required_string(content, "file_key")]
         elif message.message_type == "file":
             file_specs = [
                 (
@@ -764,6 +895,14 @@ class FeishuAdapter:
                 )
             )
         )
+        audios = tuple(
+            await asyncio.gather(
+                *(
+                    self._download_audio(message_id, file_key)
+                    for file_key in audio_keys
+                )
+            )
+        )
         if self._on_message is None:
             raise RuntimeError("Feishu adapter is not started")
         await self._on_message(
@@ -777,6 +916,7 @@ class FeishuAdapter:
                 images=images,
                 videos=videos,
                 files=files,
+                audios=audios,
             ),
         )
 
@@ -871,6 +1011,21 @@ class FeishuAdapter:
             message_id, file_key, "file", name=filename
         )
         return InboundFile(resource.data, resource.name, resource.media_type)
+
+    async def _download_audio(self, message_id: str, file_key: str) -> InboundAudio:
+        assert self._transport is not None
+        resource = await self._transport.download_resource(
+            message_id, file_key, "file"
+        )
+        name = resource.name
+        if not name.lower().endswith(".opus"):
+            stem, separator, _suffix = name.rpartition(".")
+            name = f"{stem if separator else name}.opus"
+        return InboundAudio(
+            data=resource.data,
+            media_type="audio/opus",
+            name=name,
+        )
 
     def _dispatch_sdk_event(self, data: Any) -> None:
         loop = self._main_loop

@@ -33,6 +33,7 @@ from ..interactions import (
 from .base import (
     ActorRef,
     ConversationRef,
+    InboundAudio,
     InboundFile,
     InboundHandler,
     InboundImage,
@@ -459,6 +460,9 @@ class TelegramAdapter:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         await self._api.close()
+
+    async def transcribe_audio(self, audio: InboundAudio) -> str:
+        return audio.transcript.strip() if audio.transcript else ""
 
     async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
         self._validate_conversation(conversation)

@@ -27,7 +27,18 @@ _KNOWN_SUB_KEYS = {
     "feishu": frozenset({"app_id", "app_secret", "allowed_users"}),
     "telegram": frozenset({"bot_token", "allowed_users"}),
     "qq": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "voice": frozenset({"asr"}),
 }
+_KNOWN_VOICE_ASR_KEYS = frozenset(
+    {
+        "base_url",
+        "api_key",
+        "api_key_env",
+        "model",
+        "request_format",
+        "language",
+    }
+)
 _KNOWN_TOP_LEVEL_KEYS = frozenset(
     {
         "platform",
@@ -56,6 +67,14 @@ def unknown_config_keys(raw: Mapping[str, object]) -> tuple[str, ...]:
         if sub_keys is None or not isinstance(value, Mapping):
             continue
         unknown.extend(f"{key}.{sub}" for sub in value if sub not in sub_keys)
+        if key == "voice":
+            asr_raw = value.get("asr")
+            if isinstance(asr_raw, Mapping):
+                unknown.extend(
+                    f"voice.asr.{sub}"
+                    for sub in asr_raw
+                    if sub not in _KNOWN_VOICE_ASR_KEYS
+                )
     return tuple(sorted(unknown))
 
 
@@ -104,6 +123,28 @@ class QQConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class VoiceAsrConfig:
+    """External HTTP transcription endpoint for voice messages.
+
+    ``base_url`` and ``model`` are required; ``api_key`` may stay empty for
+    local servers that do not check a Bearer token.
+    """
+
+    base_url: str
+    model: str
+    api_key: str = field(default="", repr=False)
+    request_format: Literal["multipart", "json"] = "multipart"
+    language: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceConfig:
+    """Voice-message handling; ``asr`` is None when no external ASR is set."""
+
+    asr: VoiceAsrConfig | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Runtime configuration for the single-user bridge."""
 
@@ -120,6 +161,7 @@ class Config:
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     qq: QQConfig = field(default_factory=QQConfig)
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -153,6 +195,14 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         app_id = "..."
         app_secret = "..."
         allowed_users = ["..."]
+
+        [voice.asr]
+        base_url = "https://api.openai.com/v1"
+        api_key = "sk-..."
+        # api_key_env = "ASR_API_KEY"  # alternative to api_key
+        model = "whisper-1"
+        request_format = "multipart"
+        language = "en"
     """
 
     config_path = Path(path).expanduser()
@@ -296,6 +346,64 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
         raise TypeError("qq.allowed_users must contain non-empty strings")
     qq_allowed_users = frozenset(qq_allowed_raw)
 
+    voice_raw = raw.get("voice", {})
+    if not isinstance(voice_raw, dict):
+        raise TypeError("voice must be a TOML table")
+    voice_asr: VoiceAsrConfig | None = None
+    asr_raw = voice_raw.get("asr")
+    if asr_raw is not None:
+        if not isinstance(asr_raw, dict):
+            raise TypeError("voice.asr must be a TOML table")
+        asr_base_url = asr_raw.get("base_url", "")
+        asr_api_key = asr_raw.get("api_key", "")
+        asr_api_key_env = asr_raw.get("api_key_env", "")
+        asr_model = asr_raw.get("model", "")
+        asr_request_format = asr_raw.get("request_format", "multipart")
+        asr_language = asr_raw.get("language", "")
+        if not all(
+            isinstance(value, str)
+            for value in (
+                asr_base_url,
+                asr_api_key,
+                asr_api_key_env,
+                asr_model,
+                asr_request_format,
+                asr_language,
+            )
+        ):
+            raise TypeError(
+                "voice.asr.base_url, voice.asr.api_key, voice.asr.api_key_env, "
+                "voice.asr.model, voice.asr.request_format, and "
+                "voice.asr.language must be strings"
+            )
+        if not asr_base_url.strip() or not asr_model.strip():
+            raise ValueError(
+                "voice.asr.base_url and voice.asr.model must be non-empty; "
+                "voice.asr.api_key is optional for local servers"
+            )
+        if asr_request_format not in {"multipart", "json"}:
+            raise ValueError(
+                "voice.asr.request_format must be multipart or json"
+            )
+        if asr_api_key and asr_api_key_env:
+            raise ValueError(
+                "voice.asr.api_key and voice.asr.api_key_env are mutually exclusive"
+            )
+        if asr_api_key_env:
+            asr_api_key = os.environ.get(asr_api_key_env, "")
+            if not asr_api_key:
+                raise ValueError(
+                    f"voice.asr.api_key_env names an unset or empty environment "
+                    f"variable: {asr_api_key_env}"
+                )
+        voice_asr = VoiceAsrConfig(
+            base_url=asr_base_url,
+            model=asr_model,
+            api_key=asr_api_key,
+            request_format=cast(Literal["multipart", "json"], asr_request_format),
+            language=asr_language,
+        )
+
     return Config(
         platform=cast(PlatformName, platform),
         log_level=log_level,
@@ -321,4 +429,5 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
             app_secret=qq_app_secret,
             allowed_users=qq_allowed_users,
         ),
+        voice=VoiceConfig(asr=voice_asr),
     )

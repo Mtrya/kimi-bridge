@@ -126,6 +126,54 @@ def test_builds_only_selected_telegram_adapter(monkeypatch: pytest.MonkeyPatch) 
     assert calls == [("telegram", ("secret-token", frozenset({123})))]
 
 
+def test_builds_feishu_adapter_with_resolved_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, Any] = {}
+
+    class FakeAdapter(_Adapter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            received["args"] = args
+            received["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "FeishuAdapter", FakeAdapter)
+    monkeypatch.setattr(main_module.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    config = Config(
+        platform="feishu",
+        feishu=FeishuConfig(
+            app_id="app-1",
+            app_secret="secret-1",
+            allowed_users=frozenset({"ou_one"}),
+        ),
+    )
+
+    adapter = main_module._build_adapter(config)
+
+    assert isinstance(adapter, FakeAdapter)
+    assert received == {
+        "args": ("app-1", "secret-1", frozenset({"ou_one"})),
+        "kwargs": {"ffmpeg_executable": "/usr/bin/ffmpeg"},
+    }
+
+
+def test_selected_feishu_adapter_requires_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="FFmpeg is required"):
+        main_module._build_adapter(
+            Config(
+                platform="feishu",
+                feishu=FeishuConfig(
+                    app_id="app-1",
+                    app_secret="secret-1",
+                    allowed_users=frozenset({"ou_one"}),
+                ),
+            )
+        )
+
+
 def test_builds_qq_adapter_with_wired_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

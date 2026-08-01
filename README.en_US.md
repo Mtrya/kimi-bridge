@@ -16,7 +16,7 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 | QQ C2C (private chats) | Supported |
 | Linux, Python ≥3.11 | Supported |
 | macOS and Windows | Experimental |
-| Voice messages | Not currently supported |
+| Voice messages | Supported on Feishu and QQ |
 
 Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram and QQ use small handwritten `httpx`/`websockets` transports without a platform SDK dependency.
 
@@ -26,7 +26,7 @@ Only one adapter runs in each bridge process. Feishu uses the official `lark-oap
 - Edit-in-place answer streaming, router-side chunking, and optional separate thinking output.
 - Interactive approvals and questions with timeout handling and stale-action protection.
 - Busy-turn prompt steering, cancellation, permission modes, model/effort/plan controls, goals, tasks, skills, and read-only MCP inspection.
-- Inbound images and files plus workspace-contained outbound `/send`.
+- Inbound images, files, and transcribed Feishu/QQ voice messages plus workspace-contained outbound `/send`.
 - Private-chat allowlists, loopback-only Kimi server supervision, and a secret-safe non-starting doctor command.
 
 ## Quick start

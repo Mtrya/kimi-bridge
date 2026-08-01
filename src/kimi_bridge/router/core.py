@@ -16,6 +16,7 @@ from ..kimi_server import (
     PromptMedia,
 )
 from ..platforms.base import InboundFile, InboundMessage, PlatformAdapter
+from ..speech import SpeechTranscriber
 from ..state import BridgeState, ConversationBinding, StateStore
 from .commands import _CommandMixin
 from .files import _save_inbound_files
@@ -24,6 +25,15 @@ from .interactions import _InteractionMixin
 from .models import _ActiveStream, _CompactionWaiter, _PendingInteraction
 from .rendering import _RenderingMixin
 from .sessions import _SessionMixin
+
+
+# ASR output inevitably contains recognition errors; the prefix marks the
+# text as machine-transcribed speech so the agent does not nitpick or
+# "correct" transcription mistakes in its reply.
+VOICE_TRANSCRIPT_PREFIX = "[语音转写]"
+VOICE_UNTRANSCRIBED_NOTICE = (
+    "[System: A voice message was received but could not be transcribed.]"
+)
 
 
 class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixin):
@@ -41,6 +51,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         interaction_timeout_seconds: float = 600.0,
         inbox_subdir: str = ".kimi-bridge-inbox",
         session_list_limit: int = 10,
+        transcriber: SpeechTranscriber | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         interaction_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         poll_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -69,6 +80,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._interaction_timeout_seconds = interaction_timeout_seconds
         self._inbox_subdir = inbox_subdir
         self._session_list_limit = session_list_limit
+        self._transcriber = transcriber
         self._sleep = sleep
         self._interaction_sleep = interaction_sleep
         self._poll_sleep = poll_sleep
@@ -102,7 +114,13 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self, adapter: PlatformAdapter, msg: InboundMessage
     ) -> None:
         text = msg.text.strip()
-        if not text and not msg.images and not msg.videos and not msg.files:
+        if (
+            not text
+            and not msg.images
+            and not msg.videos
+            and not msg.files
+            and not msg.audios
+        ):
             return
         conversation_key = _conversation_key(msg)
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
@@ -113,6 +131,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 and not msg.images
                 and not msg.videos
                 and not msg.files
+                and not msg.audios
             ):
                 try:
                     await self._handle_command(
@@ -147,7 +166,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 msg.actor,
             )
             try:
-                content = await self._build_prompt_content(binding, msg)
+                content = await self._build_prompt_content(binding, msg, adapter)
                 result = await self._client.submit_prompt(
                     binding.session_id,
                     content,
@@ -169,11 +188,28 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         raise
 
     async def _build_prompt_content(
-        self, binding: ConversationBinding, msg: InboundMessage
+        self,
+        binding: ConversationBinding,
+        msg: InboundMessage,
+        adapter: PlatformAdapter,
     ) -> PromptContent:
         text_parts: list[str] = []
         if msg.text.strip():
             text_parts.append(msg.text.strip())
+        # Voice messages resolve their transcript in layers: the configured
+        # ASR first, then the platform-native transcript; the failure notice
+        # goes into the prompt text, never to the platform as a user-visible
+        # message. Audio never goes through the inbox-file path.
+        for audio in msg.audios:
+            transcript = ""
+            if self._transcriber is not None and audio.data:
+                transcript = await self._transcriber.transcribe(audio)
+            if not transcript:
+                transcript = await adapter.transcribe_audio(audio)
+            if transcript:
+                text_parts.append(f"{VOICE_TRANSCRIPT_PREFIX} {transcript}")
+            else:
+                text_parts.append(VOICE_UNTRANSCRIBED_NOTICE)
         prompt_media: list[PromptMedia] = []
         inbox_files = list(msg.files)
         if msg.images or msg.videos:

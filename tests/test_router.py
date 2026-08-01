@@ -47,6 +47,7 @@ from kimi_bridge.kimi_server import (
 from kimi_bridge.platforms.base import (
     ActorRef,
     ConversationRef,
+    InboundAudio,
     InboundFile,
     InboundImage,
     InboundInteraction,
@@ -56,6 +57,10 @@ from kimi_bridge.platforms.base import (
     OutboundFile,
 )
 from kimi_bridge.router import ChatRouter
+from kimi_bridge.router.core import (
+    VOICE_TRANSCRIPT_PREFIX,
+    VOICE_UNTRANSCRIBED_NOTICE,
+)
 from kimi_bridge.router.help import COMMAND_HELP, command_help_details
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 
@@ -505,6 +510,7 @@ class FakeAdapter:
         self.outcomes: list[tuple[MessageRef, InteractionOutcome]] = []
         self.files: list[tuple[MessageRef, ConversationRef, OutboundFile]] = []
         self.file_error: Exception | None = None
+        self.transcribed_audio: list[InboundAudio] = []
 
     async def start(
         self, _message_handler: Any, _interaction_handler: Any
@@ -516,6 +522,10 @@ class FakeAdapter:
 
     async def stop(self) -> None:
         pass
+
+    async def transcribe_audio(self, audio: InboundAudio) -> str:
+        self.transcribed_audio.append(audio)
+        return audio.transcript.strip() if audio.transcript else ""
 
     async def send_text(
         self, conversation: ConversationRef, text: str
@@ -4652,3 +4662,189 @@ async def test_sessions_list_respects_configured_limit(tmp_path: Path) -> None:
     listing = next(text for text in texts if "session-alpha" in text)
     assert "Beta" in listing and "Alpha" in listing
     assert "Control session" not in listing
+
+
+# --- inbound voice layering -------------------------------------------------
+
+
+class FakeTranscriber:
+    def __init__(self, results: dict[bytes, str] | None = None) -> None:
+        self.results = results if results is not None else {}
+        self.calls: list[bytes] = []
+
+    async def transcribe(self, audio: InboundAudio) -> str:
+        self.calls.append(audio.data)
+        return self.results.get(audio.data, "")
+
+
+def _voice_router(
+    client: FakeKimiClient,
+    tmp_path: Path,
+    *,
+    transcriber: FakeTranscriber | None = None,
+) -> ChatRouter:
+    return ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        transcriber=transcriber,
+    )
+
+
+def _voice_message(
+    *,
+    text: str = "",
+    transcript: str | None = "platform words",
+    data: bytes = b"VOICE",
+) -> InboundMessage:
+    conversation = ConversationRef("feishu", "cli_bot", "oc_direct")
+    return InboundMessage(
+        conversation=conversation,
+        actor=ActorRef("ou_user"),
+        text=text,
+        timestamp=1.0,
+        message_id="om_inbound",
+        audios=(
+            InboundAudio(data, "audio/wav", "voice.wav", transcript=transcript),
+        ),
+    )
+
+
+async def test_configured_asr_wins_over_platform_transcript(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber({b"VOICE": "asr words"})
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message())
+    finally:
+        await router.close()
+
+    assert transcriber.calls == [b"VOICE"]
+    assert adapter.transcribed_audio == []
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == "[语音转写] asr words"
+    assert "platform words" not in content.text
+    assert content.media == ()
+
+
+async def test_audio_message_with_command_text_is_submitted_as_a_prompt(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber({b"VOICE": "asr words"})
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message(text="/status"))
+    finally:
+        await router.close()
+
+    assert len(client.prompts) == 1
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == "/status\n\n[语音转写] asr words"
+    assert adapter.sent == []
+
+
+async def test_platform_transcript_survives_missing_audio_bytes(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber()
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message(data=b""))
+    finally:
+        await router.close()
+
+    assert transcriber.calls == []
+    assert adapter.transcribed_audio == [
+        InboundAudio(b"", "audio/wav", "voice.wav", "platform words")
+    ]
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+
+
+async def test_platform_transcript_is_the_fallback_when_asr_is_empty(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber({b"VOICE": ""})
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message())
+    finally:
+        await router.close()
+
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+    assert adapter.transcribed_audio == [
+        InboundAudio(b"VOICE", "audio/wav", "voice.wav", "platform words")
+    ]
+
+
+async def test_platform_transcript_is_used_without_a_configured_asr(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _voice_message())
+    finally:
+        await router.close()
+
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+    assert len(adapter.transcribed_audio) == 1
+
+
+async def test_untranscribable_voice_appends_a_prompt_only_system_notice(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber({b"VOICE": ""})
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(
+            adapter,
+            _voice_message(text="listen", transcript=None),
+        )
+    finally:
+        await router.close()
+
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == f"listen\n\n{VOICE_UNTRANSCRIBED_NOTICE}"
+    assert VOICE_TRANSCRIPT_PREFIX not in content.text
+    assert adapter.sent == []
+    assert len(adapter.transcribed_audio) == 1
+
+
+async def test_voice_message_title_and_no_inbox_files(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    workspace = tmp_path / "workspace"
+    router = _voice_router(client, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _voice_message())
+    finally:
+        await router.close()
+
+    assert client.created[0][1] == "Voice message"
+    assert not (workspace / ".kimi-bridge-inbox").exists()
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text is not None
+    assert content.text.startswith(VOICE_TRANSCRIPT_PREFIX)

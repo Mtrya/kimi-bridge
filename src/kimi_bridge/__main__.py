@@ -34,6 +34,7 @@ from .platforms.qq import (
 )
 from .platforms.telegram import TelegramAdapter
 from .router import ChatRouter
+from .speech import HttpSpeechTranscriber
 from .state import StateStore
 
 
@@ -73,6 +74,15 @@ async def run(config_path: str | Path) -> None:
         async with KimiServerClient(supervisor=supervisor) as client:
             await client.check_server_version()
             model = await client.get_default_model()
+            transcriber = None
+            if config.voice.asr is not None:
+                transcriber = HttpSpeechTranscriber(
+                    base_url=config.voice.asr.base_url,
+                    model=config.voice.asr.model,
+                    api_key=config.voice.asr.api_key,
+                    request_format=config.voice.asr.request_format,
+                    language=config.voice.asr.language,
+                )
             router = ChatRouter(
                 client,
                 state_store=StateStore(config.state_path),
@@ -83,6 +93,7 @@ async def run(config_path: str | Path) -> None:
                 interaction_timeout_seconds=(config.interaction_timeout_seconds),
                 inbox_subdir=config.inbox_subdir,
                 session_list_limit=config.session_list_limit,
+                transcriber=transcriber,
             )
             adapter_wait: asyncio.Task[None] | None = None
             signal_wait: asyncio.Task[bool] | None = None
@@ -145,10 +156,17 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             raise AdapterConfigurationError(
                 "feishu.allowed_users must contain at least one user"
             )
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path is None:
+            raise AdapterConfigurationError(
+                "FFmpeg is required for Feishu inbound voice; install ffmpeg "
+                "and ensure it is on PATH"
+            )
         return FeishuAdapter(
             config.feishu.app_id,
             config.feishu.app_secret,
             config.feishu.allowed_users,
+            ffmpeg_executable=ffmpeg_path,
         )
 
     if config.platform == "qq":

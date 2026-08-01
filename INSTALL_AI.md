@@ -135,7 +135,7 @@ Ask which platform the user wants only after host readiness is established. One 
 
 Explain the relevant choices:
 
-- **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, and file transfer. Requires a published custom app, permissions, event subscriptions, and long-connection delivery.
+- **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, file transfer, and inbound voice transcription. Requires FFmpeg on `PATH` plus a published custom app, permissions, event subscriptions, and long-connection delivery.
 - **QQ:** supported and live-validated for C2C messaging. It has no interactive approvals, questions, or separate thinking stream, so sessions are forced into `auto` permission mode. Obtain explicit acceptance of this security posture.
 - **Telegram:** experimental and not project-live-validated. It supports private chats only. Startup uses long polling and takes over any existing webhook.
 
@@ -181,7 +181,20 @@ Official starting points:
 
 Research these sources and the current console before guiding the user. Translate console labels when useful.
 
-### 5.1 Inspect or create the app
+### 5.1 Require FFmpeg
+
+Feishu delivers voice-message resources as Opus, while its native file-recognition API accepts 16 kHz mono PCM. kimi-bridge invokes FFmpeg directly, without a shell, to perform this conversion before calling Feishu speech recognition. FFmpeg is a required runtime prerequisite whenever the Feishu adapter is selected, including when `[voice.asr]` is configured: the external endpoint is tried first, but Feishu-native recognition remains the supported fallback when that endpoint returns no transcript.
+
+Check the host without changing it:
+
+```bash
+command -v ffmpeg
+ffmpeg -version
+```
+
+If either check fails, research the current official installation method for the host from [FFmpeg downloads](https://ffmpeg.org/download.html), explain the package and system changes, and obtain approval before installing it. Re-run both commands afterward. Do not report the Feishu runtime ready while FFmpeg is missing or unusable.
+
+### 5.2 Inspect or create the app
 
 If an app already exists, automatically establish through available CLI/API inspection or user-guided console inspection:
 
@@ -197,7 +210,7 @@ Ask for approval before changing an existing app.
 
 If a new app is needed, app ownership, login, consent, and any enterprise authorization are user-only. Give a researched click-by-click guide for creating a custom app and enabling its bot capability. Perform all API- or CLI-capable follow-up yourself.
 
-### 5.2 Configure required permissions
+### 5.3 Configure required permissions
 
 Ensure the app has these tenant permissions:
 
@@ -206,10 +219,11 @@ Ensure the app has these tenant permissions:
 - `im:message:send_as_bot`
 - `im:message:update`
 - `im:resource`, or current narrower permissions that together cover the bridge's uploads and downloads
+- `speech_to_text:speech`
 
 Explain why each missing permission is needed. Do not ask for broad unrelated scopes.
 
-### 5.3 Configure delivery
+### 5.4 Configure delivery
 
 Configure WebSocket long-connection delivery, not a webhook. Subscribe to:
 
@@ -218,7 +232,7 @@ Configure WebSocket long-connection delivery, not a webhook. Subscribe to:
 
 Check that the app is available to the intended user. Scope, event, or callback changes usually require a new app version and enterprise approval. Guide the user through the exact publication action, then pause for review when necessary.
 
-### 5.4 Use lark-cli only when already present
+### 5.5 Use lark-cli only when already present
 
 When `command -v lark-cli` succeeds, use it where helpful to inspect authentication, app metadata, required schemas, published scopes, event subscriptions, and bounded event delivery.
 
@@ -226,13 +240,13 @@ Treat `lark-cli config init --new` as a mutating app/profile operation. Inspect 
 
 lark-cli can create or inspect an app and diagnose scopes or events, but it does not prove that all console permissions are granted or that an app version is published. kimi-bridge also does not read its keychain directly. Never describe lark-cli as a required dependency or a complete bootstrap.
 
-### 5.5 Obtain credentials and identity
+### 5.6 Obtain credentials and identity
 
 App Secret retrieval or reset is user-only when the console requires the user's identity. Have the user place it directly into the protected configuration through a private local path. Do not display it.
 
 Prefer the intended user's `open_id` from the same app and tenant. Discover it through an authenticated platform API, an already available lark-cli path, or a bounded inbound event listener. If console-side configuration makes those impossible before bridge startup, use a temporary non-matching allowlist, start the bridge in the foreground, have the intended user send one direct message, and take the logged `open_id` from the local process. Replace the temporary value immediately.
 
-### 5.6 Validate Feishu
+### 5.7 Validate Feishu
 
 Run local validation, then perform a live round trip:
 
@@ -243,8 +257,9 @@ Run local validation, then perform a live round trip:
 5. confirm the expected reply;
 6. send a normal prompt and confirm the streamed answer completes;
 7. exercise one approval or question interaction;
-8. if file support is needed, test one inbound and one outbound file;
-9. stop cleanly.
+8. send a voice message with a distinctive phrase and confirm the agent receives the correct transcript;
+9. if file support is needed, test one inbound and one outbound file;
+10. stop cleanly.
 
 Do not report Feishu ready if only a CLI event consumer or `doctor` passed.
 
@@ -351,7 +366,7 @@ Run:
 kimi-bridge doctor
 ```
 
-`doctor` validates local configuration, permissions, paths, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
+`doctor` validates local configuration, configuration-file permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
 
 Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platform ready. Common branches:
 
@@ -359,6 +374,7 @@ Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platfo
 - unknown keys: correct typos because unknown keys are ignored at runtime;
 - unsafe config permissions: restrict the file;
 - missing credentials or allowlist: return to the selected platform bootstrap;
+- missing or unusable FFmpeg with Feishu selected: install or repair FFmpeg, confirm it is on `PATH`, and re-run `doctor`;
 - unusable workspace or state path: distinguish setup-created paths from pre-existing user data before changing anything;
 - legacy or missing `kimi`: return to Kimi Code preflight;
 - Kimi configuration failure: run `kimi doctor config` directly and prove a real prompt;

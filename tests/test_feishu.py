@@ -9,8 +9,10 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
+from kimi_bridge.platforms import feishu as feishu_module
 from kimi_bridge.interactions import (
     ApprovalDecision,
     ApprovalPrompt,
@@ -45,6 +47,7 @@ from kimi_bridge.platforms.feishu import (
     _DownloadedResource,
     _LarkTransport,
     _LarkWebSocketRunner,
+    _convert_opus_to_pcm,
     _load_video_cover,
 )
 from kimi_bridge.platforms.feishu_cards import (
@@ -65,6 +68,9 @@ class FakeTransport:
         self.uploaded_images: list[OutboundFile] = []
         self.uploaded_files: list[tuple[OutboundFile, str]] = []
         self.sent_media: list[tuple[str, str, str, dict[str, str]]] = []
+        self.recognized: list[bytes] = []
+        self.recognition_text = ""
+        self.recognition_error: Exception | None = None
 
     async def send_text(self, receive_id: str, receive_id_type: str, text: str) -> str:
         self.sent.append((receive_id, receive_id_type, text))
@@ -118,6 +124,12 @@ class FakeTransport:
         if name is None:
             return resource
         return _DownloadedResource(resource.data, name, resource.media_type)
+
+    async def recognize_speech(self, data: bytes) -> str:
+        self.recognized.append(data)
+        if self.recognition_error is not None:
+            raise self.recognition_error
+        return self.recognition_text
 
 
 class FakeWebSocketRunner:
@@ -1065,12 +1077,250 @@ async def test_other_message_type_gets_supported_types_notice() -> None:
         _discard_interaction,
     )
     try:
-        await adapter.handle_event(_event(message_id="om_audio", message_type="audio"))
+        await adapter.handle_event(
+            _event(message_id="om_sticker", message_type="sticker")
+        )
     finally:
         await adapter.stop()
 
     assert received == []
     assert transport.sent == [("oc_direct", "chat_id", UNSUPPORTED_MESSAGE)]
+
+
+async def test_audio_message_download_defers_native_transcription() -> None:
+    transport = FakeTransport()
+    transport.resources = {
+        "audio_one": _DownloadedResource(b"opus-bytes", "voice.ogg", "audio/ogg"),
+    }
+    received: list[InboundMessage] = []
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+        ws_factory=FakeWebSocketRunner,
+    )
+    await adapter.start(
+        lambda _adapter, message: _append(received, message),
+        _discard_interaction,
+    )
+    try:
+        await adapter.handle_event(
+            _event(
+                message_id="om_audio",
+                message_type="audio",
+                content={"file_key": "audio_one"},
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert transport.downloads == [("om_audio", "audio_one", "file", None)]
+    assert transport.recognized == []
+    assert len(received) == 1
+    message = received[0]
+    assert message.files == ()
+    assert len(message.audios) == 1
+    audio = message.audios[0]
+    assert audio.data == b"opus-bytes"
+    assert audio.media_type == "audio/opus"
+    assert audio.name == "voice.opus"
+    assert audio.transcript is None
+
+    transport.recognition_text = "native transcript"
+    assert await adapter.transcribe_audio(audio) == "native transcript"
+    assert transport.recognized == [b"opus-bytes"]
+
+
+async def test_native_asr_failure_returns_an_empty_transcript(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeTransport()
+    transport.resources = {
+        "audio_one": _DownloadedResource(b"opus-bytes", "voice.opus", "audio/ogg"),
+    }
+    transport.recognition_error = FeishuAPIError(
+        "Feishu recognize speech failed: 99991672 scope missing"
+    )
+    received: list[InboundMessage] = []
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+        ws_factory=FakeWebSocketRunner,
+    )
+    await adapter.start(
+        lambda _adapter, message: _append(received, message),
+        _discard_interaction,
+    )
+    try:
+        await adapter.handle_event(
+            _event(
+                message_id="om_audio",
+                message_type="audio",
+                content={"file_key": "audio_one"},
+            )
+        )
+        with caplog.at_level(logging.WARNING, logger="kimi_bridge.platforms.feishu"):
+            assert await adapter.transcribe_audio(received[0].audios[0]) == ""
+    finally:
+        await adapter.stop()
+
+    assert len(received) == 1
+    audio = received[0].audios[0]
+    assert audio.data == b"opus-bytes"
+    assert audio.transcript is None
+    assert transport.sent == []
+    assert any(
+        record.name == "kimi_bridge.platforms.feishu"
+        and "speech recognition failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_sdk_transport_builds_file_recognize_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+    requests: list[Any] = []
+
+    class SpeechAPI:
+        async def afile_recognize(self, request: Any) -> Any:
+            requests.append(request)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(recognition_text="recognized words"),
+            )
+
+    async def fake_convert(data: bytes, executable: str) -> bytes:
+        assert data == b"opus"
+        assert executable == "/fake/ffmpeg"
+        return b"pcm"
+
+    transport = _LarkTransport(
+        "cli_test", "secret", ffmpeg_executable="/fake/ffmpeg"
+    )
+    transport._client = SimpleNamespace(
+        speech_to_text=SimpleNamespace(v1=SimpleNamespace(speech=SpeechAPI()))
+    )
+    monkeypatch.setattr(feishu_module, "_convert_opus_to_pcm", fake_convert)
+    monkeypatch.setattr(
+        feishu_module.secrets,
+        "token_hex",
+        lambda length: "A1B2C3D4E5F60708",
+    )
+
+    assert await transport.recognize_speech(b"opus") == "recognized words"
+    body = requests[0].request_body
+    assert body.config.file_id == "A1B2C3D4E5F60708"
+    assert body.config.format == "pcm"
+    assert body.config.engine_type == "16k_auto"
+    assert body.speech.speech == "cGNt"
+
+
+async def test_sdk_transport_wraps_speech_request_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+
+    class SpeechAPI:
+        async def afile_recognize(self, request: Any) -> Any:
+            raise httpx.ConnectError("Feishu speech endpoint unavailable")
+
+    async def fake_convert(_data: bytes, _executable: str) -> bytes:
+        return b"pcm"
+
+    transport = _LarkTransport(
+        "cli_test", "secret", ffmpeg_executable="/fake/ffmpeg"
+    )
+    transport._client = SimpleNamespace(
+        speech_to_text=SimpleNamespace(v1=SimpleNamespace(speech=SpeechAPI()))
+    )
+    monkeypatch.setattr(feishu_module, "_convert_opus_to_pcm", fake_convert)
+
+    with pytest.raises(FeishuAPIError, match="request failed"):
+        await transport.recognize_speech(b"opus")
+
+
+async def test_ffmpeg_converts_opus_to_16khz_mono_pcm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, data: bytes) -> tuple[bytes, bytes]:
+            assert data == b"opus"
+            return b"pcm", b""
+
+    async def fake_create(*args: Any, **kwargs: Any) -> FakeProcess:
+        calls.append((args, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    assert await _convert_opus_to_pcm(b"opus", "/fake/ffmpeg") == b"pcm"
+    args, kwargs = calls[0]
+    assert args == (
+        "/fake/ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+    )
+    assert kwargs == {
+        "stdin": asyncio.subprocess.PIPE,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+
+
+async def test_ffmpeg_timeout_kills_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        killed = False
+        waited = False
+
+        async def communicate(self, _data: bytes) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            self.waited = True
+            assert self.returncode is not None
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(FeishuAPIError, match="timed out"):
+        await _convert_opus_to_pcm(b"opus", "/fake/ffmpeg", timeout=0.001)
+
+    assert process.killed is True
+    assert process.waited is True
 
 
 async def _append(items: list[Any], item: Any) -> None:
