@@ -2209,7 +2209,7 @@ async def test_voice_attachment_prefers_wav_url_and_platform_transcript() -> Non
     audio = message.audios[0]
     assert audio.data == b"VOICEDATA"
     assert audio.media_type == "audio/wav"
-    assert audio.name == "voice.silk"
+    assert audio.name == "voice.wav"
     assert audio.transcript == "platform transcript"
 
 
@@ -2225,8 +2225,24 @@ async def test_voice_attachment_without_wav_url_uses_raw_url_and_no_transcript()
 
     assert [request.url.path for request in requests] == ["/voice.silk"]
     audio = delivered[0].audios[0]
-    assert audio.media_type == "voice"
+    assert audio.media_type == "audio/silk"
+    assert audio.name == "voice.silk"
     assert audio.transcript is None
+
+
+async def test_voice_attachment_accepts_protocol_relative_qq_urls() -> None:
+    requests, delivered = await _deliver_voice(
+        {
+            "url": "//qq.example/voice.silk",
+            "voice_wav_url": "//qq.example/voice.wav",
+            "content_type": "voice",
+        }
+    )
+
+    assert [str(request.url) for request in requests] == [
+        "https://qq.example/voice.wav"
+    ]
+    assert delivered[0].audios[0].name == "voice.wav"
 
 
 async def test_audio_mime_attachment_lands_in_audios_not_files() -> None:

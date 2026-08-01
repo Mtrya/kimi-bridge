@@ -55,6 +55,7 @@ def _runner(
 ) -> FakeRunner:
     return FakeRunner(
         {
+            ("/fake/ffmpeg", "-version"): CommandResult(0, "ffmpeg version 8.1\n"),
             ("/fake/kimi", "--version"): CommandResult(0, version),
             ("/fake/kimi", "--help"): CommandResult(0, help_output),
             ("/fake/kimi", "doctor", "config"): config_result,
@@ -128,6 +129,7 @@ def _diagnose(
     runner: FakeRunner,
     *,
     kimi_path: str | None = "/fake/kimi",
+    ffmpeg_path: str | None = "/fake/ffmpeg",
     platform_name: str | None = None,
 ) -> DoctorReport:
     if platform_name is None:
@@ -136,7 +138,7 @@ def _diagnose(
         config_path=config_path,
         state_path=state_path,
         command_runner=runner,
-        which=lambda _name: kimi_path,
+        which=lambda name: ffmpeg_path if name == "ffmpeg" else kimi_path,
         platform_name=platform_name,
     )
 
@@ -170,7 +172,7 @@ def test_state_check_uses_configured_state_path(tmp_path: Path) -> None:
     report = diagnose(
         config_path=config_path,
         command_runner=_runner(),
-        which=lambda _name: "/fake/kimi",
+        which=lambda name: "/fake/ffmpeg" if name == "ffmpeg" else "/fake/kimi",
         platform_name="linux" if os.name == "posix" else "win32",
     )
 
@@ -192,6 +194,7 @@ def test_valid_feishu_config_and_supported_kimi_are_secret_safe(
     assert all(check.status is CheckStatus.OK for check in report.checks)
     assert all(secret not in rendered for secret in secrets)
     assert runner.calls == [
+        ("/fake/ffmpeg", "-version"),
         ("/fake/kimi", "--version"),
         ("/fake/kimi", "--help"),
         ("/fake/kimi", "doctor", "config"),
@@ -224,13 +227,33 @@ def test_valid_qq_config_is_secret_safe(
 ) -> None:
     config_path = tmp_path / "config.toml"
     secrets = _write_qq_config(config_path, tmp_path / "workspace")
+    runner = _runner()
 
-    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+    report = _diagnose(config_path, tmp_path / "state.json", runner)
     rendered = report.render()
 
     assert report.exit_code == 0
     assert _status(report, "adapter") is CheckStatus.OK
     assert all(secret not in rendered for secret in secrets)
+    assert ("/fake/ffmpeg", "-version") not in runner.calls
+
+
+def test_missing_ffmpeg_is_blocking_only_for_feishu(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_feishu_config(config_path, tmp_path / "workspace")
+    runner = _runner()
+
+    report = _diagnose(
+        config_path,
+        tmp_path / "state.json",
+        runner,
+        ffmpeg_path=None,
+    )
+
+    assert report.exit_code == 1
+    assert _status(report, "ffmpeg") is CheckStatus.ERROR
+    assert "required for Feishu inbound voice" in _detail(report, "ffmpeg")
+    assert ("/fake/ffmpeg", "-version") not in runner.calls
 
 
 def test_unknown_config_keys_warn_without_failing(tmp_path: Path) -> None:
@@ -371,7 +394,7 @@ def test_missing_kimi_is_blocking_without_running_commands(tmp_path: Path) -> No
     assert report.exit_code == 1
     assert _status(report, "kimi") is CheckStatus.ERROR
     assert _status(report, "kimi config") is CheckStatus.SKIPPED
-    assert runner.calls == []
+    assert runner.calls == [("/fake/ffmpeg", "-version")]
 
 
 def test_legacy_kimi_cli_is_actionable_and_does_not_run_its_doctor(

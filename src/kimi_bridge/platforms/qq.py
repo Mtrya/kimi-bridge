@@ -1173,6 +1173,9 @@ class QQAdapter:
                 closers.append(self._http.aclose())
             await asyncio.gather(*closers)
 
+    async def transcribe_audio(self, audio: InboundAudio) -> str:
+        return audio.transcript.strip() if audio.transcript else ""
+
     async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
         self._validate_conversation(conversation)
         await self._flush_conversation_streams(conversation)
@@ -1628,27 +1631,43 @@ class QQAdapter:
             url = item.get("url")
             if not isinstance(url, str) or not url:
                 continue
+            if url.startswith("//"):
+                url = f"https:{url}"
             content_type = item.get("content_type")
             media_type = (
                 content_type
                 if isinstance(content_type, str) and content_type
                 else "application/octet-stream"
             )
-            is_voice = media_type == "voice" or media_type.startswith("audio/")
+            is_qq_voice = media_type == "voice"
+            is_voice = is_qq_voice or media_type.startswith("audio/")
             download_url = url
+            uses_wav_url = False
             if is_voice:
                 # QQ pre-converts SILK voice to WAV, which suits ASR better
                 # than the original encoding.
                 wav_url = item.get("voice_wav_url")
                 if isinstance(wav_url, str) and wav_url:
+                    if wav_url.startswith("//"):
+                        wav_url = f"https:{wav_url}"
                     download_url = wav_url
                     media_type = "audio/wav"
+                    uses_wav_url = True
             parsed_url = urlsplit(download_url)
             if parsed_url.scheme != "https" or parsed_url.hostname is None:
                 LOGGER.warning("QQ attachment rejected for non-HTTPS URL")
                 continue
             name = item.get("filename")
-            name = name if isinstance(name, str) and name else "attachment"
+            name = (
+                name
+                if isinstance(name, str) and name
+                else ("voice.silk" if is_qq_voice else "attachment")
+            )
+            if uses_wav_url:
+                stem = name.rpartition(".")[0]
+                name = f"{stem or name}.wav"
+            elif is_qq_voice:
+                media_type = "audio/silk"
             try:
                 data = await self._download_attachment(download_url)
             except (httpx.HTTPError, QQAttachmentTooLarge) as exc:

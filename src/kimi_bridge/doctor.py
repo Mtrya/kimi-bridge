@@ -118,6 +118,8 @@ def diagnose(
             else config.state_path
         )
         checks.append(_check_selected_adapter(config))
+        if config.platform == "feishu":
+            _check_ffmpeg(runner, which, checks)
         checks.append(_check_directory_target("workspace", config.default_workspace))
         checks.append(_check_state(resolved_state))
 
@@ -247,6 +249,39 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
         f"{allowlist_size} allowlisted user(s)"
     )
     return DoctorCheck("adapter", CheckStatus.OK, detail)
+
+
+def _check_ffmpeg(
+    runner: CommandRunner,
+    which: Callable[[str], str | None],
+    checks: list[DoctorCheck],
+) -> None:
+    executable_path = which("ffmpeg")
+    if executable_path is None:
+        checks.append(
+            DoctorCheck(
+                "ffmpeg",
+                CheckStatus.ERROR,
+                "not found on PATH; required for Feishu inbound voice",
+            )
+        )
+        return
+    if _invoke(runner, (executable_path, "-version")) is None:
+        checks.append(
+            DoctorCheck(
+                "ffmpeg",
+                CheckStatus.ERROR,
+                "non-starting version probe failed or timed out; output was not shown",
+            )
+        )
+        return
+    checks.append(
+        DoctorCheck(
+            "ffmpeg",
+            CheckStatus.OK,
+            f"available for Feishu inbound voice ({executable_path})",
+        )
+    )
 
 
 def _check_directory_target(name: str, path: Path) -> DoctorCheck:

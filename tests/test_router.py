@@ -510,6 +510,7 @@ class FakeAdapter:
         self.outcomes: list[tuple[MessageRef, InteractionOutcome]] = []
         self.files: list[tuple[MessageRef, ConversationRef, OutboundFile]] = []
         self.file_error: Exception | None = None
+        self.transcribed_audio: list[InboundAudio] = []
 
     async def start(
         self, _message_handler: Any, _interaction_handler: Any
@@ -521,6 +522,10 @@ class FakeAdapter:
 
     async def stop(self) -> None:
         pass
+
+    async def transcribe_audio(self, audio: InboundAudio) -> str:
+        self.transcribed_audio.append(audio)
+        return audio.transcript.strip() if audio.transcript else ""
 
     async def send_text(
         self, conversation: ConversationRef, text: str
@@ -4719,6 +4724,7 @@ async def test_configured_asr_wins_over_platform_transcript(
         await router.close()
 
     assert transcriber.calls == [b"VOICE"]
+    assert adapter.transcribed_audio == []
     content = client.prompts[0][1]
     assert isinstance(content, PromptContent)
     assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} asr words"
@@ -4741,6 +4747,9 @@ async def test_platform_transcript_is_the_fallback_when_asr_is_empty(
     content = client.prompts[0][1]
     assert isinstance(content, PromptContent)
     assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+    assert adapter.transcribed_audio == [
+        InboundAudio(b"VOICE", "audio/wav", "voice.wav", "platform words")
+    ]
 
 
 async def test_platform_transcript_is_used_without_a_configured_asr(
@@ -4757,6 +4766,7 @@ async def test_platform_transcript_is_used_without_a_configured_asr(
     content = client.prompts[0][1]
     assert isinstance(content, PromptContent)
     assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+    assert len(adapter.transcribed_audio) == 1
 
 
 async def test_untranscribable_voice_appends_a_prompt_only_system_notice(
@@ -4779,6 +4789,7 @@ async def test_untranscribable_voice_appends_a_prompt_only_system_notice(
     assert content.text == f"listen\n\n{VOICE_UNTRANSCRIBED_NOTICE}"
     assert VOICE_TRANSCRIPT_PREFIX not in content.text
     assert adapter.sent == []
+    assert len(adapter.transcribed_audio) == 1
 
 
 async def test_voice_message_title_and_no_inbox_files(tmp_path: Path) -> None:

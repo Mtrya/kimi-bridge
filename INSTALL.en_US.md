@@ -8,7 +8,7 @@ kimi-bridge connects one local Kimi Code installation to one supported chat bot.
 
 | Platform | Status | Important limitation |
 | --- | --- | --- |
-| Feishu | Supported and live-validated | Requires a published custom app, long-connection events, permissions, and an allowlist |
+| Feishu | Supported and live-validated | Requires FFmpeg plus a published custom app, long-connection events, permissions, and an allowlist |
 | QQ | Supported and live-validated for C2C | Forced `auto` permission mode; no approval prompts, questions, or separate thinking stream |
 | Telegram | Experimental | Private chats only; startup replaces any webhook and drops pending updates |
 | Lark International | Unsupported | The current adapter uses Feishu API and WebSocket domains |
@@ -21,6 +21,7 @@ One kimi-bridge process runs one platform adapter. Use separate processes, confi
 - Python 3.11 or newer, supplied or selected by uv
 - authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
 - a dedicated bot application on the selected platform
+- [FFmpeg](https://ffmpeg.org/download.html) on `PATH` when Feishu is selected
 
 The older Python `kimi-cli` product is incompatible even though it also installs a `kimi` command. Official Kimi Code's help includes `web`, `doctor`, and `migrate`.
 
@@ -62,7 +63,7 @@ Populate one adapter using [the complete configuration reference](docs/CONFIGURA
 
 Platform setup requires more than credentials:
 
-- Feishu needs the bot capability, exact message/resource permissions, long-connection message and card events, a published app version, and the intended user's `open_id`.
+- Feishu needs FFmpeg on `PATH`, the bot capability, exact message/resource permissions including `speech_to_text:speech`, long-connection message and card events, a published app version, and the intended user's `open_id`. FFmpeg converts Feishu Opus voice resources to the 16 kHz mono PCM required by native speech recognition.
 - QQ needs AppID/AppSecret, access for the intended sandbox tester when applicable, and the intended user's app-specific `user_openid`.
 - Telegram needs a bot token, the intended user's numeric ID, and a dedicated bot whose existing webhook or update consumer may safely be replaced.
 
@@ -76,7 +77,7 @@ Run the non-starting diagnostic:
 kimi-bridge doctor
 ```
 
-Resolve every error before startup. `doctor` checks local configuration, paths, Kimi Code, and credential presence. It does not connect to the chat platform, validate bot permissions, receive an event, or send a message.
+Resolve every error before startup. `doctor` checks local configuration, paths, Kimi Code, credential presence, and FFmpeg when Feishu is selected. It does not connect to the chat platform, validate bot permissions, receive an event, or send a message.
 
 Start in the foreground:
 
@@ -89,7 +90,8 @@ From the allowlisted chat account:
 1. send `/status` and confirm a reply;
 2. send a normal prompt and confirm the streamed response completes;
 3. on Feishu or Telegram, exercise an approval or question;
-4. test any file types your installation depends on.
+4. on Feishu or QQ, send a voice message and confirm its transcript reaches the agent;
+5. test any file types your installation depends on.
 
 Do not consider setup complete until this live round trip passes.
 

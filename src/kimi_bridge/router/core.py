@@ -166,7 +166,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 msg.actor,
             )
             try:
-                content = await self._build_prompt_content(binding, msg)
+                content = await self._build_prompt_content(binding, msg, adapter)
                 result = await self._client.submit_prompt(
                     binding.session_id,
                     content,
@@ -188,7 +188,10 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         raise
 
     async def _build_prompt_content(
-        self, binding: ConversationBinding, msg: InboundMessage
+        self,
+        binding: ConversationBinding,
+        msg: InboundMessage,
+        adapter: PlatformAdapter,
     ) -> PromptContent:
         text_parts: list[str] = []
         if msg.text.strip():
@@ -201,8 +204,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
             transcript = ""
             if self._transcriber is not None:
                 transcript = await self._transcriber.transcribe(audio)
-            if not transcript and audio.transcript:
-                transcript = audio.transcript.strip()
+            if not transcript:
+                transcript = await adapter.transcribe_audio(audio)
             if transcript:
                 text_parts.append(f"{VOICE_TRANSCRIPT_PREFIX} {transcript}")
             else:

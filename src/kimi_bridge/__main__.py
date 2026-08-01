@@ -154,10 +154,17 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             raise AdapterConfigurationError(
                 "feishu.allowed_users must contain at least one user"
             )
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path is None:
+            raise AdapterConfigurationError(
+                "FFmpeg is required for Feishu inbound voice; install ffmpeg "
+                "and ensure it is on PATH"
+            )
         return FeishuAdapter(
             config.feishu.app_id,
             config.feishu.app_secret,
             config.feishu.allowed_users,
+            ffmpeg_executable=ffmpeg_path,
         )
 
     if config.platform == "qq":

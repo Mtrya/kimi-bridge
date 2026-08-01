@@ -117,7 +117,9 @@ Generic file messages always use the workspace inbox, even when the filename or 
 
 ## Voice messages
 
-Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` Whisper-compatible endpoint is tried first when present, and the platform-native transcript (QQ's `asr_refer_text`, or Feishu's `speech_to_text` file recognition) is the fallback. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音]` to mark it as machine-transcribed speech.
+Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` Whisper-compatible endpoint is tried first when present, and the selected adapter's native transcription method is called only when the external endpoint yields no transcript. QQ uses `asr_refer_text`; Feishu converts the downloaded Opus resource to 16 kHz mono signed 16-bit PCM with FFmpeg and calls `speech_to_text` file recognition. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音]` to mark it as machine-transcribed speech.
+
+Speech recognition is best-effort text, not an exact command channel: native services may normalize punctuation, casing, abbreviations, or unfamiliar tokens even when the audio conversion and request succeed.
 
 ```toml
 [voice.asr]
@@ -126,7 +128,7 @@ api_key = "sk-replace-me"  # optional for local servers
 model = "whisper-1"
 ```
 
-Feishu-native recognition requires the app's `speech_to_text` scope; without it the bridge logs a warning and relies on `[voice.asr]` (or reports the message as untranscribable). QQ voice attachments download the platform-provided WAV conversion (`voice_wav_url`) when available, otherwise the original encoding.
+Selecting Feishu requires a working `ffmpeg` executable on `PATH`; startup fails and `doctor` reports an error when it is missing. Feishu-native recognition also requires the exact tenant scope `speech_to_text:speech`. Without that scope the bridge logs a warning and relies on `[voice.asr]` when configured, or reports the message as untranscribable. See the [Feishu bootstrap](../INSTALL_AI.md#5-feishu-bootstrap) for prerequisite, permission, and live-validation steps. QQ voice attachments download the platform-provided WAV conversion (`voice_wav_url`) when available, otherwise the original encoding.
 
 ## Files and state
 
