@@ -60,6 +60,7 @@ from ..interactions import InteractionOutcome, InteractionPrompt
 from .base import (
     ActorRef,
     ConversationRef,
+    InboundAudio,
     InboundFile,
     InboundHandler,
     InboundImage,
@@ -1578,7 +1579,7 @@ class QQAdapter:
         conversation = ConversationRef(
             platform="qq", bot_id=self._app_id, conversation_id=openid
         )
-        images, videos, files = await self._collect_attachments(
+        images, videos, files, audios = await self._collect_attachments(
             data.get("attachments")
         )
 
@@ -1596,6 +1597,7 @@ class QQAdapter:
             images=images,
             videos=videos,
             files=files,
+            audios=audios,
         )
         assert self._on_message is not None
         await self._on_message(self, message)
@@ -1606,21 +1608,19 @@ class QQAdapter:
         tuple[InboundImage, ...],
         tuple[InboundVideo, ...],
         tuple[InboundFile, ...],
+        tuple[InboundAudio, ...],
     ]:
         if not isinstance(raw, list):
-            return (), (), ()
+            return (), (), (), ()
         images: list[InboundImage] = []
         videos: list[InboundVideo] = []
         files: list[InboundFile] = []
+        audios: list[InboundAudio] = []
         for item in raw:
             if not isinstance(item, dict):
                 continue
             url = item.get("url")
             if not isinstance(url, str) or not url:
-                continue
-            parsed_url = urlsplit(url)
-            if parsed_url.scheme != "https" or parsed_url.hostname is None:
-                LOGGER.warning("QQ attachment rejected for non-HTTPS URL")
                 continue
             content_type = item.get("content_type")
             media_type = (
@@ -1628,10 +1628,23 @@ class QQAdapter:
                 if isinstance(content_type, str) and content_type
                 else "application/octet-stream"
             )
+            is_voice = media_type == "voice" or media_type.startswith("audio/")
+            download_url = url
+            if is_voice:
+                # QQ pre-converts SILK voice to WAV, which suits ASR better
+                # than the original encoding.
+                wav_url = item.get("voice_wav_url")
+                if isinstance(wav_url, str) and wav_url:
+                    download_url = wav_url
+                    media_type = "audio/wav"
+            parsed_url = urlsplit(download_url)
+            if parsed_url.scheme != "https" or parsed_url.hostname is None:
+                LOGGER.warning("QQ attachment rejected for non-HTTPS URL")
+                continue
             name = item.get("filename")
             name = name if isinstance(name, str) and name else "attachment"
             try:
-                data = await self._download_attachment(url)
+                data = await self._download_attachment(download_url)
             except (httpx.HTTPError, QQAttachmentTooLarge) as exc:
                 reason = (
                     str(exc)
@@ -1644,7 +1657,21 @@ class QQAdapter:
                     reason,
                 )
                 continue
-            if media_type.startswith("image/"):
+            if is_voice:
+                asr_refer_text = item.get("asr_refer_text")
+                audios.append(
+                    InboundAudio(
+                        data=data,
+                        media_type=media_type,
+                        name=name,
+                        transcript=(
+                            asr_refer_text
+                            if isinstance(asr_refer_text, str) and asr_refer_text
+                            else None
+                        ),
+                    )
+                )
+            elif media_type.startswith("image/"):
                 images.append(
                     InboundImage(data=data, media_type=media_type, name=name)
                 )
@@ -1654,7 +1681,7 @@ class QQAdapter:
                 )
             else:
                 files.append(InboundFile(data=data, name=name, media_type=media_type))
-        return tuple(images), tuple(videos), tuple(files)
+        return tuple(images), tuple(videos), tuple(files), tuple(audios)
 
     async def _download_attachment(self, url: str) -> bytes:
         chunks: list[bytes] = []

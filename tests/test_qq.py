@@ -2135,3 +2135,104 @@ async def test_end_to_end_gateway_delivers_and_streams_with_budget_fallback() ->
     ]
     assert [frame["index"] for frame in api.stream_frames] == [0, 1] * 4
     assert len(api.active_sends) == 1
+
+
+# --- inbound voice attachments -----------------------------------------------
+
+
+async def _deliver_voice(
+    attachment: dict[str, Any],
+) -> tuple[list[httpx.Request], list[Any]]:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"VOICEDATA")
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    gateway = FakeQQGateway()
+    adapter = _make_qq_adapter(
+        FakeQQBotAPI(),
+        gateway,
+        http_client=http_client,
+    )
+    delivered: list[Any] = []
+
+    async def on_message(_sender: Any, message: Any) -> None:
+        delivered.append(message)
+
+    await adapter.start(on_message, _noop_on_interaction)
+    try:
+        await gateway.emit(
+            QQGatewayEvent(
+                type="C2C_MESSAGE_CREATE",
+                data=_c2c_payload(
+                    "MSGID-VOICE",
+                    "",
+                    attachments=[attachment],
+                ),
+                seq=1,
+                event_id="evt-voice",
+            )
+        )
+    finally:
+        await adapter.stop()
+    return requests, delivered
+
+
+async def test_voice_attachment_prefers_wav_url_and_platform_transcript() -> None:
+    requests, delivered = await _deliver_voice(
+        {
+            "url": "https://qq.example/voice.silk",
+            "voice_wav_url": "https://qq.example/voice.wav",
+            "content_type": "voice",
+            "filename": "voice.silk",
+            "asr_refer_text": "platform transcript",
+        }
+    )
+
+    assert [request.url.path for request in requests] == ["/voice.wav"]
+    assert len(delivered) == 1
+    message = delivered[0]
+    assert message.files == ()
+    assert message.images == ()
+    assert len(message.audios) == 1
+    audio = message.audios[0]
+    assert audio.data == b"VOICEDATA"
+    assert audio.media_type == "audio/wav"
+    assert audio.name == "voice.silk"
+    assert audio.transcript == "platform transcript"
+
+
+async def test_voice_attachment_without_wav_url_uses_raw_url_and_no_transcript() -> (
+    None
+):
+    requests, delivered = await _deliver_voice(
+        {
+            "url": "https://qq.example/voice.silk",
+            "content_type": "voice",
+        }
+    )
+
+    assert [request.url.path for request in requests] == ["/voice.silk"]
+    audio = delivered[0].audios[0]
+    assert audio.media_type == "voice"
+    assert audio.transcript is None
+
+
+async def test_audio_mime_attachment_lands_in_audios_not_files() -> None:
+    requests, delivered = await _deliver_voice(
+        {
+            "url": "https://qq.example/clip.mp3",
+            "content_type": "audio/mpeg",
+            "filename": "clip.mp3",
+        }
+    )
+
+    assert [request.url.path for request in requests] == ["/clip.mp3"]
+    message = delivered[0]
+    assert message.files == ()
+    assert len(message.audios) == 1
+    assert message.audios[0].media_type == "audio/mpeg"
+    assert message.audios[0].name == "clip.mp3"
+    assert message.audios[0].transcript is None

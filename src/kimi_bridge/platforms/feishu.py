@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
 import logging
@@ -19,6 +20,7 @@ from ..interactions import InteractionOutcome, InteractionPrompt
 from .base import (
     ActorRef,
     ConversationRef,
+    InboundAudio,
     InboundFile,
     InboundHandler,
     InboundImage,
@@ -118,6 +120,8 @@ class _FeishuTransport(Protocol):
         *,
         name: str | None = None,
     ) -> _DownloadedResource: ...
+
+    async def recognize_speech(self, data: bytes) -> str: ...
 
 
 class _WebSocketRunner(Protocol):
@@ -355,6 +359,42 @@ class _LarkTransport:
             name=filename,
             media_type=media_type,
         )
+
+    async def recognize_speech(self, data: bytes) -> str:
+        """Transcribe opus voice-message bytes via Feishu-native ASR.
+
+        Requires the tenant's ``speech_to_text`` scope; callers treat a
+        raised :class:`FeishuAPIError` as "no platform transcript".
+        """
+
+        from lark_oapi.api.speech_to_text.v1 import (
+            FileConfig,
+            FileRecognizeSpeechRequest,
+            FileRecognizeSpeechRequestBody,
+            Speech,
+        )
+
+        body = (
+            FileRecognizeSpeechRequestBody.builder()
+            .speech(
+                Speech.builder()
+                .speech(base64.b64encode(data).decode("ascii"))
+                .build()
+            )
+            .config(
+                FileConfig.builder()
+                .format("opus")
+                .engine_type("16k_auto")
+                .build()
+            )
+            .build()
+        )
+        request = FileRecognizeSpeechRequest.builder().request_body(body).build()
+        client = self._get_client()
+        response = await client.speech_to_text.v1.speech.afile_recognize(request)
+        _raise_for_response(response, "recognize speech")
+        text = getattr(getattr(response, "data", None), "recognition_text", None)
+        return text.strip() if isinstance(text, str) else ""
 
 
 class _LarkWebSocketRunner:
@@ -709,6 +749,7 @@ class FeishuAdapter:
         image_keys: list[str] = []
         video_specs: list[tuple[str, str | None]] = []
         file_specs: list[tuple[str, str | None]] = []
+        audio_keys: list[str] = []
         if message.message_type == "text":
             text_value = content.get("text")
             if not isinstance(text_value, str):
@@ -716,6 +757,8 @@ class FeishuAdapter:
             text = text_value
         elif message.message_type == "image":
             image_keys = [_required_string(content, "image_key")]
+        elif message.message_type == "audio":
+            audio_keys = [_required_string(content, "file_key")]
         elif message.message_type == "file":
             file_specs = [
                 (
@@ -764,6 +807,14 @@ class FeishuAdapter:
                 )
             )
         )
+        audios = tuple(
+            await asyncio.gather(
+                *(
+                    self._download_audio(message_id, file_key)
+                    for file_key in audio_keys
+                )
+            )
+        )
         if self._on_message is None:
             raise RuntimeError("Feishu adapter is not started")
         await self._on_message(
@@ -777,6 +828,7 @@ class FeishuAdapter:
                 images=images,
                 videos=videos,
                 files=files,
+                audios=audios,
             ),
         )
 
@@ -871,6 +923,32 @@ class FeishuAdapter:
             message_id, file_key, "file", name=filename
         )
         return InboundFile(resource.data, resource.name, resource.media_type)
+
+    async def _download_audio(self, message_id: str, file_key: str) -> InboundAudio:
+        assert self._transport is not None
+        resource = await self._transport.download_resource(
+            message_id, file_key, "file"
+        )
+        # Platform-native ASR is a best-effort capability: when the tenant
+        # lacks the speech_to_text scope the voice message still flows
+        # through with transcript=None for the router's configured ASR.
+        transcript: str | None = None
+        try:
+            recognized = await self._transport.recognize_speech(resource.data)
+        except Exception as exc:
+            LOGGER.warning(
+                "Feishu speech recognition failed (%s); "
+                "check the app's speech_to_text scope",
+                type(exc).__name__,
+            )
+        else:
+            transcript = recognized or None
+        return InboundAudio(
+            data=resource.data,
+            media_type=resource.media_type,
+            name=resource.name,
+            transcript=transcript,
+        )
 
     def _dispatch_sdk_event(self, data: Any) -> None:
         loop = self._main_loop

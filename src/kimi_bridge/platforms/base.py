@@ -54,6 +54,16 @@ class InboundFile:
 
 
 @dataclass(frozen=True, slots=True)
+class InboundAudio:
+    """One inbound voice message, with an optional platform-native transcript."""
+
+    data: bytes
+    media_type: str
+    name: str = "audio"
+    transcript: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class OutboundFile:
     """One platform-neutral file selected for outbound delivery."""
 
@@ -72,6 +82,7 @@ class InboundMessage:
     images: tuple[InboundImage, ...] = ()
     videos: tuple[InboundVideo, ...] = ()
     files: tuple[InboundFile, ...] = ()
+    audios: tuple[InboundAudio, ...] = ()
 
     @property
     def source(self) -> MessageRef:

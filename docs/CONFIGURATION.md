@@ -24,6 +24,9 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `qq.app_id` | string | empty | Required with `app_secret` when QQ is selected. |
 | `qq.app_secret` | string | empty | Required with `app_id` when QQ is selected. |
 | `qq.allowed_users` | array of strings | empty | At least one non-empty QQ C2C `user_openid` is required at runtime. |
+| `voice.asr.base_url` | string | table omitted | Required non-empty when `[voice.asr]` is present; base of a Whisper-compatible transcription endpoint. |
+| `voice.asr.model` | string | table omitted | Required non-empty when `[voice.asr]` is present. |
+| `voice.asr.api_key` | string | empty | Optional Bearer token; may stay empty for local servers that do not check one. |
 
 Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields. QQ forces every session into `auto` permission mode because it cannot present interactive prompts (see [Commands](COMMANDS.md)).
 
@@ -111,6 +114,19 @@ QQ has no interactive approvals, questions, or separate thinking stream: every s
 Feishu and QQ native image/video messages become model input when the bound session model advertises `image_in`/`video_in`: the bridge uploads the bytes through Kimi `/files` and submits a file-backed media prompt part. If the corresponding capability is absent, the media is saved under `<session workspace>/<inbox_subdir>/` and its path is included in prompt text.
 
 Generic file messages always use the workspace inbox, even when the filename or media type indicates image or video content. The platform adapter's native classification is authoritative; the router does not sniff or reclassify generic files. Upload failures are reported as `Prompt failed` and do not silently select the inbox fallback. See [Inbound media policy](ARCHITECTURE.md#inbound-media-policy) for the decision table.
+
+## Voice messages
+
+Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` Whisper-compatible endpoint is tried first when present, and the platform-native transcript (QQ's `asr_refer_text`, or Feishu's `speech_to_text` file recognition) is the fallback. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音]` to mark it as machine-transcribed speech.
+
+```toml
+[voice.asr]
+base_url = "https://api.openai.com/v1"
+api_key = "sk-replace-me"  # optional for local servers
+model = "whisper-1"
+```
+
+Feishu-native recognition requires the app's `speech_to_text` scope; without it the bridge logs a warning and relies on `[voice.asr]` (or reports the message as untranscribable). QQ voice attachments download the platform-provided WAV conversion (`voice_wav_url`) when available, otherwise the original encoding.
 
 ## Files and state
 

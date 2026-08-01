@@ -34,6 +34,7 @@ from .platforms.qq import (
 )
 from .platforms.telegram import TelegramAdapter
 from .router import ChatRouter
+from .speech import WhisperTranscriber
 from .state import StateStore
 
 
@@ -73,6 +74,13 @@ async def run(config_path: str | Path) -> None:
         async with KimiServerClient(supervisor=supervisor) as client:
             await client.check_server_version()
             model = await client.get_default_model()
+            transcriber = None
+            if config.voice.asr is not None:
+                transcriber = WhisperTranscriber(
+                    base_url=config.voice.asr.base_url,
+                    model=config.voice.asr.model,
+                    api_key=config.voice.asr.api_key,
+                )
             router = ChatRouter(
                 client,
                 state_store=StateStore(config.state_path),
@@ -83,6 +91,7 @@ async def run(config_path: str | Path) -> None:
                 interaction_timeout_seconds=(config.interaction_timeout_seconds),
                 inbox_subdir=config.inbox_subdir,
                 session_list_limit=config.session_list_limit,
+                transcriber=transcriber,
             )
             adapter_wait: asyncio.Task[None] | None = None
             signal_wait: asyncio.Task[bool] | None = None

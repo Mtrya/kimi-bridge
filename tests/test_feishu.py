@@ -65,6 +65,9 @@ class FakeTransport:
         self.uploaded_images: list[OutboundFile] = []
         self.uploaded_files: list[tuple[OutboundFile, str]] = []
         self.sent_media: list[tuple[str, str, str, dict[str, str]]] = []
+        self.recognized: list[bytes] = []
+        self.recognition_text = ""
+        self.recognition_error: Exception | None = None
 
     async def send_text(self, receive_id: str, receive_id_type: str, text: str) -> str:
         self.sent.append((receive_id, receive_id_type, text))
@@ -118,6 +121,12 @@ class FakeTransport:
         if name is None:
             return resource
         return _DownloadedResource(resource.data, name, resource.media_type)
+
+    async def recognize_speech(self, data: bytes) -> str:
+        self.recognized.append(data)
+        if self.recognition_error is not None:
+            raise self.recognition_error
+        return self.recognition_text
 
 
 class FakeWebSocketRunner:
@@ -1065,12 +1074,126 @@ async def test_other_message_type_gets_supported_types_notice() -> None:
         _discard_interaction,
     )
     try:
-        await adapter.handle_event(_event(message_id="om_audio", message_type="audio"))
+        await adapter.handle_event(
+            _event(message_id="om_sticker", message_type="sticker")
+        )
     finally:
         await adapter.stop()
 
     assert received == []
     assert transport.sent == [("oc_direct", "chat_id", UNSUPPORTED_MESSAGE)]
+
+
+async def test_audio_message_is_downloaded_and_natively_transcribed() -> None:
+    transport = FakeTransport()
+    transport.resources = {
+        "audio_one": _DownloadedResource(b"opus-bytes", "voice.opus", "audio/ogg"),
+    }
+    transport.recognition_text = "native transcript"
+    received: list[InboundMessage] = []
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+        ws_factory=FakeWebSocketRunner,
+    )
+    await adapter.start(
+        lambda _adapter, message: _append(received, message),
+        _discard_interaction,
+    )
+    try:
+        await adapter.handle_event(
+            _event(
+                message_id="om_audio",
+                message_type="audio",
+                content={"file_key": "audio_one"},
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert transport.downloads == [("om_audio", "audio_one", "file", None)]
+    assert transport.recognized == [b"opus-bytes"]
+    assert len(received) == 1
+    message = received[0]
+    assert message.files == ()
+    assert len(message.audios) == 1
+    audio = message.audios[0]
+    assert audio.data == b"opus-bytes"
+    assert audio.media_type == "audio/ogg"
+    assert audio.name == "voice.opus"
+    assert audio.transcript == "native transcript"
+
+
+async def test_audio_message_survives_native_asr_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeTransport()
+    transport.resources = {
+        "audio_one": _DownloadedResource(b"opus-bytes", "voice.opus", "audio/ogg"),
+    }
+    transport.recognition_error = FeishuAPIError(
+        "Feishu recognize speech failed: 99991672 scope missing"
+    )
+    received: list[InboundMessage] = []
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+        ws_factory=FakeWebSocketRunner,
+    )
+    await adapter.start(
+        lambda _adapter, message: _append(received, message),
+        _discard_interaction,
+    )
+    with caplog.at_level(logging.WARNING, logger="kimi_bridge.platforms.feishu"):
+        try:
+            await adapter.handle_event(
+                _event(
+                    message_id="om_audio",
+                    message_type="audio",
+                    content={"file_key": "audio_one"},
+                )
+            )
+        finally:
+            await adapter.stop()
+
+    assert len(received) == 1
+    audio = received[0].audios[0]
+    assert audio.data == b"opus-bytes"
+    assert audio.transcript is None
+    assert transport.sent == []
+    assert any(
+        record.name == "kimi_bridge.platforms.feishu"
+        and "speech recognition failed" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_sdk_transport_builds_file_recognize_request() -> None:
+    pytest.importorskip("lark_oapi")
+    requests: list[Any] = []
+
+    class SpeechAPI:
+        async def afile_recognize(self, request: Any) -> Any:
+            requests.append(request)
+            return SimpleNamespace(
+                success=lambda: True,
+                data=SimpleNamespace(recognition_text="recognized words"),
+            )
+
+    transport = _LarkTransport("cli_test", "secret")
+    transport._client = SimpleNamespace(
+        speech_to_text=SimpleNamespace(v1=SimpleNamespace(speech=SpeechAPI()))
+    )
+
+    assert await transport.recognize_speech(b"opus") == "recognized words"
+    body = requests[0].request_body
+    assert body.config.format == "opus"
+    assert body.config.engine_type == "16k_auto"
+    assert body.speech.speech == "b3B1cw=="
 
 
 async def _append(items: list[Any], item: Any) -> None:
