@@ -202,7 +202,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         # message. Audio never goes through the inbox-file path.
         for audio in msg.audios:
             transcript = ""
-            if self._transcriber is not None:
+            if self._transcriber is not None and audio.data:
                 transcript = await self._transcriber.transcribe(audio)
             if not transcript:
                 transcript = await adapter.transcribe_audio(audio)

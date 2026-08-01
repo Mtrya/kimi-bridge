@@ -4732,6 +4732,46 @@ async def test_configured_asr_wins_over_platform_transcript(
     assert content.media == ()
 
 
+async def test_audio_message_with_command_text_is_submitted_as_a_prompt(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber({b"VOICE": "asr words"})
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message(text="/status"))
+    finally:
+        await router.close()
+
+    assert len(client.prompts) == 1
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == "/status\n\n[语音转写] asr words"
+    assert adapter.sent == []
+
+
+async def test_platform_transcript_survives_missing_audio_bytes(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    transcriber = FakeTranscriber()
+    adapter = FakeAdapter()
+    router = _voice_router(client, tmp_path, transcriber=transcriber)
+    try:
+        await router.handle_inbound(adapter, _voice_message(data=b""))
+    finally:
+        await router.close()
+
+    assert transcriber.calls == []
+    assert adapter.transcribed_audio == [
+        InboundAudio(b"", "audio/wav", "voice.wav", "platform words")
+    ]
+    content = client.prompts[0][1]
+    assert isinstance(content, PromptContent)
+    assert content.text == f"{VOICE_TRANSCRIPT_PREFIX} platform words"
+
+
 async def test_platform_transcript_is_the_fallback_when_asr_is_empty(
     tmp_path: Path,
 ) -> None:

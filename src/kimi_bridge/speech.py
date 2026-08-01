@@ -62,7 +62,7 @@ class HttpSpeechTranscriber:
             raise ValueError("model must be non-empty")
         if request_format not in {"multipart", "json"}:
             raise ValueError("request_format must be multipart or json")
-        self._base_url = base_url.rstrip("/")
+        self._base_url = base_url.strip().rstrip("/")
         self._model = model
         self._api_key = api_key
         self._request_format = request_format

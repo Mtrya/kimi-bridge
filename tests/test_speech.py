@@ -18,10 +18,11 @@ def _transcriber(
     handler: httpx.MockTransport,
     *,
     api_key: str = "sk-test",
+    base_url: str = "https://asr.example/v1/",
 ) -> HttpSpeechTranscriber:
     client = httpx.AsyncClient(transport=handler)
     return HttpSpeechTranscriber(
-        base_url="https://asr.example/v1/",
+        base_url=base_url,
         model="whisper-1",
         api_key=api_key,
         client=client,
@@ -60,6 +61,22 @@ async def test_transcribe_omits_authorization_without_api_key() -> None:
 
     assert await transcriber.transcribe(_audio()) == "local"
     assert "Authorization" not in requests[0].headers
+
+
+async def test_transcribe_strips_surrounding_base_url_whitespace() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": "local"})
+
+    transcriber = _transcriber(
+        httpx.MockTransport(handler),
+        base_url="  https://asr.example/v1/  ",
+    )
+
+    assert await transcriber.transcribe(_audio()) == "local"
+    assert requests[0].url == "https://asr.example/v1/audio/transcriptions"
 
 
 async def test_transcribe_posts_json_base64_with_language() -> None:
@@ -114,6 +131,25 @@ async def test_json_audio_format_prefers_opus_filename() -> None:
     payload = json.loads(requests[0].content)
     assert payload["input_audio"]["format"] == "opus"
     assert "language" not in payload
+
+
+async def test_unsupported_json_audio_format_makes_no_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": "unexpected"})
+
+    transcriber = HttpSpeechTranscriber(
+        base_url="https://asr.example/v1",
+        model="asr-model",
+        request_format="json",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    audio = InboundAudio(b"SILK", "audio/silk", "voice.silk")
+
+    assert await transcriber.transcribe(audio) == ""
+    assert requests == []
 
 
 async def test_transcribe_empty_text_returns_empty() -> None:

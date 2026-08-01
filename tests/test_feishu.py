@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from kimi_bridge.platforms import feishu as feishu_module
@@ -1218,6 +1219,30 @@ async def test_sdk_transport_builds_file_recognize_request(
     assert body.speech.speech == "cGNt"
 
 
+async def test_sdk_transport_wraps_speech_request_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("lark_oapi")
+
+    class SpeechAPI:
+        async def afile_recognize(self, request: Any) -> Any:
+            raise httpx.ConnectError("Feishu speech endpoint unavailable")
+
+    async def fake_convert(_data: bytes, _executable: str) -> bytes:
+        return b"pcm"
+
+    transport = _LarkTransport(
+        "cli_test", "secret", ffmpeg_executable="/fake/ffmpeg"
+    )
+    transport._client = SimpleNamespace(
+        speech_to_text=SimpleNamespace(v1=SimpleNamespace(speech=SpeechAPI()))
+    )
+    monkeypatch.setattr(feishu_module, "_convert_opus_to_pcm", fake_convert)
+
+    with pytest.raises(FeishuAPIError, match="request failed"):
+        await transport.recognize_speech(b"opus")
+
+
 async def test_ffmpeg_converts_opus_to_16khz_mono_pcm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1261,6 +1286,41 @@ async def test_ffmpeg_converts_opus_to_16khz_mono_pcm(
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
     }
+
+
+async def test_ffmpeg_timeout_kills_and_reaps_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        returncode: int | None = None
+        killed = False
+        waited = False
+
+        async def communicate(self, _data: bytes) -> tuple[bytes, bytes]:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            self.waited = True
+            assert self.returncode is not None
+            return self.returncode
+
+    process = FakeProcess()
+
+    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(FeishuAPIError, match="timed out"):
+        await _convert_opus_to_pcm(b"opus", "/fake/ffmpeg", timeout=0.001)
+
+    assert process.killed is True
+    assert process.waited is True
 
 
 async def _append(items: list[Any], item: Any) -> None:

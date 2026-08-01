@@ -55,7 +55,11 @@ class InboundFile:
 
 @dataclass(frozen=True, slots=True)
 class InboundAudio:
-    """One inbound voice message, with an optional platform-native transcript."""
+    """One inbound voice message, with an optional platform-native transcript.
+
+    ``data`` may be empty only when a platform transcript survived an audio
+    download failure.
+    """
 
     data: bytes
     media_type: str

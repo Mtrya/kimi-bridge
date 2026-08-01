@@ -366,7 +366,7 @@ Run:
 kimi-bridge doctor
 ```
 
-`doctor` validates local configuration, permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
+`doctor` validates local configuration, configuration-file permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
 
 Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platform ready. Common branches:
 

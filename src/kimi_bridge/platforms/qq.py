@@ -1641,6 +1641,12 @@ class QQAdapter:
             )
             is_qq_voice = media_type == "voice"
             is_voice = is_qq_voice or media_type.startswith("audio/")
+            asr_refer_text = item.get("asr_refer_text")
+            platform_transcript = (
+                asr_refer_text
+                if isinstance(asr_refer_text, str) and asr_refer_text
+                else None
+            )
             download_url = url
             uses_wav_url = False
             if is_voice:
@@ -1681,19 +1687,23 @@ class QQAdapter:
                     name,
                     reason,
                 )
+                if is_voice and platform_transcript:
+                    audios.append(
+                        InboundAudio(
+                            data=b"",
+                            media_type=media_type,
+                            name=name,
+                            transcript=platform_transcript,
+                        )
+                    )
                 continue
             if is_voice:
-                asr_refer_text = item.get("asr_refer_text")
                 audios.append(
                     InboundAudio(
                         data=data,
                         media_type=media_type,
                         name=name,
-                        transcript=(
-                            asr_refer_text
-                            if isinstance(asr_refer_text, str) and asr_refer_text
-                            else None
-                        ),
+                        transcript=platform_transcript,
                     )
                 )
             elif media_type.startswith("image/"):

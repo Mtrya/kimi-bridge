@@ -2151,12 +2151,14 @@ async def test_end_to_end_gateway_delivers_and_streams_with_budget_fallback() ->
 
 async def _deliver_voice(
     attachment: dict[str, Any],
+    *,
+    download_status: int = 200,
 ) -> tuple[list[httpx.Request], list[Any]]:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, content=b"VOICEDATA")
+        return httpx.Response(download_status, content=b"VOICEDATA")
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     gateway = FakeQQGateway()
@@ -2228,6 +2230,29 @@ async def test_voice_attachment_without_wav_url_uses_raw_url_and_no_transcript()
     assert audio.media_type == "audio/silk"
     assert audio.name == "voice.silk"
     assert audio.transcript is None
+
+
+async def test_voice_attachment_preserves_platform_transcript_when_download_fails() -> (
+    None
+):
+    requests, delivered = await _deliver_voice(
+        {
+            "url": "https://qq.example/voice.silk",
+            "voice_wav_url": "https://qq.example/voice.wav",
+            "content_type": "voice",
+            "filename": "voice.silk",
+            "asr_refer_text": "platform transcript",
+        },
+        download_status=403,
+    )
+
+    assert [request.url.path for request in requests] == ["/voice.wav"]
+    assert len(delivered) == 1
+    audio = delivered[0].audios[0]
+    assert audio.data == b""
+    assert audio.media_type == "audio/wav"
+    assert audio.name == "voice.wav"
+    assert audio.transcript == "platform transcript"
 
 
 async def test_voice_attachment_accepts_protocol_relative_qq_urls() -> None:

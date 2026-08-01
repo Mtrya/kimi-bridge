@@ -47,6 +47,7 @@ UNSUPPORTED_MESSAGE = (
 )
 FEISHU_TEXT_LIMIT = 7000
 FEISHU_MESSAGE_EDIT_LIMIT = 20
+FEISHU_FFMPEG_TIMEOUT_SECONDS = 30.0
 FEISHU_IMAGE_MEDIA_TYPES = frozenset(
     {
         "image/bmp",
@@ -403,13 +404,21 @@ class _LarkTransport:
         )
         request = FileRecognizeSpeechRequest.builder().request_body(body).build()
         client = self._get_client()
-        response = await client.speech_to_text.v1.speech.afile_recognize(request)
+        try:
+            response = await client.speech_to_text.v1.speech.afile_recognize(request)
+        except Exception as exc:
+            raise FeishuAPIError("Feishu speech recognition request failed") from exc
         _raise_for_response(response, "recognize speech")
         text = getattr(getattr(response, "data", None), "recognition_text", None)
         return text.strip() if isinstance(text, str) else ""
 
 
-async def _convert_opus_to_pcm(data: bytes, executable: str) -> bytes:
+async def _convert_opus_to_pcm(
+    data: bytes,
+    executable: str,
+    *,
+    timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
+) -> bytes:
     try:
         process = await asyncio.create_subprocess_exec(
             executable,
@@ -432,7 +441,20 @@ async def _convert_opus_to_pcm(data: bytes, executable: str) -> bytes:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        pcm, _stderr = await process.communicate(data)
+        try:
+            pcm, _stderr = await asyncio.wait_for(
+                process.communicate(data), timeout=timeout
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise FeishuAPIError(
+                "FFmpeg Opus-to-PCM conversion timed out"
+            ) from exc
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            raise
     except OSError as exc:
         raise FeishuAPIError(
             "Could not run FFmpeg for Opus-to-PCM conversion"
