@@ -97,9 +97,11 @@ STREAM_INPUT_STATE_GENERATING = 1
 STREAM_INPUT_STATE_DONE = 10
 
 # `file_type` on `POST /v2/users/{openid}/files`.
-# Voice (3) and arbitrary files (4, closed in C2C) are not supported.
+# Voice (3) is not supported. Arbitrary files (4) were once closed in C2C but
+# are now open: any format, 200 MB hard limit, delivered as a file card.
 QQ_FILE_TYPE_IMAGE = 1
 QQ_FILE_TYPE_VIDEO = 2
+QQ_FILE_TYPE_FILE = 4
 _QQ_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
 _QQ_VIDEO_MEDIA_TYPE = "video/mp4"
 
@@ -485,6 +487,7 @@ class QQBotAPI:
         file_type: int,
         url: str | None = None,
         file_data: str | None = None,
+        file_name: str | None = None,
         srv_send_msg: bool = False,
     ) -> dict[str, Any]:
         _require_openid(openid)
@@ -498,6 +501,8 @@ class QQBotAPI:
             body["url"] = url
         if file_data is not None:
             body["file_data"] = file_data
+        if file_name is not None:
+            body["file_name"] = file_name
         data = await self._request(
             "POST", f"/v2/users/{openid}/files", json_body=body
         )
@@ -1263,13 +1268,14 @@ class QQAdapter:
         elif file.media_type == _QQ_VIDEO_MEDIA_TYPE:
             file_type = QQ_FILE_TYPE_VIDEO
         else:
-            raise ValueError("QQ only delivers png/jpg images and mp4 video")
+            file_type = QQ_FILE_TYPE_FILE
 
         openid = conversation.conversation_id
         upload = await self._api.upload_c2c_media(
             openid,
             file_type=file_type,
             file_data=base64.b64encode(file.data).decode("ascii"),
+            file_name=file.name,
             srv_send_msg=False,
         )
         file_info = upload.get("file_info")

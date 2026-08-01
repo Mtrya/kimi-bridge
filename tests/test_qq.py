@@ -785,6 +785,7 @@ class FakeQQBotAPI:
         file_type: int,
         url: str | None = None,
         file_data: str | None = None,
+        file_name: str | None = None,
         srv_send_msg: bool = False,
     ) -> dict[str, Any]:
         self.uploads.append(
@@ -793,6 +794,7 @@ class FakeQQBotAPI:
                 "file_type": file_type,
                 "url": url,
                 "file_data": file_data,
+                "file_name": file_name,
                 "srv_send_msg": srv_send_msg,
             }
         )
@@ -2065,20 +2067,27 @@ async def test_send_file_uploads_video_via_file_type_two() -> None:
     assert api.active_sends[0]["msg_id"] is None
 
 
-async def test_send_file_rejects_unsupported_media_type() -> None:
+async def test_send_file_uploads_generic_file_via_file_type_four() -> None:
     from kimi_bridge.platforms.base import OutboundFile
 
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
 
-    with pytest.raises(ValueError, match="png/jpg images and mp4 video"):
-        await adapter.send_file(
-            conversation,
-            OutboundFile(name="a.txt", data=b"x", media_type="text/plain"),
-        )
+    ref = await adapter.send_file(
+        conversation,
+        OutboundFile(name="notes.txt", data=b"TEXT", media_type="text/plain"),
+    )
 
-    assert not api.uploads
+    assert len(api.uploads) == 1
+    assert api.uploads[0]["file_type"] == 4
+    assert api.uploads[0]["file_name"] == "notes.txt"
+    assert len(api.active_sends) == 1
+    send = api.active_sends[0]
+    assert send["msg_type"] == 7
+    assert send["media"] == {"file_info": "OPAQUE-FILE-INFO"}
+    assert ref == MessageRef(conversation, "active-1")
 
 
 # --- end-to-end: real WS gateway -> real QQAdapter ------------------------
