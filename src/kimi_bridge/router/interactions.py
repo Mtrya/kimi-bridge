@@ -152,17 +152,24 @@ class _InteractionMixin:
         """Finish every bridge-owned interaction invalidated by a server restart."""
 
         async with self._interaction_lock:
-            for pending in tuple(self._pending.values()):
+            self._interaction_polling_suspended = True
+            pending_interactions = tuple(self._pending.values())
+            for pending in pending_interactions:
                 await self._clear_pending(pending)
-                try:
-                    await pending.adapter.finish_interaction(
-                        pending.message,
-                        InteractionOutcome(state="cancelled", detail=detail),
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        "failed to finish interaction during server restart"
-                    )
+        for pending in pending_interactions:
+            try:
+                await pending.adapter.finish_interaction(
+                    pending.message,
+                    InteractionOutcome(state="cancelled", detail=detail),
+                )
+            except Exception:
+                LOGGER.exception(
+                    "failed to finish interaction during server restart"
+                )
+
+    async def _resume_interaction_polling(self) -> None:
+        async with self._interaction_lock:
+            self._interaction_polling_suspended = False
 
     def _interaction_poll_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
@@ -185,6 +192,8 @@ class _InteractionMixin:
     async def _discover_interaction(self, active: _ActiveStream) -> None:
         async with self._interaction_lock:
             if self._active is not active:
+                return
+            if self._interaction_polling_suspended:
                 return
             if active.conversation_key in self._pending:
                 return

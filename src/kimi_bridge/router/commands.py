@@ -298,20 +298,26 @@ class _CommandMixin:
             await self._send_chunked(
                 adapter, conversation, "Restarting Kimi Code server…"
             )
-            await self._cancel_all_pending_interactions(
-                "Cancelled because the Kimi Code server restarted."
+            self._fail_all_compaction_waiters(
+                KimiServerError("Kimi Code server restarted")
             )
-            await self._client.restart_server()
-            self._model = await self._client.get_default_model()
-            self._verified_session_profiles.clear()
-            binding = self._state.bindings.get(conversation_key)
-            if binding is not None:
-                await self._verify_session_profile(
-                    binding.session_id,
-                    binding.permission_mode,
-                    replace_existing=False,
+            try:
+                await self._cancel_all_pending_interactions(
+                    "Cancelled because the Kimi Code server restarted."
                 )
-            version = await self._client.get_server_version()
+                await self._client.restart_server()
+                version = await self._client.check_server_version()
+                self._model = await self._client.get_default_model()
+                self._verified_session_profiles.clear()
+                binding = self._state.bindings.get(conversation_key)
+                if binding is not None:
+                    await self._verify_session_profile(
+                        binding.session_id,
+                        binding.permission_mode,
+                        replace_existing=False,
+                    )
+            finally:
+                await self._resume_interaction_polling()
             await self._send_chunked(
                 adapter,
                 conversation,

@@ -178,8 +178,9 @@ class KimiServerClient:
 
         if self._supervisor is None:
             raise KimiServerError("server restart requires a managed kimi server")
+        connection = await self._supervisor.restart()
         self._usage_totals.clear()
-        return await self._supervisor.restart()
+        return connection
 
     async def check_server_version(
         self, *, executable_version: str | None = None

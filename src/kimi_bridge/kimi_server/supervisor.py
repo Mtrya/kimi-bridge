@@ -134,6 +134,7 @@ class KimiServerSupervisor:
         self._generation = 0
         self._executable_identity: KimiExecutableIdentity | None = None
         self._restart_requested = False
+        self._restart_wakeup = asyncio.Event()
         self._restart_task: asyncio.Task[ServerConnection] | None = None
 
     @property
@@ -175,6 +176,7 @@ class KimiServerSupervisor:
         self._port = self._preferred_port or self._port_picker()
         self._stopping.clear()
         self._restart_requested = False
+        self._restart_wakeup.clear()
         self._failure = None
         self._task = asyncio.create_task(
             self._supervise(), name="kimi-server-supervisor"
@@ -228,20 +230,29 @@ class KimiServerSupervisor:
         return await asyncio.shield(restart_task)
 
     async def _restart_once(self) -> ServerConnection:
-        connection = await self.wait_until_ready()
+        generation = self._generation
+        connection = self._connection
         process = self._process
-        if process is None or process.returncode is not None:
-            return await self.wait_until_ready(
-                after_generation=connection.generation
+        await self._check_executable_identity()
+        if self._generation > generation:
+            return await self.wait_until_ready(after_generation=generation)
+        if (
+            connection is not None
+            and self._connection is connection
+            and self._process is process
+            and process is not None
+            and process.returncode is None
+        ):
+            self._restart_requested = True
+            LOGGER.info("restarting kimi server after generation %s", generation)
+            await self._terminate_process(process)
+        else:
+            LOGGER.info(
+                "requesting immediate kimi server recovery after generation %s",
+                generation,
             )
-
-        self._restart_requested = True
-        LOGGER.info(
-            "restarting kimi server after generation %s",
-            connection.generation,
-        )
-        await self._terminate_process(process)
-        return await self.wait_until_ready(after_generation=connection.generation)
+            self._restart_wakeup.set()
+        return await self.wait_until_ready(after_generation=generation)
 
     def _clear_restart_task(
         self, task: asyncio.Task[ServerConnection]
@@ -375,8 +386,13 @@ class KimiServerSupervisor:
                     returncode,
                     delay,
                 )
-                await self._sleep(delay)
-                delay = min(delay * 2, self._max_backoff)
+                if await self._wait_for_backoff(delay):
+                    delay = self._initial_backoff
+                    LOGGER.info(
+                        "kimi server crash backoff interrupted by restart request"
+                    )
+                else:
+                    delay = min(delay * 2, self._max_backoff)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
@@ -425,6 +441,7 @@ class KimiServerSupervisor:
                 )
 
             self._generation += 1
+            self._restart_wakeup.clear()
             await self._publish_connection(
                 ServerConnection(
                     base_url=f"http://127.0.0.1:{port}",
@@ -449,6 +466,31 @@ class KimiServerSupervisor:
         finally:
             if self._process is process:
                 self._process = None
+
+    async def _wait_for_backoff(self, delay: float) -> bool:
+        """Wait for crash backoff unless an explicit restart requests recovery."""
+
+        if self._restart_wakeup.is_set():
+            self._restart_wakeup.clear()
+            return True
+        sleep_task = asyncio.create_task(self._sleep(delay))
+        restart_task = asyncio.create_task(self._restart_wakeup.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {sleep_task, restart_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if sleep_task in done:
+                await sleep_task
+            interrupted = restart_task in done
+            if interrupted:
+                self._restart_wakeup.clear()
+            return interrupted
+        finally:
+            for task in (sleep_task, restart_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(sleep_task, restart_task, return_exceptions=True)
 
     async def _read_startup_credentials(self, process: Any) -> tuple[int, str]:
         if process.stdout is None:

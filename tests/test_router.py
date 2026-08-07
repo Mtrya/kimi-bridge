@@ -68,6 +68,7 @@ from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 class FakeKimiClient:
     def __init__(self) -> None:
         self.server_version = "0.28.1"
+        self.server_version_checks = 0
         self.default_model = "kimi-code/k3"
         self.restarts = 0
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
@@ -188,6 +189,10 @@ class FakeKimiClient:
         return True
 
     async def get_server_version(self) -> str:
+        return self.server_version
+
+    async def check_server_version(self) -> str:
+        self.server_version_checks += 1
         return self.server_version
 
     async def get_default_model(self) -> str:
@@ -1093,6 +1098,7 @@ async def test_restart_server_runs_while_busy_and_refreshes_runtime_defaults(
         await router.close()
 
     assert client.restarts == 1
+    assert client.server_version_checks == 1
     assert client.profile_updates == [
         ("session-control", {"permission_mode": "auto"})
     ]
@@ -2681,6 +2687,102 @@ async def test_restart_server_cancels_pending_interaction_and_makes_callback_sta
         "cancelled",
         "stale",
     ]
+
+
+async def test_restart_server_suspends_interaction_polling_without_holding_lock(
+    tmp_path: Path,
+) -> None:
+    class BlockingFinishAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finish_started = asyncio.Event()
+            self.finish_release = asyncio.Event()
+
+        async def finish_interaction(
+            self, message: MessageRef, outcome: InteractionOutcome
+        ) -> None:
+            self.finish_started.set()
+            await self.finish_release.wait()
+            await super().finish_interaction(message, outcome)
+
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = BlockingFinishAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        restart = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/restart-server"))
+        )
+        await adapter.finish_started.wait()
+
+        await asyncio.wait_for(router._interaction_lock.acquire(), timeout=0.1)
+        router._interaction_lock.release()
+        assert router._active is not None
+        await router._discover_interaction(router._active)
+        assert len(adapter.interactions) == 1
+
+        client.approvals.clear()
+        adapter.finish_release.set()
+        await restart
+    finally:
+        adapter.finish_release.set()
+        await router.close()
+
+    assert [outcome.state for _message, outcome in adapter.outcomes] == [
+        "cancelled"
+    ]
+
+
+async def test_restart_server_fails_outstanding_compaction_waiters(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.server_version = "0.34.0"
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        compact = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: client.compact_calls == ["session-control"])
+
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "/restart-server",
+                user_id="ou_restart",
+                conversation_id="oc_restart",
+            ),
+        )
+        await asyncio.wait_for(compact, timeout=0.1)
+    finally:
+        await router.close()
+
+    assert client.restarts == 1
+    assert len(adapter.edits) == 1
+    assert adapter.edits[0][0] == adapter.sent[0][0]
+    assert "server restarted" in adapter.edits[0][1].lower()
 
 
 async def test_stop_cancels_pending_question_without_dismissing_it(
