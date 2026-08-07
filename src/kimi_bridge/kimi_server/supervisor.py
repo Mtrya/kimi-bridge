@@ -25,6 +25,7 @@ from ..compatibility import (
 from .contract import KIMI_REQUIRED_WEB_FLAGS
 from .types import (
     KimiServerAuthenticationError,
+    KimiServerError,
     KimiServerStartupError,
     ServerConnection,
 )
@@ -218,7 +219,7 @@ class KimiServerSupervisor:
         """Gracefully replace the managed child and return its new connection."""
 
         if self._task is None or self._task.done() or self._stopping.is_set():
-            raise RuntimeError("kimi server supervisor is not running")
+            raise KimiServerError("kimi server supervisor is not running")
 
         restart_task = self._restart_task
         if restart_task is None:

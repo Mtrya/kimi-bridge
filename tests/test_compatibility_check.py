@@ -907,12 +907,19 @@ class FakeGitHub:
             return self._json({"content": {"sha": "next-sha"}})
         if path.endswith("/pulls"):
             if method == "GET":
-                return self._json(self.pulls)
+                return self._json(
+                    [
+                        pull
+                        for pull in self.pulls
+                        if pull.get("state", "open") == "open"
+                    ]
+                )
             pull = {
                 "number": 1,
                 "node_id": "pull-node",
                 "title": payload["title"],
                 "body": payload["body"],
+                "state": "open",
             }
             self.pulls.append(pull)
             return self._json(pull, status=201)
@@ -1086,15 +1093,30 @@ def test_recovered_unknown_version_does_not_prepare_automatic_release(
         failing={"linux": _failing_check()},
     )
     recovered = _reports_for_all_platforms(unlisted_kimi_code_version)
+    fake.pulls.append(
+        {
+            "number": 1,
+            "node_id": "pull-node",
+            "title": "Stale compatibility promotion",
+            "body": (
+                f"{checker.PROMOTION_MARKER}\n"
+                f"<!-- version:{unlisted_kimi_code_version} "
+                "report-digest:stale -->"
+            ),
+            "state": "open",
+        }
+    )
 
     assert synchronize_reports(broken, automation) == ("created-drift-issue",)
+    assert fake.pulls[0]["state"] == "closed"
+    fake.pulls[0]["state"] = "open"
     assert synchronize_reports(recovered, automation) == (
         "closed-recovered-drift-issue",
     )
     assert fake.issues[0]["state"] == "closed"
-    assert fake.pulls == []
+    assert fake.pulls[0]["state"] == "closed"
     assert synchronize_reports(recovered, automation) == ()
-    assert fake.pulls == []
+    assert len(fake.pulls) == 1
 
 
 def test_sync_dry_run_predicts_the_decision_without_github(

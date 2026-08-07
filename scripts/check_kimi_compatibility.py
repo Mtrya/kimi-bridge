@@ -881,6 +881,7 @@ class GitHubApiAutomation:
         body = str(issue.get("body", ""))
         if f"<!-- version:{summary.version} " not in body:
             return None
+        self._invalidate_promotion(summary)
         if issue.get("state") != "open":
             return "recorded"
         number = int(issue["number"])
@@ -997,6 +998,7 @@ class GitHubApiAutomation:
         return action
 
     def record_drift(self, summary: CompatibilitySummary) -> str:
+        self._invalidate_promotion(summary)
         issue = self._find_drift_issue()
         state_marker = (
             f"<!-- version:{summary.version} "
@@ -1084,6 +1086,22 @@ class GitHubApiAutomation:
             },
         )
         return pulls[0] if isinstance(pulls, list) and pulls else None
+
+    def _invalidate_promotion(self, summary: CompatibilitySummary) -> None:
+        pull = self._find_promotion_pull()
+        if pull is None:
+            return
+        body = str(pull.get("body", ""))
+        if (
+            PROMOTION_MARKER not in body
+            or f"<!-- version:{summary.version} " not in body
+        ):
+            return
+        self._request(
+            "PATCH",
+            f"/repos/{self.repository}/pulls/{pull['number']}",
+            json={"state": "closed"},
+        )
 
     def _find_drift_issue(self) -> dict[str, Any] | None:
         issues = self._request(

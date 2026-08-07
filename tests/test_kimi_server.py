@@ -477,6 +477,13 @@ async def test_client_restart_requires_and_delegates_to_managed_supervisor() -> 
     with pytest.raises(KimiServerError, match="requires a managed"):
         await fixed.restart_server()
 
+    unavailable = KimiServerClient(
+        supervisor=KimiServerSupervisor(),
+        http_client=FakeHttpClient([]),
+    )
+    with pytest.raises(KimiServerError, match="supervisor is not running"):
+        await unavailable.restart_server()
+
     connection = ServerConnection(
         base_url="http://127.0.0.1:43123",
         port=43123,
