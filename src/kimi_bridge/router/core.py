@@ -92,6 +92,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._pending: dict[str, _PendingInteraction] = {}
         self._compaction_waiters: dict[str, _CompactionWaiter] = {}
         self._interaction_lock = asyncio.Lock()
+        self._interaction_polling_suspended = False
 
     async def close(self) -> None:
         self._fail_all_compaction_waiters(KimiServerError("kimi event stream stopped"))

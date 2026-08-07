@@ -907,12 +907,19 @@ class FakeGitHub:
             return self._json({"content": {"sha": "next-sha"}})
         if path.endswith("/pulls"):
             if method == "GET":
-                return self._json(self.pulls)
+                return self._json(
+                    [
+                        pull
+                        for pull in self.pulls
+                        if pull.get("state", "open") == "open"
+                    ]
+                )
             pull = {
                 "number": 1,
                 "node_id": "pull-node",
                 "title": payload["title"],
                 "body": payload["body"],
+                "state": "open",
             }
             self.pulls.append(pull)
             return self._json(pull, status=201)
@@ -1001,7 +1008,8 @@ def test_github_promotion_drift_dedup_and_recovery(
     automation = GitHubApiAutomation(
         "Mtrya/kimi-bridge", "token", client=client
     )
-    supported = _reports_for_all_platforms("0.28.1")
+    current_supported = next(iter(SUPPORTED_KIMI_CODE_VERSIONS))
+    supported = _reports_for_all_platforms(current_supported)
     assert synchronize_reports(supported, automation) == ()
     assert not fake.pulls and not fake.issues
 
@@ -1041,7 +1049,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert fake.content_updates == 3
 
     broken = _reports_for_all_platforms(
-        "0.30.0", failing={"windows": _failing_check()}
+        unlisted_kimi_code_version, failing={"windows": _failing_check()}
     )
     assert synchronize_reports(broken, automation) == ("created-drift-issue",)
     assert synchronize_reports(broken, automation) == ("unchanged-drift-issue",)
@@ -1049,7 +1057,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert "**windows**" in fake.issues[0]["body"]
 
     changed = _reports_for_all_platforms(
-        "0.30.0",
+        unlisted_kimi_code_version,
         failing={
             "macos": _failing_check(detail="a different required failure")
         },
@@ -1058,7 +1066,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.issues) == 1
     assert "**macos**" in fake.issues[0]["body"]
 
-    recovered = _reports_for_all_platforms("0.28.1")
+    recovered = _reports_for_all_platforms(unlisted_kimi_code_version)
     assert synchronize_reports(recovered, automation) == (
         "closed-recovered-drift-issue",
     )
@@ -1066,6 +1074,49 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.comments) == 1
     assert synchronize_reports(recovered, automation) == ()
     assert len(fake.comments) == 1
+    assert fake.pulls == []
+
+
+def test_recovered_unknown_version_does_not_prepare_automatic_release(
+    unlisted_kimi_code_version: str,
+) -> None:
+    fake = FakeGitHub()
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = GitHubApiAutomation(
+        "Mtrya/kimi-bridge", "token", client=client
+    )
+    broken = _reports_for_all_platforms(
+        unlisted_kimi_code_version,
+        failing={"linux": _failing_check()},
+    )
+    recovered = _reports_for_all_platforms(unlisted_kimi_code_version)
+    fake.pulls.append(
+        {
+            "number": 1,
+            "node_id": "pull-node",
+            "title": "Stale compatibility promotion",
+            "body": (
+                f"{checker.PROMOTION_MARKER}\n"
+                f"<!-- version:{unlisted_kimi_code_version} "
+                "report-digest:stale -->"
+            ),
+            "state": "open",
+        }
+    )
+
+    assert synchronize_reports(broken, automation) == ("created-drift-issue",)
+    assert fake.pulls[0]["state"] == "closed"
+    fake.pulls[0]["state"] = "open"
+    assert synchronize_reports(recovered, automation) == (
+        "closed-recovered-drift-issue",
+    )
+    assert fake.issues[0]["state"] == "closed"
+    assert fake.pulls[0]["state"] == "closed"
+    assert synchronize_reports(recovered, automation) == ()
+    assert len(fake.pulls) == 1
 
 
 def test_sync_dry_run_predicts_the_decision_without_github(

@@ -66,7 +66,7 @@ Voice messages are text, not media or files: adapters decode them into semantic 
 
 Bridge state is stored atomically at `~/.kimi-bridge/state.json` (relocatable with the `state_path` config key). Its versioned schema contains conversation bindings, workspace, permission mode, and thinking-rendering preference. Known older schemas migrate without losing bindings; an unknown future version fails loudly. Kimi remains authoritative for sessions, profiles, model/effort/plan settings, usage, tasks, and goals.
 
-The config file is `~/.kimi-bridge/config.toml` by default; `--config` or the `KIMI_BRIDGE_CONFIG` environment variable selects another file. Generic inbound files and native media unsupported by the selected model live under a configured subdirectory of the bound workspace. Startup creates the default workspace, starts the supervised local server, then starts one adapter. Shutdown stops the adapter, stream tasks, client, and child process. A crashed Kimi child can be restarted by the supervisor; session subscriptions are re-established through the client boundary.
+The config file is `~/.kimi-bridge/config.toml` by default; `--config` or the `KIMI_BRIDGE_CONFIG` environment variable selects another file. Generic inbound files and native media unsupported by the selected model live under a configured subdirectory of the bound workspace. Startup creates the default workspace, starts the supervised local server, then starts one adapter. Shutdown stops the adapter, stream tasks, client, and child process. The supervisor restarts a crashed Kimi child with bounded backoff and handles `/restart-server` as an intentional immediate recycle; session subscriptions are re-established through the client boundary while the bridge and selected adapter stay online.
 
 ## Security model
 
@@ -84,8 +84,9 @@ The packaged `compatibility-map.json` records the Kimi Code versions that passed
 - a listed official version is supported;
 - an unlisted official version receives a loud warning and a live contract attempt;
 - legacy Python `kimi-cli`, an unrecognized product, or an executable/server version mismatch fails;
-- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows and exercises the CLI/server contract without model inference; when every platform passes with the same unlisted version, automation prepares one PR that bumps the bridge patch version and appends a compatibility-map release entry containing the promoted Kimi Code version, then required checks gate auto-merge;
-- a marked compatibility promotion PR creates its GitHub Release after merge and directly invokes the reusable release workflow; hourly reconciliation covers GitHub token event suppression, while the protected PyPI environment retains its separate approval boundary;
+- the daily credential-free canary installs the latest official Kimi Code in an empty home on Linux, macOS, and Windows and exercises the CLI/server contract without model inference; when every platform passes with the same unlisted version and no drift was recorded for it, automation prepares one PR that bumps the bridge patch version and appends a compatibility-map release entry containing the promoted Kimi Code version, then required checks gate auto-merge;
+- a version that recovers after recorded incompatibility requires a manual release record because its bridge fix may no longer support versions inherited from the preceding record; the monitor closes the recovered drift issue without preparing a promotion PR;
+- a marked compatibility promotion PR creates its GitHub Release after merge and directly invokes the reusable release workflow; hourly reconciliation covers GitHub token event suppression, manually prepared records are ignored, and the protected PyPI environment retains its separate approval boundary;
 - pull requests touching compatibility or release surfaces run the same canary and predict the synchronization decision in dry-run mode, so only main mutates promotion or drift state;
 - contract failure uses one rolling issue rather than opening a new noisy issue every day.
 

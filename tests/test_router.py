@@ -68,6 +68,9 @@ from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 class FakeKimiClient:
     def __init__(self) -> None:
         self.server_version = "0.28.1"
+        self.server_version_checks = 0
+        self.default_model = "kimi-code/k3"
+        self.restarts = 0
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | PromptContent, dict[str, Any]]] = []
         self.prompt_statuses: list[str] = []
@@ -187,6 +190,18 @@ class FakeKimiClient:
 
     async def get_server_version(self) -> str:
         return self.server_version
+
+    async def check_server_version(self) -> str:
+        self.server_version_checks += 1
+        return self.server_version
+
+    async def get_default_model(self) -> str:
+        return self.default_model
+
+    async def restart_server(self) -> None:
+        self.restarts += 1
+        for session in self.sessions:
+            session["busy"] = False
 
     async def list_models(self) -> list[ModelInfo]:
         return list(self.models)
@@ -1020,6 +1035,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
         "/send <path>",
         "/render-thinking [on|off]",
+        "/restart-server",
     ):
         assert f"**{grammar}**" in help_text
     assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
@@ -1032,6 +1048,89 @@ async def test_bridge_commands_switch_stop_and_mode(
     assert binding.session_id == "session-b"
     assert binding.permission_mode == "yolo"
     assert binding.render_thinking is True
+
+
+async def test_restart_server_runs_while_busy_and_refreshes_runtime_defaults(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.server_version = "0.34.0"
+    client.sessions = [
+        {
+            "id": "session-control",
+            "title": "Control session",
+            "busy": False,
+            "metadata": {"cwd": str(tmp_path)},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "permission_mode": "auto",
+            },
+        }
+    ]
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-control",
+                    workspace=str(tmp_path),
+                    permission_mode="auto",
+                )
+            }
+        )
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("before restart"))
+        client.sessions[0]["busy"] = True
+        client.sessions[0]["agent_config"]["permission_mode"] = "manual"
+        client.default_model = "kimi-code/next"
+
+        await router.handle_inbound(adapter, _message("/restart-server"))
+        await router.handle_inbound(adapter, _message("/new"))
+    finally:
+        await router.close()
+
+    assert client.restarts == 1
+    assert client.server_version_checks == 1
+    assert client.profile_updates == [
+        ("session-control", {"permission_mode": "auto"})
+    ]
+    assert client.created[-1][2] == {
+        "model": "kimi-code/next",
+        "permission_mode": "manual",
+    }
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    assert "Restarting Kimi Code server…" in texts
+    assert "Kimi Code server restarted (0.34.0)." in texts
+
+
+async def test_restart_server_rejects_arguments_without_restarting(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/restart-server now"))
+    finally:
+        await router.close()
+
+    assert client.restarts == 0
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        "Usage: /restart-server"
+    ]
 
 
 async def test_model_and_effort_commands_use_exact_catalog_and_profile_inheritance(
@@ -2545,6 +2644,145 @@ async def test_stop_cancels_pending_approval_and_makes_callback_stale(
         "stale",
     ]
     assert any(text == "Stopped." for _ref, _conversation, text in adapter.sent)
+
+
+async def test_restart_server_cancels_pending_interaction_and_makes_callback_stale(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = FakeAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        message, _conversation, prompt = adapter.interactions[0]
+
+        await router.handle_inbound(adapter, _message("/restart-server"))
+        await router.handle_interaction(
+            adapter,
+            _interaction(
+                message,
+                interaction_id=prompt.interaction_id,
+                response=ApprovalResponse("approved"),
+            ),
+        )
+    finally:
+        await router.close()
+
+    assert client.restarts == 1
+    assert client.resolved_approvals == []
+    assert [outcome.state for _message, outcome in adapter.outcomes] == [
+        "cancelled",
+        "stale",
+    ]
+
+
+async def test_restart_server_suspends_interaction_polling_without_holding_lock(
+    tmp_path: Path,
+) -> None:
+    class BlockingFinishAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finish_started = asyncio.Event()
+            self.finish_release = asyncio.Event()
+
+        async def finish_interaction(
+            self, message: MessageRef, outcome: InteractionOutcome
+        ) -> None:
+            self.finish_started.set()
+            await self.finish_release.wait()
+            await super().finish_interaction(message, outcome)
+
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = BlockingFinishAdapter()
+    never_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await never_timeout.wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        interaction_sleep=timeout_sleep,
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        restart = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/restart-server"))
+        )
+        await adapter.finish_started.wait()
+
+        await asyncio.wait_for(router._interaction_lock.acquire(), timeout=0.1)
+        router._interaction_lock.release()
+        assert router._active is not None
+        await router._discover_interaction(router._active)
+        assert len(adapter.interactions) == 1
+
+        client.approvals.clear()
+        adapter.finish_release.set()
+        await restart
+    finally:
+        adapter.finish_release.set()
+        await router.close()
+
+    assert [outcome.state for _message, outcome in adapter.outcomes] == [
+        "cancelled"
+    ]
+
+
+async def test_restart_server_fails_outstanding_compaction_waiters(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.server_version = "0.34.0"
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        compact = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: client.compact_calls == ["session-control"])
+
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "/restart-server",
+                user_id="ou_restart",
+                conversation_id="oc_restart",
+            ),
+        )
+        await asyncio.wait_for(compact, timeout=0.1)
+    finally:
+        await router.close()
+
+    assert client.restarts == 1
+    assert len(adapter.edits) == 1
+    assert adapter.edits[0][0] == adapter.sent[0][0]
+    assert "server restarted" in adapter.edits[0][1].lower()
 
 
 async def test_stop_cancels_pending_question_without_dismissing_it(

@@ -57,10 +57,13 @@ def test_compatibility_version_order_is_semantic() -> None:
 
 
 def test_identifies_supported_official_kimi_code() -> None:
-    identity = identify_kimi_executable("\x1b[1m0.28.1\x1b[0m\n", KIMI_CODE_HELP)
+    version = next(iter(SUPPORTED_KIMI_CODE_VERSIONS))
+    identity = identify_kimi_executable(
+        f"\x1b[1m{version}\x1b[0m\n", KIMI_CODE_HELP
+    )
 
     assert identity.product is KimiProduct.KIMI_CODE
-    assert identity.version == "0.28.1"
+    assert identity.version == version
     assert identity.support is VersionSupport.SUPPORTED
 
 

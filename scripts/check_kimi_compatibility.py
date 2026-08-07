@@ -17,7 +17,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -205,7 +205,9 @@ class CommandRunner(Protocol):
 class GitHubAutomation(Protocol):
     """Semantic operations needed by the synchronization decision."""
 
-    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool: ...
+    def recover_drift_issue(
+        self, summary: CompatibilitySummary
+    ) -> Literal["closed", "recorded"] | None: ...
 
     def promote_version(self, summary: CompatibilitySummary) -> str | None: ...
 
@@ -796,14 +798,17 @@ def synchronize_reports(
 
     Promotion and recovery require every canary platform to be compatible
     with the same kimi-code version; any platform failure records drift.
+    A version that recovers from recorded drift requires manual release
+    preparation because the fix may have dropped older Kimi compatibility.
     """
 
     summary = summarize_reports(reports)
     actions: list[str] = []
     if summary.compatible:
-        if automation.recover_drift_issue(summary):
+        recovery = automation.recover_drift_issue(summary)
+        if recovery == "closed":
             actions.append("closed-recovered-drift-issue")
-        if not summary.supported:
+        if recovery is None and not summary.supported:
             promotion = automation.promote_version(summary)
             if promotion is not None:
                 actions.append(promotion)
@@ -815,8 +820,10 @@ def synchronize_reports(
 class DryRunAutomation:
     """Predict the synchronization decision without touching GitHub."""
 
-    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
-        return False
+    def recover_drift_issue(
+        self, summary: CompatibilitySummary
+    ) -> Literal["closed", "recorded"] | None:
+        return None
 
     def promote_version(self, summary: CompatibilitySummary) -> str | None:
         return f"would-promote-{summary.version}"
@@ -865,10 +872,18 @@ class GitHubApiAutomation:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
+    def recover_drift_issue(
+        self, summary: CompatibilitySummary
+    ) -> Literal["closed", "recorded"] | None:
         issue = self._find_drift_issue()
-        if issue is None or issue.get("state") != "open":
-            return False
+        if issue is None:
+            return None
+        body = str(issue.get("body", ""))
+        if f"<!-- version:{summary.version} " not in body:
+            return None
+        self._invalidate_promotion(summary)
+        if issue.get("state") != "open":
+            return "recorded"
         number = int(issue["number"])
         self._request(
             "POST",
@@ -876,7 +891,8 @@ class GitHubApiAutomation:
             json={
                 "body": (
                     f"Compatibility recovered with kimi-code {summary.version} "
-                    f"on {', '.join(summary.platforms)}."
+                    f"on {', '.join(summary.platforms)}. A bridge release for "
+                    f"this recovered version must be prepared manually."
                     + self._run_link_suffix()
                 )
             },
@@ -886,7 +902,7 @@ class GitHubApiAutomation:
             f"/repos/{self.repository}/issues/{number}",
             json={"state": "closed", "state_reason": "completed"},
         )
-        return True
+        return "closed"
 
     def promote_version(self, summary: CompatibilitySummary) -> str | None:
         state_marker = (
@@ -982,6 +998,7 @@ class GitHubApiAutomation:
         return action
 
     def record_drift(self, summary: CompatibilitySummary) -> str:
+        self._invalidate_promotion(summary)
         issue = self._find_drift_issue()
         state_marker = (
             f"<!-- version:{summary.version} "
@@ -1069,6 +1086,22 @@ class GitHubApiAutomation:
             },
         )
         return pulls[0] if isinstance(pulls, list) and pulls else None
+
+    def _invalidate_promotion(self, summary: CompatibilitySummary) -> None:
+        pull = self._find_promotion_pull()
+        if pull is None:
+            return
+        body = str(pull.get("body", ""))
+        if (
+            PROMOTION_MARKER not in body
+            or f"<!-- version:{summary.version} " not in body
+        ):
+            return
+        self._request(
+            "PATCH",
+            f"/repos/{self.repository}/pulls/{pull['number']}",
+            json={"state": "closed"},
+        )
 
     def _find_drift_issue(self) -> dict[str, Any] | None:
         issues = self._request(

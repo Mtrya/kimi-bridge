@@ -53,7 +53,7 @@ kimi-bridge                       # 运行
 命令涵盖：
 
 - 会话：`/new`、`/sessions`、`/switch`、`/status`、`/title`、`/usage`、`/compact`、`/undo`；
-- 控制：`/mode`、`/model`、`/effort`、`/plan`、`/goal`、`/stop`；
+- 控制：`/mode`、`/model`、`/effort`、`/plan`、`/goal`、`/stop`、`/restart-server`；
 - 任务与工具：`/tasks`、`/skills`、`/mcp`；
 - 输出：`/send`、`/render-thinking`。
 
