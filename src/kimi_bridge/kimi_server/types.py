@@ -136,7 +136,7 @@ class SessionStatus:
     plan_mode: bool
     swarm_mode: bool
     context_tokens: int
-    context_limit: int
+    context_limit: int | None
     context_usage: float
 
 
