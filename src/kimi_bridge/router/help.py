@@ -318,6 +318,19 @@ Side effects: idempotent; reports `Stopped.` even when the session is already id
 Example:
 - `/stop`""",
     ),
+    "/restart-server": CommandHelp(
+        syntax="/restart-server",
+        summary="restart the managed Kimi Code server",
+        section="Control",
+        details="""**/restart-server**
+
+Gracefully stop the managed Kimi Code server, start a fresh server generation, and reconnect without restarting the bridge or IM adapter. Takes no arguments.
+
+Side effects: executes even while sessions are busy. Active turns, approvals, questions, and detached tasks across every session are terminated. Persisted sessions, history, and bridge conversation bindings remain available after restart. The command reports success only after the replacement server is ready.
+
+Example:
+- `/restart-server`""",
+    ),
     "/tasks": CommandHelp(
         syntax="/tasks [running|completed|failed|cancelled]",
         summary="list tasks",

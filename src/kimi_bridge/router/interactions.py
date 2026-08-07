@@ -148,6 +148,22 @@ class _InteractionMixin:
                 )
             return aborted, pending is not None
 
+    async def _cancel_all_pending_interactions(self, detail: str) -> None:
+        """Finish every bridge-owned interaction invalidated by a server restart."""
+
+        async with self._interaction_lock:
+            for pending in tuple(self._pending.values()):
+                await self._clear_pending(pending)
+                try:
+                    await pending.adapter.finish_interaction(
+                        pending.message,
+                        InteractionOutcome(state="cancelled", detail=detail),
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "failed to finish interaction during server restart"
+                    )
+
     def _interaction_poll_done(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return

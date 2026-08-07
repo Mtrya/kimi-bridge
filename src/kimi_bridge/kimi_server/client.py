@@ -39,6 +39,7 @@ from .types import (
     GoalControl,
     GoalInfo,
     KimiServerAPIError,
+    KimiServerError,
     KimiServerProtocolError,
     KimiServerStartupError,
     KimiServerTransportError,
@@ -171,6 +172,14 @@ class KimiServerClient:
                 "kimi server metadata has no server_version"
             )
         return server_version
+
+    async def restart_server(self) -> ServerConnection:
+        """Restart the supervised Kimi server and wait for its replacement."""
+
+        if self._supervisor is None:
+            raise KimiServerError("server restart requires a managed kimi server")
+        self._usage_totals.clear()
+        return await self._supervisor.restart()
 
     async def check_server_version(
         self, *, executable_version: str | None = None

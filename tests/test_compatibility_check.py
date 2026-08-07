@@ -1001,7 +1001,8 @@ def test_github_promotion_drift_dedup_and_recovery(
     automation = GitHubApiAutomation(
         "Mtrya/kimi-bridge", "token", client=client
     )
-    supported = _reports_for_all_platforms("0.28.1")
+    current_supported = next(iter(SUPPORTED_KIMI_CODE_VERSIONS))
+    supported = _reports_for_all_platforms(current_supported)
     assert synchronize_reports(supported, automation) == ()
     assert not fake.pulls and not fake.issues
 
@@ -1041,7 +1042,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert fake.content_updates == 3
 
     broken = _reports_for_all_platforms(
-        "0.30.0", failing={"windows": _failing_check()}
+        unlisted_kimi_code_version, failing={"windows": _failing_check()}
     )
     assert synchronize_reports(broken, automation) == ("created-drift-issue",)
     assert synchronize_reports(broken, automation) == ("unchanged-drift-issue",)
@@ -1049,7 +1050,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert "**windows**" in fake.issues[0]["body"]
 
     changed = _reports_for_all_platforms(
-        "0.30.0",
+        unlisted_kimi_code_version,
         failing={
             "macos": _failing_check(detail="a different required failure")
         },
@@ -1058,7 +1059,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.issues) == 1
     assert "**macos**" in fake.issues[0]["body"]
 
-    recovered = _reports_for_all_platforms("0.28.1")
+    recovered = _reports_for_all_platforms(unlisted_kimi_code_version)
     assert synchronize_reports(recovered, automation) == (
         "closed-recovered-drift-issue",
     )
@@ -1066,6 +1067,34 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.comments) == 1
     assert synchronize_reports(recovered, automation) == ()
     assert len(fake.comments) == 1
+    assert fake.pulls == []
+
+
+def test_recovered_unknown_version_does_not_prepare_automatic_release(
+    unlisted_kimi_code_version: str,
+) -> None:
+    fake = FakeGitHub()
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = GitHubApiAutomation(
+        "Mtrya/kimi-bridge", "token", client=client
+    )
+    broken = _reports_for_all_platforms(
+        unlisted_kimi_code_version,
+        failing={"linux": _failing_check()},
+    )
+    recovered = _reports_for_all_platforms(unlisted_kimi_code_version)
+
+    assert synchronize_reports(broken, automation) == ("created-drift-issue",)
+    assert synchronize_reports(recovered, automation) == (
+        "closed-recovered-drift-issue",
+    )
+    assert fake.issues[0]["state"] == "closed"
+    assert fake.pulls == []
+    assert synchronize_reports(recovered, automation) == ()
+    assert fake.pulls == []
 
 
 def test_sync_dry_run_predicts_the_decision_without_github(

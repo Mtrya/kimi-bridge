@@ -448,10 +448,11 @@ def test_compat_prints_the_map_when_kimi_is_not_detected(
 def test_compat_uses_the_detected_kimi_code_version(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(main_module, "_probe_kimi_code_version", lambda: "0.29.0")
+    version = COMPATIBILITY_MAP[-1].kimi_code[-1]
+    monkeypatch.setattr(main_module, "_probe_kimi_code_version", lambda: version)
 
     assert main_module.main(["compat"]) == 0
-    assert "kimi-code 0.29.0 is supported" in capsys.readouterr().out
+    assert f"kimi-code {version} is supported" in capsys.readouterr().out
 
 
 def test_probe_parses_plain_version_output_without_printing_it(

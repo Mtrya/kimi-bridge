@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from kimi_bridge.compatibility import SUPPORTED_KIMI_CODE_VERSIONS
 from kimi_bridge.doctor import (
     CheckStatus,
     CommandResult,
@@ -31,6 +32,7 @@ Kimi, your next CLI agent.
 --mcp-config-file PATH
 Documentation: https://moonshotai.github.io/kimi-cli/
 """
+CURRENT_KIMI_CODE_VERSION = next(iter(SUPPORTED_KIMI_CODE_VERSIONS))
 
 
 class FakeRunner:
@@ -49,7 +51,7 @@ class FakeRunner:
 
 def _runner(
     *,
-    version: str = "0.28.1\n",
+    version: str = f"{CURRENT_KIMI_CODE_VERSION}\n",
     help_output: str = KIMI_CODE_HELP,
     config_result: CommandResult = CommandResult(0, "configuration valid\n"),
 ) -> FakeRunner:

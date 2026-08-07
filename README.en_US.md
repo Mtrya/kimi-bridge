@@ -53,7 +53,7 @@ Full walkthrough in [INSTALL.en_US.md](INSTALL.en_US.md); complete adapter examp
 Commands cover:
 
 - sessions: `/new`, `/sessions`, `/switch`, `/status`, `/title`, `/usage`, `/compact`, `/undo`;
-- control: `/mode`, `/model`, `/effort`, `/plan`, `/goal`, `/stop`;
+- control: `/mode`, `/model`, `/effort`, `/plan`, `/goal`, `/stop`, `/restart-server`;
 - tasks and tools: `/tasks`, `/skills`, `/mcp`;
 - output: `/send`, `/render-thinking`.
 

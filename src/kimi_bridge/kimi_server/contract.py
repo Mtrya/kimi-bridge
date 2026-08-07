@@ -910,6 +910,7 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
 KIMI_LIFECYCLE_INVARIANTS: tuple[tuple[str, str], ...] = (
     ("startup.foreground", "KimiServerSupervisor._run_child"),
     ("startup.bearer_token", "parse_server_startup_line"),
+    ("server.intentional_restart", "KimiServerSupervisor.restart"),
     ("rest.bearer_auth", "KimiServerClient._request"),
     ("session.create", "KimiServerClient.create_session"),
     ("session.materialize_before_subscribe", "KimiServerClient._materialize_session"),

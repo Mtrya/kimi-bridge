@@ -289,6 +289,35 @@ class _CommandMixin:
             )
             await self._send_chunked(adapter, conversation, "Stopped.")
             return
+        if command == "/restart-server":
+            if argument:
+                await self._send_chunked(
+                    adapter, conversation, "Usage: /restart-server"
+                )
+                return
+            await self._send_chunked(
+                adapter, conversation, "Restarting Kimi Code server…"
+            )
+            await self._cancel_all_pending_interactions(
+                "Cancelled because the Kimi Code server restarted."
+            )
+            await self._client.restart_server()
+            self._model = await self._client.get_default_model()
+            self._verified_session_profiles.clear()
+            binding = self._state.bindings.get(conversation_key)
+            if binding is not None:
+                await self._verify_session_profile(
+                    binding.session_id,
+                    binding.permission_mode,
+                    replace_existing=False,
+                )
+            version = await self._client.get_server_version()
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Kimi Code server restarted ({version}).",
+            )
+            return
 
         await self._send_chunked(
             adapter, conversation, f"Unknown command: {command}\nUse /help."

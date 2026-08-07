@@ -29,6 +29,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/goal resume` | Reactivate a paused or blocked goal. |
 | `/goal cancel` | Cancel the current goal and its active prompt/interaction. |
 | `/stop` | Abort the active main-agent turn, discard active and queued prompts, and cancel its pending interaction. Detached tasks continue. |
+| `/restart-server` | Gracefully restart the managed Kimi Code server while keeping the bridge and IM adapter online. |
 | `/tasks [running\|completed\|failed\|cancelled]` | List all tasks or filter by status. |
 | `/tasks show <id>` | Inspect a task with at most the last 8 KiB of output. |
 | `/tasks cancel <id>` | Cancel a task. |
@@ -40,14 +41,14 @@ Commands are case-insensitive before the first space; arguments retain their cas
 
 Model aliases and thinking efforts come from the live Kimi catalog. A model change preserves the current effort when supported, otherwise it selects the model's advertised default or `off` when thinking is unsupported. Plan usage/quota reset information is not exposed by the public local server and is not part of `/usage`.
 
-Goal replacement and goal queues are not exposed. A blocked goal remains blocked until `/goal resume`; an ordinary follow-up does not reactivate it. Global MCP mutation/restart is not exposed.
+Goal replacement and goal queues are not exposed. A blocked goal remains blocked until `/goal resume`; an ordinary follow-up does not reactivate it. Global MCP mutation is not exposed.
 
 ## Busy-session matrix
 
 | While a turn is busy | Commands |
 | --- | --- |
 | Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop` |
+| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/restart-server` |
 | Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is a nudge, not an immediate interrupt; an in-flight tool call can finish. `/new` and `/switch` move the conversation binding without aborting work already running in the previous Kimi session.
@@ -55,6 +56,8 @@ A normal non-command message sent during a running turn is submitted and steered
 Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` close the relevant interaction as cancelled.
 
 `/stop` discards queued prompts before aborting the active prompt and main-agent turn, so a queued follow-up cannot start immediately after cancellation. It also works when the turn was started outside the prompt service. The command is idempotent and reports `Stopped.` after Kimi accepts the session abort, including when the session is already idle. Detached tasks are not cancelled and remain available through `/tasks`.
+
+`/restart-server` takes no arguments and intentionally recycles the entire managed Kimi Code server even while sessions are busy. The bridge and selected IM adapter stay online, and success is reported only after the replacement server is ready. Persisted sessions, conversation history, and bridge bindings survive, while active turns, approvals, questions, detached tasks, live usage totals, and other in-memory server state are terminated. Existing event subscriptions reconnect and rematerialize their sessions against the new server generation.
 
 ## Permission modes and interactions
 

@@ -30,6 +30,7 @@ from kimi_bridge.kimi_server import (
     KimiServerAPIError,
     KimiServerAuthenticationError,
     KimiServerClient,
+    KimiServerError,
     KimiServerProtocolError,
     KimiServerStartupError,
     KimiServerTransportError,
@@ -299,8 +300,13 @@ class FakeProcessFactory:
 class FakeSupervisor:
     def __init__(self, connections: Iterable[ServerConnection]) -> None:
         self._connections = iter(connections)
+        self.restart_calls = 0
 
     async def wait_until_ready(self) -> ServerConnection:
+        return next(self._connections)
+
+    async def restart(self) -> ServerConnection:
+        self.restart_calls += 1
         return next(self._connections)
 
 
@@ -457,6 +463,31 @@ async def test_rest_envelope_error_is_raised() -> None:
         await client.get_snapshot("missing")
 
     assert caught.value.code == 40401
+
+
+async def test_client_restart_requires_and_delegates_to_managed_supervisor() -> None:
+    fixed = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([]),
+    )
+    with pytest.raises(KimiServerError, match="requires a managed"):
+        await fixed.restart_server()
+
+    connection = ServerConnection(
+        base_url="http://127.0.0.1:43123",
+        port=43123,
+        generation=2,
+        token="token-2",
+    )
+    supervisor = FakeSupervisor([connection])
+    managed = KimiServerClient(
+        supervisor=supervisor,  # type: ignore[arg-type]
+        http_client=FakeHttpClient([]),
+    )
+
+    assert await managed.restart_server() == connection
+    assert supervisor.restart_calls == 1
 
 
 async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> None:
@@ -1721,6 +1752,54 @@ async def test_supervisor_restarts_with_exponential_backoff() -> None:
     assert factory.calls[3][1]["start_new_session"] is True
     assert [call[0] for call in factory.calls].count(("kimi", "--version")) == 1
     assert [call[0] for call in factory.calls].count(("kimi", "--help")) == 1
+
+
+async def test_supervisor_requested_restart_is_immediate_and_single_flight(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    startup = "Kimi server: http://127.0.0.1:43123/#token=secret"
+    first = FakeProcess(startup)
+    second = FakeProcess(startup)
+    factory = FakeProcessFactory(
+        [
+            FakeCompletedProcess("0.34.0\n"),
+            FakeCompletedProcess(KIMI_CODE_HELP),
+            FakeCompletedProcess(KIMI_WEB_HELP),
+            first,
+            second,
+        ]
+    )
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    supervisor = KimiServerSupervisor(
+        preferred_port=43123,
+        process_factory=factory,
+        sleep=fake_sleep,
+    )
+    try:
+        assert (await supervisor.start()).generation == 1
+        with caplog.at_level(
+            logging.INFO,
+            logger="kimi_bridge.kimi_server.supervisor",
+        ):
+            first_request = asyncio.create_task(supervisor.restart())
+            second_request = asyncio.create_task(supervisor.restart())
+            first_connection, second_connection = await asyncio.gather(
+                first_request, second_request
+            )
+        assert first_connection.generation == 2
+        assert second_connection == first_connection
+    finally:
+        await supervisor.stop()
+
+    assert first.terminated is True
+    assert second.terminated is True
+    assert delays == []
+    assert "stopped for requested restart" in caplog.text
+    assert "exited unexpectedly" not in caplog.text
 
 
 async def test_supervisor_debug_output_redacts_all_startup_token_lines(

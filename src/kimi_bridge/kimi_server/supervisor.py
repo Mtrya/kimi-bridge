@@ -133,6 +133,8 @@ class KimiServerSupervisor:
         self._failure: BaseException | None = None
         self._generation = 0
         self._executable_identity: KimiExecutableIdentity | None = None
+        self._restart_requested = False
+        self._restart_task: asyncio.Task[ServerConnection] | None = None
 
     @property
     def connection(self) -> ServerConnection:
@@ -172,6 +174,7 @@ class KimiServerSupervisor:
         await self._check_executable_identity()
         self._port = self._preferred_port or self._port_picker()
         self._stopping.clear()
+        self._restart_requested = False
         self._failure = None
         self._task = asyncio.create_task(
             self._supervise(), name="kimi-server-supervisor"
@@ -208,6 +211,43 @@ class KimiServerSupervisor:
         finally:
             self._task = None
             self._process = None
+
+    async def restart(self) -> ServerConnection:
+        """Gracefully replace the managed child and return its new connection."""
+
+        if self._task is None or self._task.done() or self._stopping.is_set():
+            raise RuntimeError("kimi server supervisor is not running")
+
+        restart_task = self._restart_task
+        if restart_task is None:
+            restart_task = asyncio.create_task(
+                self._restart_once(), name="kimi-server-restart"
+            )
+            self._restart_task = restart_task
+            restart_task.add_done_callback(self._clear_restart_task)
+        return await asyncio.shield(restart_task)
+
+    async def _restart_once(self) -> ServerConnection:
+        connection = await self.wait_until_ready()
+        process = self._process
+        if process is None or process.returncode is not None:
+            return await self.wait_until_ready(
+                after_generation=connection.generation
+            )
+
+        self._restart_requested = True
+        LOGGER.info(
+            "restarting kimi server after generation %s",
+            connection.generation,
+        )
+        await self._terminate_process(process)
+        return await self.wait_until_ready(after_generation=connection.generation)
+
+    def _clear_restart_task(
+        self, task: asyncio.Task[ServerConnection]
+    ) -> None:
+        if self._restart_task is task:
+            self._restart_task = None
 
     async def wait_until_ready(
         self, *, after_generation: int | None = None
@@ -322,6 +362,12 @@ class KimiServerSupervisor:
                 await self._publish_connection(None)
                 if self._stopping.is_set():
                     break
+
+                if self._restart_requested:
+                    self._restart_requested = False
+                    delay = self._initial_backoff
+                    LOGGER.info("kimi server stopped for requested restart")
+                    continue
 
                 LOGGER.warning(
                     "kimi server exited unexpectedly with status %s; "
