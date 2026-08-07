@@ -488,6 +488,48 @@ def test_semantic_projection_accepts_an_optional_outbound_message_field(
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
 
     assert not [item for item in checks if item.status == "fail"]
+
+
+def test_semantic_projection_accepts_an_optional_session_context_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    session_status = kimi_contract.KIMI_REST_OPERATIONS["session_status"]
+    context_limit = next(
+        field
+        for field in session_status.response_fields
+        if field.path == ("max_context_tokens",)
+    )
+    assert context_limit.required is False
+
+    operation = kimi_contract.RestOperationContract(
+        "session_status",
+        "KimiServerClient.get_session_status/_materialize_session",
+        "GET",
+        "/sessions/{session_id}/status",
+        "/api/v1/sessions/{session_id}/status",
+        response_fields=(context_limit,),
+    )
+    example = openapi["paths"].pop("/api/v1/example")
+    data_schema = example["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]["properties"]["data"]
+    data_schema["properties"] = {
+        "max_context_tokens": {"type": "integer"}
+    }
+    data_schema.pop("required")
+    openapi["paths"]["/api/v1/sessions/{session_id}/status"] = example
+    monkeypatch.setattr(
+        kimi_contract, "KIMI_REST_OPERATIONS", {"session_status": operation}
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+
+    assert not [item for item in checks if item.status == "fail"]
+
+
 def _write_fixture(directory: Path, *, legacy: bool = False) -> None:
     version = "kimi, version 1.49.0\n" if legacy else "0.28.1\n"
     help_text = (

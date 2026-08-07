@@ -496,6 +496,40 @@ async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> N
     assert resolved.capabilities == ("image_in", "video_in")
 
 
+async def test_session_status_accepts_an_unknown_context_limit() -> None:
+    status = {
+        "busy": False,
+        "model": "removed-model",
+        "thinking_level": "off",
+        "permission": "manual",
+        "plan_mode": False,
+        "swarm_mode": False,
+        "context_tokens": 0,
+        "context_usage": 0,
+    }
+    http = FakeHttpClient([_envelope(status), _envelope(status)])
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+    )
+
+    assert await client.get_session_status("session-1") == SessionStatus(
+        busy=False,
+        model="removed-model",
+        thinking_effort="off",
+        permission_mode="manual",
+        plan_mode=False,
+        swarm_mode=False,
+        context_tokens=0,
+        context_limit=None,
+        context_usage=0,
+    )
+    assert await client.get_session_usage("session-1") == SessionUsage(
+        None, None, None, None, 0, None
+    )
+
+
 async def test_large_prompt_media_early_disconnect_is_a_kimi_transport_error() -> None:
     async def disconnect_after_headers(
         reader: asyncio.StreamReader,
