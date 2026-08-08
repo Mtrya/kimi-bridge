@@ -14,6 +14,7 @@ from kimi_bridge.config import (
     QQConfig,
     TelegramConfig,
     VoiceAsrConfig,
+    WechatConfig,
     load_config,
     resolve_config_path,
     unknown_config_keys,
@@ -144,6 +145,69 @@ def test_loads_qq_and_ignores_partial_unselected_feishu(tmp_path: Path) -> None:
     )
     assert config.feishu.app_id == "unused"
     assert "secret-1" not in repr(config)
+
+
+def test_loads_wechat_policy_and_resolves_storage_path(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    storage = tmp_path / "private" / "wechat"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "wechat"',
+                "[wechat]",
+                'allowed_users = [" user-one ", "user-two"]',
+                f'storage_path = "{storage}"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.platform == "wechat"
+    assert config.wechat == WechatConfig(
+        allowed_users=frozenset({"user-one", "user-two"}),
+        storage_path=storage.resolve(),
+    )
+
+
+def test_wechat_loader_permits_empty_allowlist_for_qr_bootstrap(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('platform = "wechat"\n[wechat]\n', encoding="utf-8")
+
+    assert load_config(path).wechat.allowed_users == frozenset()
+
+
+@pytest.mark.parametrize(
+    "wechat_table",
+    [
+        'allowed_users = [1]',
+        'allowed_users = [""]',
+        'storage_path = "   "',
+        "storage_path = 1",
+    ],
+)
+def test_rejects_invalid_wechat_configuration(
+    tmp_path: Path, wechat_table: str
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f'platform = "wechat"\n[wechat]\n{wechat_table}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises((TypeError, ValueError), match="wechat"):
+        load_config(path)
+
+
+def test_unknown_config_keys_reports_wechat_typos() -> None:
+    raw = MappingProxyType(
+        {"wechat": MappingProxyType({"allowed_users": [], "store_path": "x"})}
+    )
+
+    assert unknown_config_keys(raw) == ("wechat.store_path",)
 
 
 def test_rejects_partial_qq_credentials(tmp_path: Path) -> None:

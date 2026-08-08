@@ -19,14 +19,16 @@ from .state import DEFAULT_STATE_PATH
 DEFAULT_CONFIG_PATH = Path.home() / ".kimi-bridge" / "config.toml"
 CONFIG_PATH_ENV = "KIMI_BRIDGE_CONFIG"
 DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
+DEFAULT_WECHAT_STORAGE_PATH = Path.home() / ".kimi-bridge" / "wechat"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-PlatformName: TypeAlias = Literal["feishu", "telegram", "qq"]
-_PLATFORMS = {"feishu", "telegram", "qq"}
+PlatformName: TypeAlias = Literal["feishu", "telegram", "qq", "wechat"]
+_PLATFORMS = {"feishu", "telegram", "qq", "wechat"}
 _KNOWN_SUB_KEYS = {
     "kimi_server": frozenset({"port"}),
     "feishu": frozenset({"app_id", "app_secret", "allowed_users"}),
     "telegram": frozenset({"bot_token", "allowed_users"}),
     "qq": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "wechat": frozenset({"allowed_users", "storage_path"}),
     "voice": frozenset({"asr"}),
 }
 _KNOWN_VOICE_ASR_KEYS = frozenset(
@@ -123,6 +125,14 @@ class QQConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WechatConfig:
+    """Authorization policy and private state location for WeChat."""
+
+    allowed_users: frozenset[str] = field(default_factory=frozenset)
+    storage_path: Path = DEFAULT_WECHAT_STORAGE_PATH
+
+
+@dataclass(frozen=True, slots=True)
 class VoiceAsrConfig:
     """External HTTP transcription endpoint for voice messages.
 
@@ -161,6 +171,7 @@ class Config:
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     qq: QQConfig = field(default_factory=QQConfig)
+    wechat: WechatConfig = field(default_factory=WechatConfig)
     voice: VoiceConfig = field(default_factory=VoiceConfig)
 
 
@@ -195,6 +206,10 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         app_id = "..."
         app_secret = "..."
         allowed_users = ["..."]
+
+        [wechat]
+        allowed_users = ["stable-ilink-user-id"]
+        storage_path = "~/.kimi-bridge/wechat"
 
         [voice.asr]
         base_url = "https://api.openai.com/v1"
@@ -346,6 +361,27 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
         raise TypeError("qq.allowed_users must contain non-empty strings")
     qq_allowed_users = frozenset(qq_allowed_raw)
 
+    wechat_raw = raw.get("wechat", {})
+    if not isinstance(wechat_raw, dict):
+        raise TypeError("wechat must be a TOML table")
+    wechat_allowed_raw = wechat_raw.get("allowed_users", [])
+    if not isinstance(wechat_allowed_raw, list):
+        raise TypeError("wechat.allowed_users must be an array of strings")
+    if any(
+        not isinstance(user, str) or not user.strip()
+        for user in wechat_allowed_raw
+    ):
+        raise TypeError("wechat.allowed_users must contain non-empty strings")
+    wechat_allowed_users = frozenset(
+        user.strip() for user in wechat_allowed_raw
+    )
+    wechat_storage_raw = wechat_raw.get(
+        "storage_path", str(DEFAULT_WECHAT_STORAGE_PATH)
+    )
+    if not isinstance(wechat_storage_raw, str) or not wechat_storage_raw.strip():
+        raise TypeError("wechat.storage_path must be a non-empty string")
+    wechat_storage_path = Path(wechat_storage_raw).expanduser().resolve()
+
     voice_raw = raw.get("voice", {})
     if not isinstance(voice_raw, dict):
         raise TypeError("voice must be a TOML table")
@@ -428,6 +464,10 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
             app_id=qq_app_id,
             app_secret=qq_app_secret,
             allowed_users=qq_allowed_users,
+        ),
+        wechat=WechatConfig(
+            allowed_users=wechat_allowed_users,
+            storage_path=wechat_storage_path,
         ),
         voice=VoiceConfig(asr=voice_asr),
     )

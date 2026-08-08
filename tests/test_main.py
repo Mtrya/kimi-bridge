@@ -18,6 +18,7 @@ from kimi_bridge.config import (
     FeishuConfig,
     QQConfig,
     TelegramConfig,
+    WechatConfig,
 )
 from kimi_bridge.kimi_server import KimiServerAuthenticationError
 
@@ -221,6 +222,17 @@ def test_selected_platform_requires_its_own_credentials() -> None:
             )
         )
 
+    with pytest.raises(RuntimeError, match="wechat.allowed_users"):
+        main_module._build_adapter(Config(platform="wechat"))
+
+    with pytest.raises(RuntimeError, match="runtime messaging is not available"):
+        main_module._build_adapter(
+            Config(
+                platform="wechat",
+                wechat=WechatConfig(allowed_users=frozenset({"user-one"})),
+            )
+        )
+
 
 @pytest.mark.parametrize("argument", ["--help", "--version"])
 def test_metadata_flags_do_not_start_runtime(
@@ -310,6 +322,83 @@ def test_config_argument_reaches_runtime(
     custom = tmp_path / "custom.toml"
     assert main_module.main(["--config", str(custom)]) == 0
     assert received == [custom]
+
+
+def test_wechat_controls_do_not_start_runtime_or_build_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'platform = "wechat"\n[wechat]\nallowed_users = []\n',
+        encoding="utf-8",
+    )
+    runtime_started = False
+    adapter_built = False
+    calls: list[tuple[str, bool]] = []
+
+    async def forbidden_run(_config_path: object) -> None:
+        nonlocal runtime_started
+        runtime_started = True
+
+    def forbidden_adapter(_config: Config) -> _Adapter:
+        nonlocal adapter_built
+        adapter_built = True
+        return _Adapter()
+
+    def fake_login(_config: WechatConfig, *, replace: bool = False) -> int:
+        calls.append(("login", replace))
+        return 0
+
+    def fake_status(_config: WechatConfig) -> int:
+        calls.append(("status", False))
+        return 0
+
+    def fake_logout(_config: WechatConfig) -> int:
+        calls.append(("logout", False))
+        return 0
+
+    monkeypatch.setattr(main_module, "run", forbidden_run)
+    monkeypatch.setattr(main_module, "_build_adapter", forbidden_adapter)
+    monkeypatch.setattr(wechat_module, "run_login", fake_login)
+    monkeypatch.setattr(wechat_module, "run_status", fake_status)
+    monkeypatch.setattr(wechat_module, "run_logout", fake_logout)
+
+    assert (
+        main_module.main(
+            ["--config", str(config_path), "wechat", "login", "--replace"]
+        )
+        == 0
+    )
+    assert main_module.main(["wechat", "--config", str(config_path), "status"]) == 0
+    assert main_module.main(["wechat", "logout", "--config", str(config_path)]) == 0
+    assert calls == [("login", True), ("status", False), ("logout", False)]
+    assert not runtime_started
+    assert not adapter_built
+
+
+def test_wechat_controls_require_selected_wechat_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    called = False
+
+    def forbidden_status(_config: WechatConfig) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(wechat_module, "run_status", forbidden_status)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "qq"\n', encoding="utf-8")
+
+    assert main_module.main(["--config", str(config_path), "wechat", "status"]) == 1
+    assert not called
+    assert "selected platform must be" in capsys.readouterr().err
 
 
 def test_startup_authentication_failure_is_one_stderr_line(

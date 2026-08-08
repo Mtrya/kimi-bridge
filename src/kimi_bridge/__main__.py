@@ -191,6 +191,16 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             token_manager=token_manager,
         )
 
+    if config.platform == "wechat":
+        if not config.wechat.allowed_users:
+            raise AdapterConfigurationError(
+                "wechat.allowed_users must contain at least one user"
+            )
+        raise AdapterConfigurationError(
+            "WeChat runtime messaging is not available yet; use the local "
+            "wechat login, status, or logout commands"
+        )
+
     if not config.telegram.bot_token:
         raise AdapterConfigurationError(
             "Telegram bot token is missing from ~/.kimi-bridge/config.toml"
@@ -253,6 +263,47 @@ def _argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="Kimi Code version to classify (default: detect the installed kimi)",
     )
+    wechat_command = subcommands.add_parser(
+        "wechat",
+        help="manage local WeChat QR authorization",
+        description=(
+            "Manage local WeChat QR authorization without starting Kimi Code "
+            "or message polling."
+        ),
+    )
+    wechat_command.add_argument(
+        "--config",
+        metavar="PATH",
+        default=argparse.SUPPRESS,
+        help=(
+            "path to the config file "
+            f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+        ),
+    )
+    wechat_subcommands = wechat_command.add_subparsers(
+        dest="wechat_command", required=True
+    )
+    for command_name, help_text in (
+        ("login", "authorize an iLink bot by scanning a QR URL"),
+        ("status", "inspect local WeChat authorization without network access"),
+        ("logout", "remove only adapter-owned WeChat authorization files"),
+    ):
+        command = wechat_subcommands.add_parser(command_name, help=help_text)
+        command.add_argument(
+            "--config",
+            metavar="PATH",
+            default=argparse.SUPPRESS,
+            help=(
+                "path to the config file "
+                f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+            ),
+        )
+        if command_name == "login":
+            command.add_argument(
+                "--replace",
+                action="store_true",
+                help="replace a stored authorization only after a new login succeeds",
+            )
     return parser
 
 
@@ -348,6 +399,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_doctor(config_path=config_path)
     if arguments.command == "compat":
         return _run_compat(arguments.kimi_code)
+    if arguments.command == "wechat":
+        from .platforms.wechat import (
+            WeChatControlError,
+            run_login,
+            run_logout,
+            run_status,
+        )
+
+        try:
+            config = load_config(config_path)
+            if config.platform != "wechat":
+                raise WeChatControlError(
+                    'selected platform must be "wechat" for WeChat controls'
+                )
+            if arguments.wechat_command == "login":
+                return run_login(config.wechat, replace=arguments.replace)
+            if arguments.wechat_command == "status":
+                return run_status(config.wechat)
+            if arguments.wechat_command == "logout":
+                return run_logout(config.wechat)
+            raise AssertionError("unhandled WeChat command")
+        except KeyboardInterrupt:
+            print("kimi-bridge: WeChat authorization cancelled", file=sys.stderr)
+            return 130
+        except (OSError, TypeError, ValueError, WeChatControlError) as exc:
+            print(f"kimi-bridge: {exc}", file=sys.stderr)
+            return 1
     try:
         asyncio.run(run(config_path))
     except KeyboardInterrupt:
