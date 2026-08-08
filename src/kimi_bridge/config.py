@@ -19,15 +19,21 @@ from .state import DEFAULT_STATE_PATH
 DEFAULT_CONFIG_PATH = Path.home() / ".kimi-bridge" / "config.toml"
 CONFIG_PATH_ENV = "KIMI_BRIDGE_CONFIG"
 DEFAULT_WORKSPACE = Path.home() / ".kimi-bridge" / "workspace"
+DEFAULT_FEISHU_STORAGE_PATH = Path.home() / ".kimi-bridge" / "feishu"
+DEFAULT_QQ_STORAGE_PATH = Path.home() / ".kimi-bridge" / "qq"
 DEFAULT_WECHAT_STORAGE_PATH = Path.home() / ".kimi-bridge" / "wechat"
 _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 PlatformName: TypeAlias = Literal["feishu", "telegram", "qq", "wechat"]
 _PLATFORMS = {"feishu", "telegram", "qq", "wechat"}
 _KNOWN_SUB_KEYS = {
     "kimi_server": frozenset({"port"}),
-    "feishu": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "feishu": frozenset(
+        {"app_id", "app_secret", "allowed_users", "storage_path"}
+    ),
     "telegram": frozenset({"bot_token", "allowed_users"}),
-    "qq": frozenset({"app_id", "app_secret", "allowed_users"}),
+    "qq": frozenset(
+        {"app_id", "app_secret", "allowed_users", "storage_path"}
+    ),
     "wechat": frozenset({"allowed_users", "storage_path"}),
     "voice": frozenset({"asr"}),
 }
@@ -100,11 +106,16 @@ class KimiServerConfig:
 
 @dataclass(frozen=True, slots=True)
 class FeishuConfig:
-    """Credentials and authorization policy for the Feishu bot."""
+    """Credentials, authorization policy, and private storage for Feishu.
+
+    ``app_id`` and ``app_secret`` are an optional complete TOML fallback;
+    managed QR credentials take precedence when present.
+    """
 
     app_id: str = ""
     app_secret: str = field(default="", repr=False)
     allowed_users: frozenset[str] = field(default_factory=frozenset)
+    storage_path: Path = DEFAULT_FEISHU_STORAGE_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,11 +128,16 @@ class TelegramConfig:
 
 @dataclass(frozen=True, slots=True)
 class QQConfig:
-    """Credentials and authorization policy for the QQ official bot."""
+    """Credentials, authorization policy, and private storage for QQ.
+
+    ``app_id`` and ``app_secret`` are an optional complete TOML fallback;
+    managed QR credentials take precedence when present.
+    """
 
     app_id: str = ""
     app_secret: str = field(default="", repr=False)
     allowed_users: frozenset[str] = field(default_factory=frozenset)
+    storage_path: Path = DEFAULT_QQ_STORAGE_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,18 +210,20 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         port = 58628
 
         [feishu]
-        app_id = "cli_..."
-        app_secret = "..."
+        app_id = "cli_..."  # optional complete TOML fallback
+        app_secret = "..."  # optional complete TOML fallback
         allowed_users = ["ou_..."]
+        storage_path = "~/.kimi-bridge/feishu"
 
         [telegram]
         bot_token = "123456:..."
         allowed_users = [123456789]
 
         [qq]
-        app_id = "..."
-        app_secret = "..."
+        app_id = "..."  # optional complete TOML fallback
+        app_secret = "..."  # optional complete TOML fallback
         allowed_users = ["..."]
+        storage_path = "~/.kimi-bridge/qq"
 
         [wechat]
         allowed_users = ["stable-ilink-user-id"]
@@ -326,6 +344,12 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
     if any(not isinstance(user, str) or not user.strip() for user in allowed_raw):
         raise TypeError("feishu.allowed_users must contain non-empty strings")
     allowed_users = frozenset(allowed_raw)
+    feishu_storage_raw = feishu_raw.get(
+        "storage_path", str(DEFAULT_FEISHU_STORAGE_PATH)
+    )
+    if not isinstance(feishu_storage_raw, str) or not feishu_storage_raw.strip():
+        raise TypeError("feishu.storage_path must be a non-empty string")
+    feishu_storage_path = Path(feishu_storage_raw).expanduser().resolve()
 
     telegram_raw = raw.get("telegram", {})
     if not isinstance(telegram_raw, dict):
@@ -360,6 +384,10 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
     if any(not isinstance(user, str) or not user.strip() for user in qq_allowed_raw):
         raise TypeError("qq.allowed_users must contain non-empty strings")
     qq_allowed_users = frozenset(qq_allowed_raw)
+    qq_storage_raw = qq_raw.get("storage_path", str(DEFAULT_QQ_STORAGE_PATH))
+    if not isinstance(qq_storage_raw, str) or not qq_storage_raw.strip():
+        raise TypeError("qq.storage_path must be a non-empty string")
+    qq_storage_path = Path(qq_storage_raw).expanduser().resolve()
 
     wechat_raw = raw.get("wechat", {})
     if not isinstance(wechat_raw, dict):
@@ -455,6 +483,7 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
             app_id=app_id,
             app_secret=app_secret,
             allowed_users=allowed_users,
+            storage_path=feishu_storage_path,
         ),
         telegram=TelegramConfig(
             bot_token=bot_token,
@@ -464,6 +493,7 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
             app_id=qq_app_id,
             app_secret=qq_app_secret,
             allowed_users=qq_allowed_users,
+            storage_path=qq_storage_path,
         ),
         wechat=WechatConfig(
             allowed_users=wechat_allowed_users,

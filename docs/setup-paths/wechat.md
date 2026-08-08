@@ -2,50 +2,84 @@
 
 | Field | Value |
 | --- | --- |
-| Applies to | One QR-authorized WeChat Clawbot used by one kimi-bridge private-chat process |
-| Last live verification | `2026-08-08` |
+| Applies to | One WeChat iLink bot authorization polled by one kimi-bridge private-chat process |
+| Last complete verification | `2026-08-08` |
 | `reverify_after` | `2026-11-06` |
-| Evidence | [Issue #66](https://github.com/Mtrya/kimi-bridge/issues/66), [Tencent source tag v2.4.6](https://github.com/Tencent/openclaw-weixin/tree/v2.4.6) |
 
-Read the [setup agent contract](../../INSTALL_AI.md) before using this path. Follow the [freshness rules](README.md#freshness-and-use); the dates above record one real allowlisted scanner and complete text/media round trips, not a promise that WeChat's authorization service is unchanged.
+Read [INSTALL_AI.md](../../INSTALL_AI.md) and the [setup-path rules](README.md) before using this path. WeChat private-chat support is a supported path. One bot authorization can have only one polling process, but the config allowlist is an array and may authorize more than one stable private-chat identity.
 
 ## Preconditions
 
-- Official Kimi Code is authenticated and has completed a real prompt.
-- The scanning human account may be an ordinary WeChat account, but its resulting Clawbot authorization is available for exclusive polling by kimi-bridge.
-- OpenClaw and every other iLink consumer for that bot are stopped before kimi-bridge starts.
-- The operator can open a short-lived authorization URL in WeChat and privately edit a mode-`600` config file.
-- Distinct kimi-bridge instances use distinct bot authorizations, config files, `state_path`, workspaces, and `wechat.storage_path` values.
+- Official Kimi Code is authenticated and has passed `kimi --version`, `kimi --help`, `kimi doctor config`, and `kimi -p "Reply with OK only."`.
+- `kimi-bridge` is installed and compatibility has been classified.
+- The scanning human account can approve a WeChat iLink bot authorization.
+- No other iLink consumer polls the resulting bot authorization while kimi-bridge runs.
+- Distinct bridge instances use distinct bot authorizations, configs, `state_path`, workspaces, and `wechat.storage_path` directories.
+- The operator can edit local config privately and apply current-user ACL protection on Windows or POSIX `700`/`600` permissions on Linux/macOS.
 
-## Verified path
+## Supported QR path
 
-1. Create a protected config with `platform = "wechat"`, a private `wechat.storage_path`, and `wechat.allowed_users = []`. The empty list is valid only for QR bootstrap.
-2. Run `kimi-bridge wechat login`. Open the printed URL in WeChat, approve the authorization, and enter a verification number only if WeChat explicitly requests one.
-3. Copy the returned stable scanner identity into `wechat.allowed_users` through the private local editor. Do not use a display name, bot identity, or guessed account identifier.
-4. Run `kimi-bridge wechat status`. Confirm local authorization is present and the storage is usable; remember that this command performs no network check.
-5. Run `kimi-bridge doctor` and resolve every error. It must report the required encrypted-media dependency, private storage, local authorization, allowlist, state, workspace, and Kimi checks without starting runtime.
-6. Confirm that no other process polls this bot, then start `kimi-bridge` in the foreground.
-7. From the allowlisted scanner, send `/status` and one normal prompt. Confirm forced `auto`, no separate thinking rendering, and one complete immutable reply. Model thinking effort remains independent of rendering.
-8. Validate the media types the installation needs. The project-live-validated surface is inbound image, voice, generic file, and video plus outbound image, video, and generic file. Outbound audio is a generic downloadable file, not a native voice message.
-9. Stop with Ctrl-C. Confirm the typing indicator clears and the process exits cleanly.
+1. Create protected configuration with `platform = "wechat"`, an isolated storage path, and an empty allowlist only during bootstrap:
 
-Native images and videos become model media only when the selected Kimi model advertises `image_in` or `video_in`; otherwise the bridge saves them in the workspace inbox and supplies the path. Native voice transcription is best effort and may contain recognition errors. A `typing...` indication can refresh intermittently while a turn or tool call is active, but it must clear after the final answer or shutdown.
+```toml
+platform = "wechat"
+default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
 
-The live verification used one allowlisted scanner. The bridge keeps cursor context and Kimi bindings per sender, but only one Kimi response stream may be active: an overlapping model prompt from another sender is rejected with retry guidance instead of cancelling the active response. Do not report two-sender interleaving as live-validated. Delivery is at-least-once across the narrow crash window between Kimi acceptance and local completion recording.
+[wechat]
+storage_path = "~/.kimi-bridge/wechat"
+allowed_users = []
+```
+
+WeChat credentials never belong in TOML.
+
+2. Run:
+
+```bash
+kimi-bridge wechat login
+```
+
+The command requires `platform = "wechat"` and starts neither Kimi Code nor message polling. It prints a short-lived authorization URL.
+
+3. Have the user open the URL in WeChat, scan and approve the iLink bot authorization, and enter a verification code only when the flow explicitly asks for one.
+
+4. On success, the command stores the managed credential at `~/.kimi-bridge/wechat/credentials.json` or the configured `storage_path` and prints a stable scanner identity. Copy that identity privately into `wechat.allowed_users`. Do not use a nickname, guessed account identifier, QQ-style identifier, or bot identity. Additional allowlist entries must be real stable identities, not fabricated placeholders.
+
+5. Run:
+
+```bash
+kimi-bridge wechat status
+kimi-bridge doctor
+```
+
+`status` inspects local credential metadata and storage only. It performs no network check. `doctor` checks local config, storage, allowlist, paths, Kimi Code, and the encrypted-media dependency without starting runtime.
+
+6. Confirm that no other process polls the bot authorization, then start `kimi-bridge` in the foreground.
+
+7. From an allowlisted private chat, send `/status` and a normal prompt. Confirm forced `auto`, no separate thinking rendering, and a complete immutable reply.
+
+8. Test the media types required by the installation. Supported input is image, voice, generic file, and video; supported native output is image, video, and file. Outbound audio is a generic downloadable file, not a native voice message.
+
+9. Stop cleanly before creating a persistent service.
+
+Native images and videos become Kimi media only when the selected model advertises `image_in` or `video_in`; otherwise the bridge saves them under the workspace inbox and supplies the path. Native voice transcription is best effort. The adapter has no group chat or proactive delivery path.
 
 ## Replacement, expiry, and cleanup
 
-- `kimi-bridge wechat login --replace` preserves the existing local credential until Tencent confirms a replacement. If WeChat redirects to the already-bound bot, the command retains the existing credential rather than overwriting it.
-- If runtime reports expired authorization, stop it and use `login --replace`; do not keep restarting a stale credential or manufacture an expiry condition.
-- `kimi-bridge wechat logout` removes only the local adapter-owned credential and receive-state files. It does not remotely delete the WeChat bot binding.
+- `kimi-bridge wechat login --replace` preserves the old local credential until a new authorization is confirmed. If WeChat reports the already-bound bot, the previous credential may be retained.
+- If runtime reports expired authorization, stop it and use `login --replace`; do not repeatedly restart the stale credential.
+- `kimi-bridge wechat status` remains local-only and cannot prove that the remote authorization is active.
+- `kimi-bridge wechat logout` removes only adapter-owned `credentials.json` and receive-state files. It does not remotely delete the bot binding.
+- There is no TOML credential fallback for WeChat.
 
 ## Checkpoints and divergence
 
-- If opening the authorization URL jumps directly to an existing Clawbot, check whether the CLI reports that the prior local authorization was retained. Do not call that a successful rotation.
-- If the bot says it cannot connect while the foreground bridge should be active, verify that the selected process is still running and inspect its first exception before sending more test messages.
-- If an attachment crashes or terminates the poller, preserve the sanitized exception and media type, stop promotion, and add a deterministic protocol regression before repair.
-- If old replies replay after an ordinary clean restart, preserve the cursor/state evidence without exposing tokens and diagnose the durable receive boundary.
-- If `typing...` remains after a final reply or shutdown, treat it as a lifecycle defect; intermittent refresh while a turn remains active is expected.
-- Do not add callback URLs, webhooks, group settings, or proactive-delivery configuration. This adapter uses private HTTP polling and inbound context tokens.
+- Authorization URL opens an existing binding: inspect the CLI result and confirm whether the existing local credential was retained; do not describe that as a rotation unless a new credential was confirmed.
+- Local storage error: inspect path safety, current-user ACL on Windows, or exact `700`/`600` POSIX permissions before replacing anything.
+- Foreground bridge cannot receive messages: confirm the process is still running, inspect its first secret-safe exception, and verify no competing poller exists.
+- Non-allowlisted sender: obtain the stable platform identity from observed local metadata before adding it; never use a display name.
+- Media failure: preserve the sanitized media type and exception, stop repeated delivery, and diagnose the protocol/storage boundary.
+- Old messages replay after a clean restart: preserve redacted cursor/state evidence and diagnose the durable receive boundary.
+- Do not add callback URLs, webhooks, group settings, or proactive-delivery configuration; this adapter uses private polling and inbound context tokens.
 
-After a complete live round trip, update `Last live verification` and `reverify_after` in the same change only when the observed path still matches this document. With the user's permission, report useful divergences under the [setup-evidence policy](README.md#contributing-setup-evidence).
+A local `status`, successful QR flow, or `doctor` result is not completion. Require the real allowlisted foreground message and complete reply before persistence setup.

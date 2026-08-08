@@ -532,6 +532,43 @@ async def test_outbound_native_upload_error_is_not_silently_remapped() -> None:
         )
 
 
+def test_sdk_transport_builder_uses_configured_api_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lark = pytest.importorskip("lark_oapi")
+    calls: list[tuple[str, str]] = []
+
+    class Builder:
+        def app_id(self, value: str) -> Builder:
+            calls.append(("app_id", value))
+            return self
+
+        def app_secret(self, value: str) -> Builder:
+            calls.append(("app_secret", value))
+            return self
+
+        def domain(self, value: str) -> Builder:
+            calls.append(("domain", value))
+            return self
+
+        def build(self) -> object:
+            return object()
+
+    builder = Builder()
+    monkeypatch.setattr(lark.Client, "builder", staticmethod(lambda: builder))
+
+    transport = _LarkTransport(
+        "cli_test", "secret", api_domain="https://open.larksuite.com"
+    )
+
+    assert transport._get_client() is not None
+    assert calls == [
+        ("app_id", "cli_test"),
+        ("app_secret", "secret"),
+        ("domain", "https://open.larksuite.com"),
+    ]
+
+
 def test_sdk_websocket_owns_a_worker_event_loop(monkeypatch: Any) -> None:
     lark = pytest.importorskip("lark_oapi")
     from lark_oapi.ws import client as ws_module
@@ -581,6 +618,38 @@ def test_sdk_websocket_owns_a_worker_event_loop(monkeypatch: Any) -> None:
     assert observed[0].is_closed()
     assert ws_module.loop is original_loop
     assert disconnected.is_set()
+
+
+def test_sdk_websocket_uses_configured_api_domain(monkeypatch: Any) -> None:
+    lark = pytest.importorskip("lark_oapi")
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        def start(self) -> None:
+            return None
+
+        async def _disconnect(self) -> None:
+            return None
+
+    monkeypatch.setattr(lark.ws, "Client", FakeClient)
+    runner = _LarkWebSocketRunner(
+        "cli_test",
+        "secret",
+        lambda _event: None,
+        lambda _event: None,
+        api_domain="https://open.larksuite.com",
+    )
+
+    thread = threading.Thread(target=runner.run)
+    thread.start()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert captured["kwargs"]["domain"] == "https://open.larksuite.com"
 
 
 async def test_sdk_transport_builds_message_card_and_resource_requests() -> None:

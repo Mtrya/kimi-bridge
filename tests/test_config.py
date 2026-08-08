@@ -8,6 +8,8 @@ import pytest
 from kimi_bridge.config import (
     CONFIG_PATH_ENV,
     DEFAULT_CONFIG_PATH,
+    DEFAULT_FEISHU_STORAGE_PATH,
+    DEFAULT_QQ_STORAGE_PATH,
     Config,
     FeishuConfig,
     KimiServerConfig,
@@ -83,6 +85,53 @@ def test_loads_full_runtime_schema_without_exposing_secret(tmp_path: Path) -> No
         allowed_users=frozenset({"ou_one", "user_two"}),
     )
     assert "secret-value" not in repr(config)
+
+
+def test_default_managed_storage_paths_are_platform_specific() -> None:
+    config = Config()
+
+    assert config.feishu.storage_path == DEFAULT_FEISHU_STORAGE_PATH
+    assert config.qq.storage_path == DEFAULT_QQ_STORAGE_PATH
+
+
+def test_loads_feishu_and_qq_storage_paths_and_resolves_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / "config.toml"
+    qq_path = tmp_path / "qq"
+    path.write_text(
+        "\n".join(
+            [
+                'platform = "qq"',
+                "[feishu]",
+                'storage_path = "~/feishu"',
+                "[qq]",
+                'storage_path = "' + str(qq_path) + '"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.feishu.storage_path == (tmp_path / "feishu").resolve()
+    assert config.qq.storage_path == qq_path.resolve()
+
+
+def test_selected_platform_allows_empty_toml_credentials_for_managed_storage(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'platform = "feishu"\n[feishu]\nallowed_users = ["ou_one"]\n',
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.feishu.app_id == ""
+    assert config.feishu.app_secret == ""
 
 
 def test_loads_telegram_and_ignores_partial_unselected_feishu(

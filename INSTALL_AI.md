@@ -1,53 +1,44 @@
-# kimi-bridge setup agent guide
+# kimi-bridge setup-agent guide
 
-This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a user-facing tutorial. Humans installing manually should read [INSTALL.en_US.md](INSTALL.en_US.md) and [Configuration](docs/CONFIGURATION.md).
+This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a replacement for the human [installation guide](INSTALL.en_US.md), [configuration reference](docs/CONFIGURATION.md), or [QR onboarding](docs/QR_ONBOARDING.md).
 
 ## Operating contract
 
-Read this guide completely before changing the host or a platform app.
+Read this guide before changing the host or a platform application. Classify each action by ownership:
 
-Classify each setup action by ownership:
+- **Automatic:** inspect, research, install, write non-secret configuration, diagnose, validate, and repair without asking the user to do the work.
+- **Question then automatic:** ask only for a consequential preference or fact that cannot be discovered safely, then perform the resulting work.
+- **Approval then automatic:** explain a concrete mutation or risk, obtain approval, then perform the mutation.
+- **User-only:** guide the user through an action that requires their identity, private secret entry, platform-console authority, consent, or publication authority. Resume with agent-run verification.
+- **External wait:** record the pending action, how completion is recognized, and the verification that follows. Do not invent a workaround for platform review or publication.
+- **Unsupported:** state the exact incompatible boundary and stop that branch.
 
-- **Automatic:** inspect, research, install, write non-secret configuration, validate, diagnose, and repair without asking the user to do the work.
-- **Question then automatic:** ask only for a consequential preference or fact that cannot be discovered safely, then complete the resulting work yourself.
-- **Approval then automatic:** explain a concrete mutation or risk, obtain approval, then perform the action yourself.
-- **User-only:** guide the user through an action that technically requires their identity, private secret entry, or console authority. Research the current official interface first and give a short, mature procedure for the exact action. Resume with agent-run verification.
-- **External wait:** record what is pending, how completion is recognized, and the verification that will follow. Do not invent a workaround for review or publication delays.
-- **Unsupported:** state the exact incompatible boundary and stop that path.
+Detect before asking. Do not ask for information available from commands, local files that can be inspected safely, or an already authorized platform API. Never ask a user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked local input. Preserve existing configuration, state, workspaces, bot settings, webhooks, event consumers, and service files unless the user explicitly approves changing the named resource.
 
-Minimize user-only work. An official link is a source for you to research, not a substitute for instructions. Never give the user a link and ask them to configure a platform unaided.
+Do not report success after `doctor`. Setup is complete only after an allowlisted inbound message and a complete reply pass through the selected platform in the foreground. Keep implementation internals, test history, and maintenance procedures out of the user conversation unless they explain a visible limitation.
 
-Additional rules:
-
-- Detect before asking. Do not ask for information available from commands, files you may safely inspect, or platform APIs.
-- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input.
-- Preserve existing installations, configuration, state, workspaces, bot settings, webhooks, and event consumers unless the user explicitly approves changing them.
-- Do not report success after `doctor`. Setup is complete only after a real allowlisted inbound message and a real completed reply on the selected platform.
-- Before researching platform setup from scratch, inspect the [verified setup paths](docs/setup-paths/README.md). Use one only when its preconditions match and its `reverify_after` date has not passed. A stale path is evidence, not instructions: research current official sources before asking the user to perform platform-side actions.
-- If console labels or platform requirements have changed, research current official sources and adapt the instructions. Do not guess.
-- Keep implementation internals, release procedures, test history, and this guide's control model out of the user conversation unless they explain a user-visible limitation.
-- If user actions are inevitable, give them actionable guides.
+If user action is unavoidable, give a short actionable procedure, not just a link. Research current official platform documentation and console labels before instructing the user. The paths in `docs/setup-paths/` are operational evidence; use them only when their preconditions and freshness metadata match current behavior.
 
 ## Completion outcomes
 
 End with one of these outcomes:
 
-- **Done:** Kimi Code completed a real prompt, the platform delivered an allowlisted message, and kimi-bridge returned a complete reply.
-- **Paused:** a named user-only action, approval, publication review, or external wait is outstanding. State exactly how to resume and what you will verify.
-- **Unsupported:** the selected environment or platform cannot satisfy a documented requirement. You can still use your own knowledge to assist the user as per their requests.
-- **Aborted:** setup stopped at the user's request. Remove only artifacts created during this setup. Never remove pre-existing configuration, state, workspaces, sessions, bot applications, webhooks, or service files without separate explicit approval for the named targets.
+- **Done:** Kimi Code completed a real prompt, the selected platform delivered an allowlisted message, and kimi-bridge returned a complete reply.
+- **Paused:** a named user-only action, platform publication/review, approval, or external wait is outstanding. State exactly how to resume and what you will verify.
+- **Unsupported:** the selected environment or platform cannot satisfy a documented requirement.
+- **Aborted:** setup stopped at the user's request. Remove only artifacts created during this setup. Never delete pre-existing config, state, workspaces, sessions, bot applications, bindings, or service files without separate approval for the exact targets.
 
 ## 1. Host and Kimi Code preflight
 
-### 1.1 Inspect the host
+### 1.1 Inspect without mutating
 
-Automatically determine:
+Determine automatically:
 
 - operating system and shell;
 - whether `uv`, `kimi`, and `kimi-bridge` are installed;
-- how each command resolves on `PATH`;
-- whether an existing config, state file, workspace, or service is present;
-- whether the working paths are new or contain pre-existing data.
+- how each command resolves on PATH;
+- whether config, state, workspace, platform storage, or a service already exists;
+- whether the target paths contain pre-existing data.
 
 Do not install, upgrade, replace, or delete anything during inspection.
 
@@ -59,11 +50,9 @@ Run:
 uv --version
 ```
 
-The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step involves no user action beyond approval.
+If `uv` is missing, research the current official installation method for the host and guide only the identity- or privilege-bound step. Perform and verify the remaining setup. Installing without `uv` is possible but is not the project's tested path; if the user chooses another method, state that boundary and verify the resulting executable and dependencies.
 
-Installing kimi-bridge without `uv` is feasible but is not tested by this project. If the user chooses another Python installation method, assist using your own packaging knowledge, state that the route is untested, and validate the resulting `kimi-bridge` executable and dependencies.
-
-### 1.3 Require official Kimi Code
+### 1.3 Identify official Kimi Code
 
 Run:
 
@@ -73,9 +62,7 @@ kimi --version
 kimi --help
 ```
 
-kimi-bridge requires official Kimi Code. Its top-level help includes `web`, `doctor`, and `migrate`. The incompatible legacy Python `kimi-cli` uses a Click-style command surface and commonly prints `kimi, version ...`.
-
-If Kimi Code is absent or the legacy product shadows it, research the current official [Kimi Code installation guide](https://moonshotai.github.io/kimi-code/en/guides/getting-started) and help the user install or expose the correct executable. Preserve legacy sessions; if migration is wanted, use Kimi Code's supported migration path.
+Official Kimi Code's help includes `web`, `doctor`, and `migrate`. The incompatible legacy Python `kimi-cli` has a different command surface. If the legacy product shadows the expected executable, preserve its sessions and help the user expose or install official Kimi Code rather than overwriting it.
 
 ### 1.4 Prove Kimi Code readiness
 
@@ -83,326 +70,259 @@ Run:
 
 ```bash
 kimi doctor config
+kimi -p "Reply with OK only."
 ```
 
-Then make Kimi Code complete a small, non-destructive prompt through its normal user-facing path. Configuration validation alone is insufficient: authentication, provider availability, and the default model must all work.
+Do not proceed to platform setup until the real prompt completes. Authentication, provider selection, or default-model configuration may be user-only; guide that step precisely and resume with both checks.
 
-Authentication or provider selection may require the user's login or secret entry. Research the current official [Kimi Code configuration documentation](https://moonshotai.github.io/kimi-code/en/configuration/config-files), guide that user-only action precisely, and resume with both checks.
+## 2. Install and classify the bridge
 
-Do not proceed to platform setup until a real Kimi Code response succeeds.
-
-## 2. Install and classify compatibility
-
-### 2.1 Install or upgrade with approval
-
-If kimi-bridge is absent, propose:
+If absent, propose the installation and obtain approval for the package mutation:
 
 ```bash
 uv tool install kimi-bridge
 ```
 
-If it is already installed, inspect its version and configuration before proposing an upgrade. Upgrading a working installation is a mutation and requires user approval.
-
-After installation:
+After installation or an approved upgrade, verify:
 
 ```bash
 command -v kimi-bridge
 kimi-bridge --version
 kimi-bridge --help
+kimi-bridge compat
 ```
 
-### 2.2 Run compatibility classification
+Treat `compat` as a Kimi Code version classification, not as platform permission validation. A current supported verdict may continue. An unlisted version is a risk boundary that should be explained before a live attempt.
+
+## 3. Select one platform
+
+Ask which platform only after host and Kimi Code readiness is established. One process runs exactly one adapter.
+
+- **Feishu:** application-registration QR or complete TOML app credentials. It needs bot capability, platform permissions, long-connection events, app publication, a bridge-side user allowlist, and FFmpeg for inbound voice.
+- **QQ:** official bot credential-bind QR or complete TOML AppID/AppSecret. It is C2C private chat, uses the existing REST/token/WebSocket transport, forces `auto`, and has no approvals, questions, or separate thinking stream.
+- **WeChat:** supported iLink bot QR authorization, with the credential outside TOML. It handles private chats, forces `auto`, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file. One bot authorization has one poller.
+- **Telegram:** experimental private-chat adapter with its own bot-token flow; startup takes over long polling and discards pending updates.
+
+Prefer a dedicated platform bot when another service, webhook, gateway connection, or poller would be displaced. For WeChat, the scanning human account need not be dedicated, but the resulting bot authorization must be polled exclusively by one process.
+
+## 4. Prepare private local configuration
+
+The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `KIMI_BRIDGE_CONFIG` select another file. Before writing:
+
+- inspect the existing file without displaying secrets;
+- preserve unrelated tables and settings;
+- preserve existing state, workspace, and platform storage;
+- use the selected platform's `storage_path`, `state_path`, and workspace consistently;
+- do not invent a real allowlist identity.
+
+On Linux/macOS:
+
+```bash
+install -d -m 700 ~/.kimi-bridge
+chmod 600 ~/.kimi-bridge/config.toml
+chmod 700 ~/.kimi-bridge/feishu ~/.kimi-bridge/qq ~/.kimi-bridge/wechat 2>/dev/null || true
+```
+
+Create only the storage directory needed by the selected flow; the adapter creates it during a successful save. On Windows, do not issue `chmod`. In PowerShell, create the directory and file and grant the current user explicit ACL:
+
+```powershell
+$root = Join-Path $HOME ".kimi-bridge"
+$config = Join-Path $root "config.toml"
+New-Item -ItemType Directory -Force $root | Out-Null
+New-Item -ItemType File -Force $config | Out-Null
+$principal = "${env:USERDOMAIN}\${env:USERNAME}"
+icacls $root /inheritance:r /grant:r "${principal}:(OI)(CI)F"
+icacls $config /inheritance:r /grant:r "${principal}:F"
+```
+
+The default managed files are:
+
+```text
+~/.kimi-bridge/feishu/credentials.json
+~/.kimi-bridge/qq/credentials.json
+~/.kimi-bridge/wechat/credentials.json
+```
+
+Each platform table accepts `storage_path`. Feishu and QQ managed credentials take precedence over TOML fallback. A complete pair is required for fallback; if a managed file exists but is malformed or unsafe, startup fails and does not silently use TOML. WeChat QR credentials are never placed in TOML.
+
+Keep secrets out of command arguments, environment variables, chat, logs, reports, and version control. Have the user enter only identity-bound secrets through a private local mechanism.
+
+## 5. Shared QR control protocol
+
+For the selected platform, run only the matching command:
+
+```bash
+kimi-bridge feishu login|status|logout
+kimi-bridge qq login|status|logout
+kimi-bridge wechat login|status|logout
+```
+
+`login --replace` is available for all three. The control commands load config and require a matching `platform`. They do not start Kimi Code or message polling. `status` is local-only and does not validate the network. `logout` removes only adapter-owned managed files; it does not remotely delete a bot binding. Feishu/QQ TOML fallback values remain after logout.
+
+Do not call a QR flow complete until its platform-specific manual follow-up is done and the real foreground round trip passes.
+
+## 6. Feishu bootstrap
+
+### 6.1 Recommended QR branch: application registration
+
+Use this branch first when the user can complete the Feishu/Lark identity-bound approval in a browser or mobile device. During bootstrap, keep the allowlist empty:
+
+```toml
+platform = "feishu"
+
+[feishu]
+storage_path = "~/.kimi-bridge/feishu"
+allowed_users = []
+```
 
 Run:
 
 ```bash
-kimi-bridge compat
+kimi-bridge feishu login
 ```
 
-Handle every verdict:
+Have the user open the URL printed by the command in a browser, then follow the page instructions to scan with or approve in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records Feishu or Lark tenant brand and API domain. The QR flow does not automatically enable the bot, grant scopes, subscribe to events, publish an app, or add an allowlist user.
 
-- **Supported by the current bridge:** continue.
-- **Supported only by other bridge releases:** explain the named release choices. Prefer upgrading Kimi Code or kimi-bridge toward the current supported pair; obtain approval before changing either.
-- **Untested and older than every tested version:** recommend upgrading Kimi Code. Proceed only if the user explicitly accepts an unsupported-risk live attempt.
-- **Untested within the tested range:** explain that no bridge release recorded this exact version despite testing versions on both sides. Recommend a tested Kimi Code version; proceed only with explicit risk acceptance.
-- **Untested and newer than every tested version:** explain that the bridge will attempt live protocol validation but compatibility is not established. Proceed only with explicit risk acceptance.
+After the platform-side identity is known, put the real `open_id` in `feishu.allowed_users` before foreground startup. The following is a location marker, not a value to copy literally:
 
-The packaged compatibility map is the source of truth. Do not maintain or consult a second supported-version list.
+```toml
+[feishu]
+allowed_users = ["<real open_id from this app and tenant>"]
+```
 
-## 3. Platform preflight
+### 6.2 Manual fallback branch
 
-Ask which platform the user wants only after host readiness is established. One process runs one adapter.
+If QR registration is unavailable or the user prefers the platform console, have the user create or inspect an official custom application and enter this pair through a private local editor:
 
-Explain the relevant choices:
+```toml
+platform = "feishu"
 
-- **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, file transfer, and inbound voice transcription. Requires FFmpeg on `PATH` plus a published custom app, permissions, event subscriptions, and long-connection delivery.
-- **QQ:** supported and live-validated for C2C messaging. It has no interactive approvals, questions, or separate thinking stream, so sessions are forced into `auto` permission mode. Obtain explicit acceptance of this security posture.
-- **WeChat:** supported and live-validated for private chats. It uses QR authorization and immutable replies, forces `auto`, and has no approvals, questions, or separate thinking stream. It supports inbound image/voice/file/video and outbound image/video/file; outbound audio is a generic file. Obtain explicit acceptance of the autonomous security posture and single-poller ownership.
-- **Telegram:** experimental and not project-live-validated. It supports private chats only. Startup uses long polling and takes over any existing webhook.
+[feishu]
+app_id = "cli_replace_privately"
+app_secret = "replace_privately"
+storage_path = "~/.kimi-bridge/feishu"
+allowed_users = ["ou_replace_privately"]
+```
 
-Before configuring the selected platform, establish:
+The pair must be complete. A complete TOML pair is used only when the managed credential file is absent. If a managed file exists but is invalid, do not use this fallback silently; repair it or run `kimi-bridge feishu login --replace`.
 
-1. Is the user familiar with creating and operating bots on this platform?
-2. Do they already have a bot application?
-3. If so, is it dedicated to kimi-bridge, and may its configuration or event consumer be changed?
-4. If not, are they willing and authorized to create and publish one?
+### 6.3 Platform-side follow-up
 
-Do not encourage reuse merely because a bot exists. Prefer a dedicated bot when kimi-bridge would displace another webhook, long poller, gateway connection, or event consumer. For WeChat, the scanning human account need not be dedicated, but the resulting iLink bot authorization must be polled exclusively by one process.
+Research the current official console and guide the user through the identity-bound steps. Confirm:
 
-If `lark-cli` is already installed, it may be used during Feishu setup as described below. If it is absent, do not mention, recommend, or install it.
+- bot capability is enabled;
+- permissions cover the message prompts and sends, resource upload/download, and voice recognition required by the selected workflow; current code paths include message permissions, resource access, and `speech_to_text:speech`, but do not claim a QR scan granted a particular scope;
+- `im.message.receive_v1` and `card.action.trigger` are subscribed with long-connection delivery;
+- the application version is published and available to the intended user/tenant;
+- the intended sender's `open_id` is discovered in the same app/tenant context and entered manually in `feishu.allowed_users`.
 
-## 4. Prepare private local configuration
+If the user scans but has not completed these console steps, pause rather than report readiness. Require `ffmpeg` on PATH for Feishu voice messages.
 
-The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `KIMI_BRIDGE_CONFIG` select another path. Use [Configuration](docs/CONFIGURATION.md) as the schema authority.
+### 6.4 Feishu validation
 
-Before writing:
-
-- inspect whether the target file already exists;
-- inspect, without displaying secrets, which platform and paths it defines;
-- preserve unrelated adapter tables and existing custom settings;
-- determine whether `default_workspace` and `state_path` already contain data.
-
-Create the parent directory with private permissions when needed. Write the non-secret structure and placeholders yourself. Have the user enter only credentials that cannot be transferred through an existing secure local mechanism.
-
-On POSIX systems:
+Run:
 
 ```bash
-chmod 600 ~/.kimi-bridge/config.toml
+kimi-bridge feishu status
+kimi-bridge doctor
+kimi-bridge
 ```
 
-Do not start with a fabricated allowlist identity and call it configured. Use the selected platform's identity-discovery procedure below, then write the real identity. WeChat is the explicit bootstrap exception: its config may use an empty allowlist only while `wechat login` obtains the stable scanner identity, and runtime must not start until the real value is written.
+Then have the real allowlisted user send `/status`, a normal prompt, and any required voice/file test. Exercise an approval or question if the workflow needs one. Stop cleanly before persistence setup.
 
-## 5. Feishu bootstrap
+## 7. QQ bootstrap
 
-Official starting points:
+### 7.1 Recommended QR branch: bot credential bootstrap
 
-- [Feishu custom app development](https://open.feishu.cn/document/develop-process/self-built-application-development-process)
-- [Long-connection event setup](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case)
-- [Card callback handling](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/handle-card-callbacks)
+Configure an empty allowlist for the bootstrap only:
 
-Research these sources and the current console before guiding the user. Translate console labels when useful.
+```toml
+platform = "qq"
 
-### 5.1 Require FFmpeg
+[qq]
+storage_path = "~/.kimi-bridge/qq"
+allowed_users = []
+```
 
-Feishu delivers voice-message resources as Opus, while its native file-recognition API accepts 16 kHz mono PCM. kimi-bridge invokes FFmpeg directly, without a shell, to perform this conversion before calling Feishu speech recognition. FFmpeg is a required runtime prerequisite whenever the Feishu adapter is selected, including when `[voice.asr]` is configured: the external endpoint is tried first, but Feishu-native recognition remains the supported fallback when that endpoint returns no transcript.
-
-Check the host without changing it:
+Run:
 
 ```bash
-command -v ffmpeg
-ffmpeg -version
+kimi-bridge qq login
 ```
 
-If either check fails, research the current official installation method for the host from [FFmpeg downloads](https://ffmpeg.org/download.html), explain the package and system changes, and obtain approval before installing it. Re-run both commands afterward. Do not report the Feishu runtime ready while FFmpeg is missing or unusable.
+Have the user open the printed URL, scan it, and approve the official bot bind. The completed result returns `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary AES key, task ID/QR URL, and encrypted secret blob are not persisted. Runtime still uses the existing REST/token/WebSocket transport.
 
-### 5.2 Inspect or create the app
+If the flow prints `user_openid`, write that exact app-scoped identity manually to `qq.allowed_users`. It is not a QQ number or nickname. QR success does not automatically establish sandbox tester access, production review, authorization for the required event Intents, or end-to-end delivery. After the flow succeeds, replace the empty array with the real value; the following is a location marker, not a value to copy literally:
 
-If an app already exists, automatically establish through available CLI/API inspection or user-guided console inspection:
+```toml
+[qq]
+allowed_users = ["<real user_openid returned by this flow>"]
+```
 
-- tenant and app identity;
-- whether the bot capability is enabled;
-- current published version;
-- current scopes;
-- subscribed events and callback delivery mode;
-- intended availability;
-- whether another service consumes its events.
+### 7.2 Manual fallback branch
 
-Ask for approval before changing an existing app.
+If the user already has QQ bot credentials or QR bootstrap is unavailable, use:
 
-If a new app is needed, app ownership, login, consent, and any enterprise authorization are user-only. Give a researched click-by-click guide for creating a custom app and enabling its bot capability. Perform all API- or CLI-capable follow-up yourself.
+```toml
+platform = "qq"
 
-### 5.3 Configure required permissions
+[qq]
+app_id = "replace_privately"
+app_secret = "replace_privately"
+storage_path = "~/.kimi-bridge/qq"
+allowed_users = ["user_openid_replace_privately"]
+```
 
-Ensure the app has these tenant permissions:
+AppID and AppSecret must be entered as a complete pair. Discover the intended app-scoped `user_openid` through a bounded gateway event or the adapter's local rejection warning, then replace any temporary non-matching value immediately. Never substitute a QQ number or display name.
 
-- `im:message.p2p_msg:readonly`
-- `im:message:readonly`
-- `im:message:send_as_bot`
-- `im:message:update`
-- `im:resource`, or current narrower permissions that together cover the bridge's uploads and downloads
-- `speech_to_text:speech`
+### 7.3 QQ validation
 
-Explain why each missing permission is needed. Do not ask for broad unrelated scopes.
+Run `kimi-bridge qq status`, `kimi-bridge doctor`, then start `kimi-bridge` in the foreground. Validate a real allowlisted C2C `/status`, a complete normal reply, and only the media types the installation needs. QQ is forced to `auto` and cannot present approvals or questions. Ensure no second gateway consumer uses the bot.
 
-### 5.4 Configure delivery
+## 8. WeChat bootstrap
 
-Configure WebSocket long-connection delivery, not a webhook. Subscribe to:
+WeChat is a supported QR-authorized private-chat adapter. Its credential is managed outside TOML.
 
-- `im.message.receive_v1`
-- `card.action.trigger`
+### 8.1 Ownership and preflight
 
-Check that the app is available to the intended user. Scope, event, or callback changes usually require a new app version and enterprise approval. Guide the user through the exact publication action, then pause for review when necessary.
+Determine whether another process polls the intended bot authorization. One bot authorization can have one poller only. A scanning human account need not be dedicated, but stopping or displacing another iLink consumer requires explicit approval. Use distinct config, `state_path`, workspace, and `wechat.storage_path` for distinct bridge instances.
 
-### 5.5 Use lark-cli only when already present
+### 8.2 QR authorization and allowlisting
 
-When `command -v lark-cli` succeeds, use it where helpful to inspect authentication, app metadata, required schemas, published scopes, event subscriptions, and bounded event delivery.
+Create:
 
-Treat `lark-cli config init --new` as a mutating app/profile operation. Inspect its current help and profiles, explain the effect, and obtain approval before running it. Prefer a named profile when that preserves an existing setup.
+```toml
+platform = "wechat"
+state_path = "~/.kimi-bridge/state.json"
 
-lark-cli can create or inspect an app and diagnose scopes or events, but it does not prove that all console permissions are granted or that an app version is published. kimi-bridge also does not read its keychain directly. Never describe lark-cli as a required dependency or a complete bootstrap.
+[wechat]
+storage_path = "~/.kimi-bridge/wechat"
+allowed_users = []
+```
 
-### 5.6 Obtain credentials and identity
-
-App Secret retrieval or reset is user-only when the console requires the user's identity. Have the user place it directly into the protected configuration through a private local path. Do not display it.
-
-Prefer the intended user's `open_id` from the same app and tenant. Discover it through an authenticated platform API, an already available lark-cli path, or a bounded inbound event listener. If console-side configuration makes those impossible before bridge startup, use a temporary non-matching allowlist, start the bridge in the foreground, have the intended user send one direct message, and take the logged `open_id` from the local process. Replace the temporary value immediately.
-
-### 5.7 Validate Feishu
-
-Run local validation, then perform a live round trip:
-
-1. `kimi-bridge doctor`
-2. start `kimi-bridge` in the foreground;
-3. confirm the long connection becomes ready;
-4. have the allowlisted user send `/status`;
-5. confirm the expected reply;
-6. send a normal prompt and confirm the streamed answer completes;
-7. exercise one approval or question interaction;
-8. send a voice message with a distinctive phrase and confirm the agent receives the correct transcript;
-9. if file support is needed, test one inbound and one outbound file;
-10. stop cleanly.
-
-Do not report Feishu ready if only a CLI event consumer or `doctor` passed.
-
-## 6. QQ bootstrap
-
-Use the [verified QQ C2C WebSocket path](docs/setup-paths/qq.md) when its preconditions and freshness metadata permit it.
-
-Official starting points:
-
-- [QQ bot getting started](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)
-- [Access tokens](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html)
-- [Events and intents](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)
-- [Gateway discovery](https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/url_get.html)
-- [Message model](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/overview.html)
-
-If the verified path is stale or a checkpoint diverges, research the current console and official documentation before instructing the user; QQ's console, review rules, hosts, and availability can change.
-
-### 6.1 Inspect or create the bot
-
-Establish whether the user has a suitable bot, whether it is sandbox or production, who owns it, which testers can use it, and whether another gateway consumer is active.
-
-Creating the bot, accepting platform terms, selecting its owner, and submitting production review are user-only. Give a researched procedure for only those actions. Prefer a dedicated bot.
-
-### 6.2 Configure access
-
-Ensure:
-
-- AppID and AppSecret are available; do not use the deprecated Token credential;
-- the intended account is available as a sandbox tester when applicable.
-
-The adapter discovers the WebSocket gateway and identifies with the `GROUP_AND_C2C_EVENT` intent required for `C2C_MESSAGE_CREATE`. Do not ask the user to configure callbacks, event webhooks, or an IP whitelist for the verified WebSocket path. Investigate those controls only if QQ returns a specific error that requires one. A successful token request does not prove gateway authorization.
-
-### 6.3 Discover the user identity
-
-QQ authorization uses the app-specific C2C `user_openid`, not a QQ number or display name. Prefer discovery from a bounded gateway event. If the bridge must be used to receive it, configure a temporary non-matching allowlist, start in the foreground, have the intended tester send one C2C message, and copy the rejected sender's `user_openid` from the local warning. Replace the temporary value immediately.
-
-### 6.4 Validate QQ
-
-Validate each layer independently:
-
-1. `kimi-bridge doctor`
-2. access-token exchange;
-3. gateway URL discovery;
-4. WebSocket identify with the required intent;
-5. an inbound C2C message from the real allowlisted `user_openid`;
-6. a completed passive reply through the adapter;
-7. one normal Kimi prompt with visible streaming and clean finalization;
-8. any media types the installation actually needs;
-9. clean shutdown.
-
-Reconfirm that QQ runs in forced `auto` mode and cannot present approvals or questions. Respect the platform's passive-reply budget when designing repeated tests.
-
-Do not change a working API origin solely because current documentation names a newer host. Verify the exact endpoint behavior before proposing a code or configuration change.
-
-## 7. WeChat bootstrap
-
-Use the [verified WeChat private-chat path](docs/setup-paths/wechat.md) when its preconditions and freshness metadata permit it. The adapter contract is pinned to Tencent source tag `v2.4.6`; if the path is stale or live behavior diverges, verify the current upstream tag and observed service behavior before proceeding.
-
-### 7.1 Establish bot ownership
-
-Determine whether the scanning WeChat account already has a Clawbot binding and whether OpenClaw or another iLink consumer polls it. The human account need not be dedicated, but one bot authorization cannot have competing pollers. Reusing an active binding may interrupt the other consumer, so obtain explicit cutover approval before stopping or replacing it.
-
-Use isolated `wechat.storage_path`, `state_path`, and workspace values for each configuration. Never copy the QR credential into TOML, environment variables, command arguments, chat, or reports.
-
-### 7.2 Bootstrap local authorization and allowlisting
-
-Create the protected config with `platform = "wechat"`, an empty `wechat.allowed_users`, and a private `wechat.storage_path`. Then run:
+Run:
 
 ```bash
 kimi-bridge wechat login
 ```
 
-The command starts neither Kimi Code nor message polling. Have the user open the printed WeChat authorization URL, scan or approve it in WeChat, and enter a verification number only if the flow explicitly requests one. On success, copy the printed stable scanner identity privately into `wechat.allowed_users`; do not expose the full identity in chat or an issue.
+Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, copy the returned stable scanner identity privately into `wechat.allowed_users`; do not expose it, use a nickname, or put the credential in TOML, environment variables, command arguments, chat, or reports.
 
-Run `kimi-bridge wechat status` to inspect local storage and redacted authorization metadata without a network request. Then run `kimi-bridge doctor`. Resolve missing authorization, an empty allowlist, unsafe storage permissions, or a missing `cryptography` dependency before startup.
+Run `kimi-bridge wechat status` to inspect local storage and redacted metadata. It performs no network check. Run `kimi-bridge doctor`, resolve local errors, and only then start the bridge.
 
-### 7.3 Validate WeChat
+### 8.3 WeChat validation and limits
 
-Start one foreground bridge and validate serially with the allowlisted scanner:
+From the real allowlisted private chat, send `/status` and a normal prompt and confirm a complete immutable reply. Test inbound image, voice, file, and video and outbound image, video, and file when needed. WeChat forces `auto`, has no approvals, questions, separate thinking stream, groups, proactive delivery, or native outbound voice messages. Exactly one process may poll the authorization.
 
-1. send `/status` and confirm forced `auto` with separate thinking rendering off;
-2. send a short normal prompt and confirm one complete immutable answer;
-3. test multiline Chinese/English text, Markdown, a link, fenced code, and a reply crossing the 4,000-character boundary;
-4. steer a long-running turn with a second normal message, remembering that steering cannot interrupt an already-running tool call;
-5. restart after a committed cursor and confirm no ordinary replay or reordering;
-6. send inbound image, voice, generic file, and video messages and confirm the agent receives each semantic type;
-7. use `/send` for an image, video, and generic file, then send an audio file and confirm it remains a downloadable file rather than a native voice message;
-8. stop cleanly and confirm the best-effort typing indicator disappears.
+### 8.4 Replacement and logout
 
-Image/video routing depends on the selected model's `image_in`/`video_in` capabilities; capability absence must produce the documented workspace-inbox fallback rather than a false native-media claim. Native ASR quality is best-effort. A refreshed `typing...` indication may appear intermittently while a turn or tool call remains active, but it must clear after the final response or shutdown.
+When the authorization must be replaced or runtime reports expiry, stop the bridge and run:
 
-The verified path covers one allowlisted scanner. The router keeps one live Kimi response stream and rejects an overlapping model prompt from another sender with retry guidance instead of cancelling the active response. Do not report two-sender interleaving as live-validated unless it was actually exercised. WeChat delivery is at-least-once across the narrow crash window, not exactly-once, and outbound delivery is reactive to an inbound context token rather than proactive.
+```bash
+kimi-bridge wechat login --replace
+```
 
-### 7.4 Replace, recover, or remove authorization
-
-If runtime reports expired authorization, stop it and run `kimi-bridge wechat login --replace`. Replacement preserves the prior credential until a new authorization is confirmed; Tencent may instead reopen the already-bound bot and retain the existing credential. Do not manufacture token expiry, account bans, or an unsafe replacement to force this branch.
-
-Run `kimi-bridge wechat logout` only when the user explicitly wants the local adapter-owned credential and receive state removed. It does not remotely delete the WeChat bot binding.
-
-## 8. Telegram bootstrap
-
-Official starting points:
-
-- [Telegram bots](https://core.telegram.org/bots)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
-- [BotFather](https://core.telegram.org/bots/features#botfather)
-
-Telegram is experimental. State that before the user invests in setup.
-
-### 8.1 Inspect takeover risk
-
-Prefer a new dedicated bot. For an existing bot, use `getMe` and `getWebhookInfo` without exposing the token. Establish whether it has:
-
-- an active webhook;
-- queued updates;
-- another `getUpdates` consumer;
-- another production owner or integration.
-
-kimi-bridge deletes the existing webhook with `drop_pending_updates=true` and then starts long polling. Removing a webhook, discarding queued updates, or displacing another consumer requires explicit approval. If the bot cannot be dedicated to kimi-bridge, stop this path.
-
-### 8.2 Create and configure
-
-Bot creation and token issuance through BotFather are user-only. Research the current BotFather flow and guide the user through the minimum actions. Have the user put the token directly into the protected local config.
-
-Telegram authorization uses a positive numeric user ID. Prefer discovery from an authenticated Bot API update. If bridge startup is needed, use a temporary positive non-matching allowlist, have the intended user send a private message, read the rejected `user_id` locally, and replace the temporary value immediately.
-
-The current adapter accepts private user chats only. Groups, channels, topics, and messages from bots are unsupported.
-
-### 8.3 Validate Telegram
-
-After takeover approval where applicable:
-
-1. `kimi-bridge doctor`
-2. `getMe`;
-3. confirm the webhook state;
-4. start the bridge;
-5. receive a private message from the allowlisted numeric user ID;
-6. return a complete reply;
-7. test one approval interaction;
-8. stop cleanly.
-
-Report that this installation passed its own live check, while retaining the project's experimental label.
+The previous local credential remains until a new authorization is confirmed. If the platform returns the already-bound bot, the existing credential may be retained. `kimi-bridge wechat logout` removes only adapter-owned credential and receive-state files; it does not remotely delete the bot binding.
 
 ## 9. Doctor and startup diagnosis
 
@@ -412,61 +332,39 @@ Run:
 kimi-bridge doctor
 ```
 
-`doctor` validates local configuration, configuration-file permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, WeChat's required encrypted-media dependency and private local authorization storage, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, Telegram, or WeChat, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
+`doctor` checks the selected local configuration, permissions/path usability, selected adapter credential presence and storage, Kimi Code identity and `kimi doctor config`, Feishu FFmpeg when selected, and WeChat's encrypted-media dependency when selected. It never starts `kimi web`, connects to a chat platform, checks platform permissions, or sends a message.
 
-Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platform ready. Common branches:
+Resolve every `ERROR` and investigate every `WARN`. Common branches:
 
-- missing or invalid config: repair the protected file;
-- unknown keys: correct typos because unknown keys are ignored at runtime;
-- unsafe config permissions: restrict the file;
-- missing credentials or allowlist: return to the selected platform bootstrap;
-- missing or unusable FFmpeg with Feishu selected: install or repair FFmpeg, confirm it is on `PATH`, and re-run `doctor`;
-- missing WeChat authorization or encrypted-media dependency: return to WeChat bootstrap or repair the kimi-bridge installation without starting runtime;
-- unusable workspace or state path: distinguish setup-created paths from pre-existing user data before changing anything;
+- missing or malformed config: repair the protected file;
+- incomplete Feishu/QQ TOML pair: provide both values or use the matching QR login;
+- malformed existing managed file: repair it or run `login --replace`; do not expect TOML fallback;
+- missing/empty allowlist: obtain the real platform identity and add it manually;
+- missing Feishu FFmpeg: install it and confirm it is on PATH;
+- missing WeChat authorization or media dependency: return to the WeChat QR branch or repair the installation;
 - legacy or missing `kimi`: return to Kimi Code preflight;
-- Kimi configuration failure: run `kimi doctor config` directly and prove a real prompt;
-- untested Kimi Code: follow the compatibility decision above.
+- Kimi configuration failure: run `kimi doctor config` directly and prove the real prompt again.
 
-Start in the foreground before creating a persistent service. Route a clean `kimi-bridge: ...` startup error back to the relevant configuration or platform step. Preserve the traceback for unexpected implementation defects.
+Start in the foreground before creating a persistent service:
+
+```bash
+kimi-bridge
+```
+
+Route a clean startup error to the relevant configuration or platform step. Keep unexpected tracebacks for diagnosis without exposing credentials.
 
 ## 10. Persistence
 
-After the foreground live test passes, ask whether the user wants the bridge to run persistently.
+After the foreground live test passes, ask whether the user wants persistent operation. Use one independent process, config, state path, workspace, and platform storage per platform instance.
 
-If no, setup is done.
+- Linux: adapt the systemd user-unit template with absolute paths; systemd is Linux-only.
+- macOS: use a user-level `launchd` LaunchAgent with the actual executable and config paths.
+- Windows: use a current-user Task Scheduler task with the same account that owns the local credential files.
 
-If yes, inspect the host's native service mechanism. On Linux with systemd, adapt [the user-service template](docs/kimi-bridge.service) to the actual absolute executable and config paths. Creating, enabling, or starting a service is a mutation:
+Show service definitions without secrets, obtain approval before creating/enabling/starting them, inspect logs, and repeat a real platform round trip through the service. Keep host lifecycle decisions such as user lingering, login behavior, restart policy, and power behavior explicit.
 
-1. show the reviewed unit without secrets;
-2. obtain approval to create it;
-3. validate it before starting;
-4. obtain approval to enable/start it;
-5. inspect logs;
-6. repeat a real platform round trip against the service.
+## 11. Safe abort
 
-Treat `loginctl enable-linger` as a separate host-lifecycle decision requiring explicit approval.
+On abort, inventory only setup-created changes and offer to reverse only those changes. Preserve pre-existing config, state, workspaces, sessions, platform applications, bot bindings, and service files by default. Removing remote resources or user data requires separate approval naming the exact target. Do not include credentials or complete allowlist identities in the final report.
 
-For multiple platforms, use one process, config, state path, workspace, service, and bot account per instance. WeChat instances also require separate `wechat.storage_path` values. Never let instances share a state file, workspace, bot authorization, or bot consumer.
-
-## 11. Final report and safe abort
-
-For a completed setup, report:
-
-- selected platform and its support status;
-- installed kimi-bridge and Kimi Code versions;
-- compatibility verdict;
-- config and service paths;
-- which live checks passed;
-- how to start, stop, and inspect logs;
-- important platform limitations;
-- useful chat commands from [Commands](docs/COMMANDS.md).
-
-Do not include credentials or full allowlist identities.
-
-On abort, inventory changes made during this setup. Offer to reverse only those changes. Uninstalling the executable or removing a newly created service must preserve existing config, state, workspaces, inbound files, Kimi sessions, and platform apps by default. Any deletion of user data or platform-side resources requires separate approval naming the exact targets.
-
-## 12. Contribute setup evidence
-
-After reaching a completion outcome, offer once to contribute only if the attempt revalidated a stale path, exposed a checkpoint divergence or useful recovery, or covered an environment without a verified path. An unchanged run through a current path needs no report.
-
-Show the user a redacted summary and obtain explicit approval before creating or updating a GitHub issue under the [setup-evidence policy](docs/setup-paths/README.md#contributing-setup-evidence). Contribution is optional and never changes the setup outcome. The installation produces evidence; promoting it or advancing path dates is separate repository maintenance.
+A useful completion report names the selected platform, versions, compatibility result, config/storage/service paths, live checks that passed, startup/stop/log commands, and platform limitations without printing secrets.

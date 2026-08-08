@@ -24,7 +24,8 @@ from .compatibility import (
 from .config import CONFIG_PATH_ENV, Config, load_config, resolve_config_path
 from .kimi_server import KimiServerClient, KimiServerError, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
-from .platforms.feishu import FeishuAdapter
+from .platforms.feishu import FEISHU_API_DOMAIN, FeishuAdapter
+from .platforms.feishu.storage import FeishuStorage, FeishuStorageError
 from .platforms.qq import (
     QQAdapter,
     QQBotAPI,
@@ -32,6 +33,7 @@ from .platforms.qq import (
     QQGatewayClient,
     QQTokenManager,
 )
+from .platforms.qq.storage import QQStorage, QQStorageError
 from .platforms.telegram import TelegramAdapter
 from .platforms.wechat import WeChatAuthenticationExpired
 from .router import ChatRouter
@@ -149,13 +151,38 @@ def _build_adapter(config: Config) -> PlatformAdapter:
         # lark-oapi logs its WebSocket URL, including ephemeral connection
         # credentials, at INFO. Keep those credentials out of bridge logs.
         logging.getLogger("Lark").setLevel(logging.WARNING)
-        if not config.feishu.app_id or not config.feishu.app_secret:
-            raise AdapterConfigurationError(
-                "Feishu credentials are missing from ~/.kimi-bridge/config.toml"
-            )
         if not config.feishu.allowed_users:
             raise AdapterConfigurationError(
                 "feishu.allowed_users must contain at least one user"
+            )
+        storage = FeishuStorage(config.feishu.storage_path)
+        try:
+            managed_credential = storage.has_credential()
+        except (FeishuStorageError, OSError, TypeError, ValueError) as exc:
+            raise AdapterConfigurationError(
+                "Feishu managed credentials are invalid or unavailable; "
+                "run kimi-bridge feishu login --replace"
+            ) from exc
+        if managed_credential:
+            try:
+                credential = storage.load_credential()
+            except (FeishuStorageError, OSError, TypeError, ValueError) as exc:
+                raise AdapterConfigurationError(
+                    "Feishu managed credentials are invalid or unavailable; "
+                    "run kimi-bridge feishu login --replace"
+                ) from exc
+            app_id = credential.app_id
+            app_secret = credential.app_secret
+            api_domain = credential.api_domain
+        elif config.feishu.app_id and config.feishu.app_secret:
+            app_id = config.feishu.app_id
+            app_secret = config.feishu.app_secret
+            api_domain = FEISHU_API_DOMAIN
+        else:
+            raise AdapterConfigurationError(
+                "Feishu credentials are unavailable; first run "
+                "kimi-bridge feishu login, or configure a complete "
+                "[feishu] app_id and app_secret in config.toml"
             )
         ffmpeg_path = shutil.which("ffmpeg")
         if ffmpeg_path is None:
@@ -164,28 +191,50 @@ def _build_adapter(config: Config) -> PlatformAdapter:
                 "and ensure it is on PATH"
             )
         return FeishuAdapter(
-            config.feishu.app_id,
-            config.feishu.app_secret,
+            app_id,
+            app_secret,
             config.feishu.allowed_users,
+            api_domain=api_domain,
             ffmpeg_executable=ffmpeg_path,
         )
 
     if config.platform == "qq":
-        if not config.qq.app_id or not config.qq.app_secret:
-            raise AdapterConfigurationError(
-                "QQ credentials are missing from ~/.kimi-bridge/config.toml"
-            )
         if not config.qq.allowed_users:
             raise AdapterConfigurationError(
                 "qq.allowed_users must contain at least one user"
             )
-        token_manager = QQTokenManager(
-            QQCredentials(config.qq.app_id, config.qq.app_secret)
-        )
+        storage = QQStorage(config.qq.storage_path)
+        try:
+            managed_credential = storage.has_credential()
+        except (QQStorageError, OSError, TypeError, ValueError) as exc:
+            raise AdapterConfigurationError(
+                "QQ managed credentials are invalid or unavailable; "
+                "run kimi-bridge qq login --replace"
+            ) from exc
+        if managed_credential:
+            try:
+                credential = storage.load_credential()
+            except (QQStorageError, OSError, TypeError, ValueError) as exc:
+                raise AdapterConfigurationError(
+                    "QQ managed credentials are invalid or unavailable; "
+                    "run kimi-bridge qq login --replace"
+                ) from exc
+            app_id = credential.app_id
+            app_secret = credential.app_secret
+        elif config.qq.app_id and config.qq.app_secret:
+            app_id = config.qq.app_id
+            app_secret = config.qq.app_secret
+        else:
+            raise AdapterConfigurationError(
+                "QQ credentials are unavailable; first run kimi-bridge qq login, "
+                "or configure a complete [qq] app_id and app_secret in config.toml"
+            )
+        credentials = QQCredentials(app_id, app_secret)
+        token_manager = QQTokenManager(credentials)
         api = QQBotAPI(token_manager)
         gateway = QQGatewayClient(token_manager, api.get_gateway_url)
         return QQAdapter(
-            config.qq.app_id,
+            app_id,
             config.qq.allowed_users,
             api=api,
             gateway=gateway,
@@ -332,6 +381,65 @@ def _argument_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="replace a stored authorization only after a new login succeeds",
             )
+
+    for platform_name, description, command_dest, help_texts in (
+        (
+            "feishu",
+            "Manage local Feishu QR application registration without starting "
+            "Kimi Code or message polling.",
+            "feishu_command",
+            (
+                ("login", "register a Feishu or Lark app by scanning a QR URL"),
+                ("status", "inspect local Feishu authorization without network access"),
+                ("logout", "remove only adapter-owned Feishu authorization files"),
+            ),
+        ),
+        (
+            "qq",
+            "Manage local QQ QR authorization without starting Kimi Code or "
+            "message polling.",
+            "qq_command",
+            (
+                ("login", "authorize a QQ official bot by scanning a QR URL"),
+                ("status", "inspect local QQ authorization without network access"),
+                ("logout", "remove only adapter-owned QQ authorization files"),
+            ),
+        ),
+    ):
+        platform_command = subcommands.add_parser(
+            platform_name,
+            help=description,
+            description=description,
+        )
+        platform_command.add_argument(
+            "--config",
+            metavar="PATH",
+            default=argparse.SUPPRESS,
+            help=(
+                "path to the config file "
+                f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+            ),
+        )
+        platform_subcommands = platform_command.add_subparsers(
+            dest=command_dest, required=True
+        )
+        for command_name, help_text in help_texts:
+            command = platform_subcommands.add_parser(command_name, help=help_text)
+            command.add_argument(
+                "--config",
+                metavar="PATH",
+                default=argparse.SUPPRESS,
+                help=(
+                    "path to the config file "
+                    f"(default: ${CONFIG_PATH_ENV} or ~/.kimi-bridge/config.toml)"
+                ),
+            )
+            if command_name == "login":
+                command.add_argument(
+                    "--replace",
+                    action="store_true",
+                    help="replace stored authorization only after a new login succeeds",
+                )
     return parser
 
 
@@ -427,6 +535,66 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_doctor(config_path=config_path)
     if arguments.command == "compat":
         return _run_compat(arguments.kimi_code)
+    if arguments.command == "feishu":
+        from .platforms.feishu.auth import (
+            FeishuControlError,
+            run_login,
+            run_logout,
+            run_status,
+        )
+
+        try:
+            config = load_config(config_path)
+            if config.platform != "feishu":
+                raise FeishuControlError(
+                    'selected platform must be "feishu" for Feishu controls'
+                )
+            if arguments.feishu_command == "login":
+                return run_login(config.feishu, replace=arguments.replace)
+            if arguments.feishu_command == "status":
+                return run_status(config.feishu)
+            if arguments.feishu_command == "logout":
+                return run_logout(config.feishu)
+            raise AssertionError("unhandled Feishu command")
+        except KeyboardInterrupt:
+            print("kimi-bridge: Feishu authorization cancelled", file=sys.stderr)
+            return 130
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            FeishuControlError,
+            FeishuStorageError,
+        ) as exc:
+            print(f"kimi-bridge: {exc}", file=sys.stderr)
+            return 1
+    if arguments.command == "qq":
+        from .platforms.qq.auth import (
+            QQControlError,
+            run_login,
+            run_logout,
+            run_status,
+        )
+
+        try:
+            config = load_config(config_path)
+            if config.platform != "qq":
+                raise QQControlError(
+                    'selected platform must be "qq" for QQ controls'
+                )
+            if arguments.qq_command == "login":
+                return run_login(config.qq, replace=arguments.replace)
+            if arguments.qq_command == "status":
+                return run_status(config.qq)
+            if arguments.qq_command == "logout":
+                return run_logout(config.qq)
+            raise AssertionError("unhandled QQ command")
+        except KeyboardInterrupt:
+            print("kimi-bridge: QQ authorization cancelled", file=sys.stderr)
+            return 130
+        except (OSError, TypeError, ValueError, QQControlError) as exc:
+            print(f"kimi-bridge: {exc}", file=sys.stderr)
+            return 1
     if arguments.command == "wechat":
         from .platforms.wechat import (
             WeChatControlError,

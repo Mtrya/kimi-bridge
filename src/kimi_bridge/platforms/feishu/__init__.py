@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from importlib.resources import files
 from typing import Any, Protocol
 
-from ..interactions import InteractionOutcome, InteractionPrompt
-from .base import (
+from ...interactions import InteractionOutcome, InteractionPrompt
+from ..base import (
     ActorRef,
     ConversationRef,
     InboundAudio,
@@ -32,12 +32,13 @@ from .base import (
     MessageRef,
     OutboundFile,
 )
-from .feishu_cards import (
+from .cards import (
     decode_interaction_response,
     interaction_id_from_value,
     render_interaction,
     render_outcome,
 )
+from .storage import FEISHU_API_DOMAIN
 
 
 LOGGER = logging.getLogger(__name__)
@@ -139,10 +140,14 @@ class _LarkTransport:
         app_id: str,
         app_secret: str,
         *,
+        api_domain: str = FEISHU_API_DOMAIN,
         ffmpeg_executable: str = FEISHU_FFMPEG_EXECUTABLE,
     ) -> None:
+        if not api_domain:
+            raise ValueError("api_domain must be non-empty")
         self._app_id = app_id
         self._app_secret = app_secret
+        self._api_domain = api_domain
         self._ffmpeg_executable = ffmpeg_executable
         self._client: Any | None = None
 
@@ -159,6 +164,7 @@ class _LarkTransport:
             lark.Client.builder()
             .app_id(self._app_id)
             .app_secret(self._app_secret)
+            .domain(self._api_domain)
             .build()
         )
         return self._client
@@ -473,9 +479,13 @@ class _LarkWebSocketRunner:
         app_secret: str,
         message_callback: Callable[[Any], None],
         card_callback: Callable[[Any], Any],
+        api_domain: str = FEISHU_API_DOMAIN,
     ) -> None:
+        if not api_domain:
+            raise ValueError("api_domain must be non-empty")
         self._app_id = app_id
         self._app_secret = app_secret
+        self._api_domain = api_domain
         self._message_callback = message_callback
         self._card_callback = card_callback
         self._client: Any | None = None
@@ -509,6 +519,7 @@ class _LarkWebSocketRunner:
                 self._app_secret,
                 event_handler=event_handler,
                 log_level=lark.LogLevel.WARNING,
+                domain=self._api_domain,
             )
             self._sdk_loop = sdk_loop
             self._initialized.set()
@@ -583,6 +594,7 @@ class FeishuAdapter:
         *,
         message_limit: int = FEISHU_TEXT_LIMIT,
         ffmpeg_executable: str = FEISHU_FFMPEG_EXECUTABLE,
+        api_domain: str = FEISHU_API_DOMAIN,
         transport: _FeishuTransport | None = None,
         ws_factory: Callable[
             [Callable[[Any], None], Callable[[Any], Any]], _WebSocketRunner
@@ -593,8 +605,11 @@ class FeishuAdapter:
             raise ValueError("Feishu app_id and app_secret are required")
         if message_limit <= 0:
             raise ValueError("message_limit must be positive")
+        if not api_domain:
+            raise ValueError("api_domain must be non-empty")
         self._app_id = app_id
         self._app_secret = app_secret
+        self._api_domain = api_domain
         self._allowed_users = frozenset(allowed_users)
         self.message_limit = message_limit
         self._ffmpeg_executable = ffmpeg_executable
@@ -628,6 +643,7 @@ class FeishuAdapter:
             self._transport = _LarkTransport(
                 self._app_id,
                 self._app_secret,
+                api_domain=self._api_domain,
                 ffmpeg_executable=self._ffmpeg_executable,
             )
         factory = self._ws_factory or (
@@ -636,6 +652,7 @@ class FeishuAdapter:
                 self._app_secret,
                 message_callback,
                 card_callback,
+                api_domain=self._api_domain,
             )
         )
         self._ws = factory(self._dispatch_sdk_event, self._dispatch_sdk_card_action)
