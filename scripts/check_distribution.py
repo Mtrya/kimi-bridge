@@ -53,7 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     _check_wheel(wheel)
     _check_source(source)
     for artifact in (source, wheel):
-        _check_tool_install(artifact.resolve())
+        _check_tool_install(artifact.resolve(), extra=None)
+        _check_tool_install(artifact.resolve(), extra="wechat")
     print("distribution checks passed")
     return 0
 
@@ -122,8 +123,15 @@ def _check_metadata(metadata: str) -> None:
         raise RuntimeError(f"distribution metadata mismatches: {mismatches}")
     if parsed.get_all("License-File") != ["LICENSE"]:
         raise RuntimeError("distribution metadata does not identify LICENSE")
-    if parsed.get_all("Provides-Extra"):
-        raise RuntimeError("distribution metadata declares unexpected extras")
+    if parsed.get_all("Provides-Extra") != ["wechat"]:
+        raise RuntimeError("distribution metadata must declare only the wechat extra")
+    requirements = parsed.get_all("Requires-Dist", [])
+    if not any(
+        requirement.startswith("cryptography>=46;")
+        and "extra == 'wechat'" in requirement
+        for requirement in requirements
+    ):
+        raise RuntimeError("distribution metadata is missing the WeChat dependency")
 
     project_urls = set(parsed.get_all("Project-URL", []))
     required_urls = {
@@ -137,7 +145,7 @@ def _check_metadata(metadata: str) -> None:
         raise RuntimeError("distribution metadata is missing project URLs")
 
 
-def _check_tool_install(artifact: Path) -> None:
+def _check_tool_install(artifact: Path, *, extra: str | None) -> None:
     with tempfile.TemporaryDirectory(prefix="kimi-bridge-tool-check-") as raw_root:
         root = Path(raw_root)
         tool_directory = root / "tools"
@@ -169,10 +177,8 @@ def _check_tool_install(artifact: Path) -> None:
                 "UV_CACHE_DIR": str(root / "cache"),
             }
         )
-        _run(
-            ["uv", "tool", "install", "--from", str(artifact), "kimi-bridge"],
-            environment,
-        )
+        source = f"{artifact}[{extra}]" if extra is not None else str(artifact)
+        _run(["uv", "tool", "install", "--from", source, "kimi-bridge"], environment)
         executable = bin_directory / "kimi-bridge"
         _run([str(executable), "--help"], environment)
         version = subprocess.run(
@@ -199,6 +205,31 @@ def _check_tool_install(artifact: Path) -> None:
             raise RuntimeError("doctor unexpectedly passed in an empty home")
         if "managed kimi server ready" in (doctor.stdout + doctor.stderr).lower():
             raise RuntimeError("doctor started a managed service")
+        wechat_config = home / "wechat.toml"
+        wechat_config.write_text(
+            'platform = "wechat"\n[wechat]\nallowed_users = ["test-user"]\n',
+            encoding="utf-8",
+        )
+        wechat_config.chmod(0o600)
+        wechat_doctor = subprocess.run(
+            [str(executable), "--config", str(wechat_config), "doctor"],
+            env=doctor_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        media_lines = [
+            line
+            for line in (wechat_doctor.stdout + wechat_doctor.stderr).splitlines()
+            if "wechat media:" in line
+        ]
+        if len(media_lines) != 1:
+            raise RuntimeError("doctor did not report the WeChat media dependency")
+        expected_status = "OK" if extra == "wechat" else "ERROR"
+        if media_lines[0].split(maxsplit=1)[0] != expected_status:
+            raise RuntimeError(
+                "isolated install reported the wrong WeChat media dependency status"
+            )
         _run(["uv", "tool", "uninstall", "kimi-bridge"], environment)
         if executable.exists():
             raise RuntimeError("uv tool uninstall left the console command behind")

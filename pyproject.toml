@@ -36,6 +36,11 @@ dependencies = [
     "websockets",
 ]
 
+[project.optional-dependencies]
+wechat = [
+    "cryptography>=46",
+]
+
 [project.scripts]
 kimi-bridge = "kimi_bridge.__main__:main"
 
@@ -48,6 +53,7 @@ Changelog = "https://github.com/Mtrya/kimi-bridge/releases"
 
 [dependency-groups]
 dev = [
+    "cryptography>=46",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.15,<0.16",

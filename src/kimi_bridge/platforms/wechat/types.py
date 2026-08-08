@@ -12,6 +12,7 @@ CHANNEL_VERSION = "2.4.6"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 6
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
+DEFAULT_CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_ILINK_BOT_TYPE = "3"
 DEFAULT_LONG_POLL_TIMEOUT_SECONDS = 35.0
 DEFAULT_SEND_TIMEOUT_SECONDS = 15.0
@@ -32,6 +33,10 @@ MESSAGE_ITEM_TYPE_IMAGE = 2
 MESSAGE_ITEM_TYPE_VOICE = 3
 MESSAGE_ITEM_TYPE_FILE = 4
 MESSAGE_ITEM_TYPE_VIDEO = 5
+UPLOAD_MEDIA_TYPE_IMAGE = 1
+UPLOAD_MEDIA_TYPE_VIDEO = 2
+UPLOAD_MEDIA_TYPE_FILE = 3
+UPLOAD_MEDIA_TYPE_VOICE = 4
 MEDIA_ITEM_TYPES = frozenset(
     {
         MESSAGE_ITEM_TYPE_IMAGE,
@@ -98,6 +103,82 @@ class WeChatMessageItem:
 
     type: int | None
     text: str | None = field(default=None, repr=False)
+    image: WeChatImageItem | None = None
+    voice: WeChatVoiceItem | None = None
+    file: WeChatFileItem | None = None
+    video: WeChatVideoItem | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatCDNMedia:
+    """One secret-bearing CDN reference from an inbound item."""
+
+    encrypt_query_param: str | None = field(default=None, repr=False)
+    aes_key: str | None = field(default=None, repr=False)
+    encrypt_type: int | None = None
+    full_url: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatImageItem:
+    media: WeChatCDNMedia | None = None
+    aes_key_hex: str | None = field(default=None, repr=False)
+    mid_size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatVoiceItem:
+    media: WeChatCDNMedia | None = None
+    encode_type: int | None = None
+    sample_rate: int | None = None
+    playtime: int | None = None
+    text: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatFileItem:
+    media: WeChatCDNMedia | None = None
+    file_name: str | None = None
+    md5: str | None = field(default=None, repr=False)
+    length: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatVideoItem:
+    media: WeChatCDNMedia | None = None
+    video_size: int | None = None
+    video_md5: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatUploadRequest:
+    """Metadata required by ``getuploadurl`` before encrypted upload."""
+
+    file_key: str = field(repr=False)
+    media_type: int
+    to_user_id: str
+    raw_size: int
+    raw_file_md5: str = field(repr=False)
+    ciphertext_size: int
+    aes_key_hex: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatUploadTarget:
+    """Secret-bearing upload target returned by iLink."""
+
+    upload_full_url: str | None = field(default=None, repr=False)
+    upload_param: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatUploadedMedia:
+    """Validated result of one encrypted CDN upload."""
+
+    download_query_param: str = field(repr=False)
+    aes_key_hex: str = field(repr=False)
+    plaintext_size: int
+    ciphertext_size: int
 
 
 @dataclass(frozen=True, slots=True)

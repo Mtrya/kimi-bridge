@@ -61,7 +61,6 @@ from kimi_bridge.platforms.wechat.storage import (
 from kimi_bridge.platforms.wechat.types import (
     DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
     ILINK_APP_CLIENT_VERSION,
-    MESSAGE_ITEM_TYPE_IMAGE,
     MESSAGE_ITEM_TYPE_TEXT,
     MESSAGE_TYPE_BOT,
     MESSAGE_TYPE_USER,
@@ -1394,7 +1393,7 @@ async def test_allowlisted_text_maps_semantics_and_rotates_isolated_contexts(
     }
 
 
-async def test_filtered_events_and_media_do_not_reach_the_router(
+async def test_filtered_events_do_not_reach_the_router(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     inbound: list[InboundMessage] = []
@@ -1404,14 +1403,6 @@ async def test_filtered_events_and_media_do_not_reach_the_router(
 
     caplog.set_level(logging.WARNING)
     adapter, api, storage = await _start_runtime_adapter(tmp_path, handler)
-    media = _runtime_event(
-        message_id=505,
-        context_token="MEDIA_CONTEXT",
-        items=(
-            WeChatMessageItem(type=MESSAGE_ITEM_TYPE_TEXT, text="caption"),
-            WeChatMessageItem(type=MESSAGE_ITEM_TYPE_IMAGE),
-        ),
-    )
     try:
         await adapter.handle_poll_result(
             WeChatPollResult(
@@ -1425,7 +1416,6 @@ async def test_filtered_events_and_media_do_not_reach_the_router(
                     ),
                     _runtime_event(message_id=503, message_type=99),
                     _runtime_event(message_id=504, group_id="group-one"),
-                    media,
                 ),
                 get_updates_buf="FILTERED_CURSOR",
             )
@@ -1434,13 +1424,10 @@ async def test_filtered_events_and_media_do_not_reach_the_router(
         await adapter.stop()
 
     assert inbound == []
-    assert len(api.sends) == 1
-    assert api.sends[0]["context_token"] == "MEDIA_CONTEXT"
-    assert "media" in api.sends[0]["text"].lower()
+    assert api.sends == []
     assert storage.load_runtime_state().get_updates_buf == "FILTERED_CURSOR"
     assert "[wechat].allowed_users" in caplog.text
     assert "intruder" in caplog.text
-    assert "caption" not in caplog.text
 
 
 async def test_malformed_authorized_messages_leave_cursor_uncommitted(
@@ -1729,39 +1716,6 @@ async def test_empty_poll_commits_only_a_nonempty_replacement_cursor(
     assert storage.load_runtime_state().get_updates_buf == "NEXT_CURSOR"
 
 
-async def test_uncertain_unsupported_media_notice_is_not_retried(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level(logging.WARNING)
-    api = RuntimeAPIStub()
-    api.send_error = WeChatRetryableError("sendMessage", "timeout")
-
-    async def handler(_adapter: WeChatAdapter, _message: InboundMessage) -> None:
-        raise AssertionError("media reached router")
-
-    adapter, runtime_api, storage = await _start_runtime_adapter(
-        tmp_path, handler, api=api
-    )
-    media = _runtime_event(
-        message_id=808,
-        items=(WeChatMessageItem(type=MESSAGE_ITEM_TYPE_IMAGE),),
-    )
-    result = WeChatPollResult(messages=(media,), get_updates_buf="MEDIA_CURSOR")
-    try:
-        await adapter.handle_poll_result(result)
-        await adapter.handle_poll_result(result)
-    finally:
-        await adapter.stop()
-
-    assert len(runtime_api.sends) == 1
-    assert storage.load_runtime_state().get_updates_buf == "MEDIA_CURSOR"
-    assert storage.load_runtime_state().processed_message_ids == (
-        ("bot-one@im.bot", "user-one", 808),
-    )
-    assert "will not be retried" in caplog.text
-    assert "CONTEXT_TOKEN_SECRET_ONE" not in caplog.text
-
-
 async def test_poll_backoff_is_capped_and_resets_after_success(
     tmp_path: Path,
 ) -> None:
@@ -1886,7 +1840,7 @@ async def test_send_requires_current_context_and_deferred_features_fail_closed(
         await adapter.edit_text(
             MessageRef(conversation, "message-one"), "edit"
         )
-    with pytest.raises(WeChatUnsupportedOperation, match="file delivery"):
+    with pytest.raises(WeChatProtocolError, match="context"):
         await adapter.send_file(
             conversation,
             OutboundFile("one.txt", b"one", "text/plain"),

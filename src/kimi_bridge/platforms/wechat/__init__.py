@@ -3,6 +3,14 @@
 from .adapter import WeChatAdapter, WeChatRuntimeAPI
 from .api import WeChatAPI
 from .auth import authorize_with_qr, run_login, run_logout, run_status
+from .media import (
+    WeChatMediaClient,
+    WeChatMediaDependencyError,
+    WeChatMediaError,
+    WeChatMediaTooLarge,
+    cryptography_available,
+    require_wechat_media_dependency,
+)
 from .storage import WeChatRuntimeState, WeChatStorage
 from .types import (
     LoginResult,
@@ -11,6 +19,9 @@ from .types import (
     WeChatAuthenticationExpired,
     WeChatControlError,
     WeChatCredential,
+    WeChatCDNMedia,
+    WeChatFileItem,
+    WeChatImageItem,
     WeChatInboundEvent,
     WeChatMessageItem,
     WeChatPollResult,
@@ -18,7 +29,12 @@ from .types import (
     WeChatRetryableError,
     WeChatStorageError,
     WeChatTypingConfig,
+    WeChatUploadRequest,
+    WeChatUploadedMedia,
+    WeChatUploadTarget,
     WeChatUnsupportedOperation,
+    WeChatVideoItem,
+    WeChatVoiceItem,
 )
 
 
@@ -31,7 +47,14 @@ __all__ = [
     "WeChatAuthenticationExpired",
     "WeChatControlError",
     "WeChatCredential",
+    "WeChatCDNMedia",
+    "WeChatFileItem",
+    "WeChatImageItem",
     "WeChatInboundEvent",
+    "WeChatMediaClient",
+    "WeChatMediaDependencyError",
+    "WeChatMediaError",
+    "WeChatMediaTooLarge",
     "WeChatMessageItem",
     "WeChatPollResult",
     "WeChatProtocolError",
@@ -41,8 +64,15 @@ __all__ = [
     "WeChatStorage",
     "WeChatStorageError",
     "WeChatTypingConfig",
+    "WeChatUploadRequest",
+    "WeChatUploadedMedia",
+    "WeChatUploadTarget",
     "WeChatUnsupportedOperation",
+    "WeChatVideoItem",
+    "WeChatVoiceItem",
     "authorize_with_qr",
+    "cryptography_available",
+    "require_wechat_media_dependency",
     "run_login",
     "run_logout",
     "run_status",

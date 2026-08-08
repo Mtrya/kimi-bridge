@@ -21,7 +21,11 @@ from .types import (
     DEFAULT_SEND_TIMEOUT_SECONDS,
     ILINK_APP_CLIENT_VERSION,
     ILINK_APP_ID,
+    MESSAGE_ITEM_TYPE_FILE,
+    MESSAGE_ITEM_TYPE_IMAGE,
     MESSAGE_ITEM_TYPE_TEXT,
+    MESSAGE_ITEM_TYPE_VIDEO,
+    MESSAGE_ITEM_TYPE_VOICE,
     MESSAGE_STATE_FINISH,
     MESSAGE_TYPE_BOT,
     QRCode,
@@ -30,16 +34,27 @@ from .types import (
     STALE_TOKEN_ERROR_CODE,
     TYPING_STATUS_ACTIVE,
     TYPING_STATUS_CANCEL,
+    UPLOAD_MEDIA_TYPE_FILE,
+    UPLOAD_MEDIA_TYPE_IMAGE,
+    UPLOAD_MEDIA_TYPE_VIDEO,
     WeChatAPIResult,
     WeChatAPIError,
     WeChatAuthenticationExpired,
     WeChatCredential,
+    WeChatCDNMedia,
+    WeChatFileItem,
+    WeChatImageItem,
     WeChatInboundEvent,
     WeChatMessageItem,
     WeChatPollResult,
     WeChatProtocolError,
     WeChatRetryableError,
     WeChatTypingConfig,
+    WeChatUploadRequest,
+    WeChatUploadedMedia,
+    WeChatUploadTarget,
+    WeChatVideoItem,
+    WeChatVoiceItem,
 )
 
 
@@ -336,6 +351,119 @@ class WeChatAPI:
         )
         _raise_runtime_code(payload, "sendMessage")
 
+    async def get_upload_url(
+        self, request: WeChatUploadRequest
+    ) -> WeChatUploadTarget:
+        if request.media_type not in {
+            UPLOAD_MEDIA_TYPE_IMAGE,
+            UPLOAD_MEDIA_TYPE_VIDEO,
+            UPLOAD_MEDIA_TYPE_FILE,
+        }:
+            raise ValueError("unsupported WeChat upload media type")
+        if not request.to_user_id.strip():
+            raise ValueError("WeChat upload recipient must be non-empty")
+        if request.raw_size < 0 or request.ciphertext_size <= 0:
+            raise ValueError("WeChat upload sizes are invalid")
+        payload = await self._post(
+            "ilink/bot/getuploadurl",
+            {
+                "filekey": request.file_key,
+                "media_type": request.media_type,
+                "to_user_id": request.to_user_id,
+                "rawsize": request.raw_size,
+                "rawfilemd5": request.raw_file_md5,
+                "filesize": request.ciphertext_size,
+                "no_need_thumb": True,
+                "aeskey": request.aes_key_hex,
+            },
+            timeout_seconds=self._send_timeout_seconds,
+            endpoint_name="getUploadUrl",
+        )
+        _raise_runtime_code(payload, "getUploadUrl", check_errcode=True)
+        full_url = _runtime_optional_string(
+            payload, "upload_full_url", "getUploadUrl"
+        )
+        upload_param = _runtime_optional_string(
+            payload, "upload_param", "getUploadUrl", trim=False
+        )
+        if full_url is None and upload_param is None:
+            raise WeChatProtocolError(
+                "getUploadUrl response is missing an upload target"
+            )
+        return WeChatUploadTarget(
+            upload_full_url=full_url,
+            upload_param=upload_param,
+        )
+
+    async def send_media(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        client_id: str,
+        item_type: int,
+        uploaded: WeChatUploadedMedia,
+        file_name: str | None = None,
+    ) -> None:
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (to_user_id, context_token, client_id)
+        ):
+            raise ValueError("WeChat send identity and context must be non-empty")
+        media = {
+            "encrypt_query_param": uploaded.download_query_param,
+            "aes_key": base64.b64encode(
+                uploaded.aes_key_hex.encode("ascii")
+            ).decode("ascii"),
+            "encrypt_type": 1,
+        }
+        if item_type == MESSAGE_ITEM_TYPE_IMAGE:
+            item = {
+                "type": item_type,
+                "image_item": {
+                    "media": media,
+                    "mid_size": uploaded.ciphertext_size,
+                },
+            }
+        elif item_type == MESSAGE_ITEM_TYPE_VIDEO:
+            item = {
+                "type": item_type,
+                "video_item": {
+                    "media": media,
+                    "video_size": uploaded.ciphertext_size,
+                },
+            }
+        elif item_type == MESSAGE_ITEM_TYPE_FILE:
+            if not isinstance(file_name, str) or not file_name:
+                raise ValueError("WeChat file item requires a name")
+            item = {
+                "type": item_type,
+                "file_item": {
+                    "media": media,
+                    "file_name": file_name,
+                    "len": str(uploaded.plaintext_size),
+                },
+            }
+        else:
+            raise ValueError("unsupported WeChat outbound media item type")
+        payload = await self._post(
+            "ilink/bot/sendmessage",
+            {
+                "msg": {
+                    "from_user_id": "",
+                    "to_user_id": to_user_id,
+                    "client_id": client_id,
+                    "message_type": MESSAGE_TYPE_BOT,
+                    "message_state": MESSAGE_STATE_FINISH,
+                    "item_list": [item],
+                    "context_token": context_token,
+                }
+            },
+            timeout_seconds=self._send_timeout_seconds,
+            endpoint_name="sendMessage",
+        )
+        _raise_runtime_code(payload, "sendMessage")
+
     async def notify_start(self) -> WeChatAPIResult:
         return await self._notify("notifystart", "notifyStart")
 
@@ -498,6 +626,10 @@ def _parse_message_item(value: object) -> WeChatMessageItem:
         )
     item_type = _runtime_optional_int(value, "type", "getUpdates")
     text: str | None = None
+    image: WeChatImageItem | None = None
+    voice: WeChatVoiceItem | None = None
+    file: WeChatFileItem | None = None
+    video: WeChatVideoItem | None = None
     if item_type == MESSAGE_ITEM_TYPE_TEXT:
         raw_text_item = value.get("text_item")
         if raw_text_item is not None:
@@ -511,7 +643,89 @@ def _parse_message_item(value: object) -> WeChatMessageItem:
                 "getUpdates",
                 trim=False,
             )
-    return WeChatMessageItem(type=item_type, text=text)
+    elif item_type == MESSAGE_ITEM_TYPE_IMAGE:
+        raw = _runtime_item_object(value, "image_item", "image")
+        image = WeChatImageItem(
+            media=_parse_cdn_media(raw.get("media")),
+            aes_key_hex=_runtime_optional_string(
+                raw, "aeskey", "getUpdates", trim=False
+            ),
+            mid_size=_runtime_optional_int(raw, "mid_size", "getUpdates"),
+        )
+    elif item_type == MESSAGE_ITEM_TYPE_VOICE:
+        raw = _runtime_item_object(value, "voice_item", "voice")
+        voice = WeChatVoiceItem(
+            media=_parse_cdn_media(raw.get("media")),
+            encode_type=_runtime_optional_int(
+                raw, "encode_type", "getUpdates"
+            ),
+            sample_rate=_runtime_optional_int(
+                raw, "sample_rate", "getUpdates"
+            ),
+            playtime=_runtime_optional_int(raw, "playtime", "getUpdates"),
+            text=_runtime_optional_string(raw, "text", "getUpdates", trim=False),
+        )
+    elif item_type == MESSAGE_ITEM_TYPE_FILE:
+        raw = _runtime_item_object(value, "file_item", "file")
+        file = WeChatFileItem(
+            media=_parse_cdn_media(raw.get("media")),
+            file_name=_runtime_optional_string(
+                raw, "file_name", "getUpdates", trim=False
+            ),
+            md5=_runtime_optional_string(raw, "md5", "getUpdates", trim=False),
+            length=_runtime_optional_string(raw, "len", "getUpdates", trim=False),
+        )
+    elif item_type == MESSAGE_ITEM_TYPE_VIDEO:
+        raw = _runtime_item_object(value, "video_item", "video")
+        video = WeChatVideoItem(
+            media=_parse_cdn_media(raw.get("media")),
+            video_size=_runtime_optional_int(
+                raw, "video_size", "getUpdates"
+            ),
+            video_md5=_runtime_optional_string(
+                raw, "video_md5", "getUpdates", trim=False
+            ),
+        )
+    return WeChatMessageItem(
+        type=item_type,
+        text=text,
+        image=image,
+        voice=voice,
+        file=file,
+        video=video,
+    )
+
+
+def _runtime_item_object(
+    value: Mapping[str, Any], key: str, label: str
+) -> Mapping[str, Any]:
+    raw = value.get(key)
+    if not isinstance(raw, dict):
+        raise WeChatProtocolError(
+            f"getUpdates response has an invalid {label} item"
+        )
+    return raw
+
+
+def _parse_cdn_media(value: object) -> WeChatCDNMedia | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise WeChatProtocolError(
+            "getUpdates response has an invalid CDN media reference"
+        )
+    return WeChatCDNMedia(
+        encrypt_query_param=_runtime_optional_string(
+            value, "encrypt_query_param", "getUpdates", trim=False
+        ),
+        aes_key=_runtime_optional_string(
+            value, "aes_key", "getUpdates", trim=False
+        ),
+        encrypt_type=_runtime_optional_int(value, "encrypt_type", "getUpdates"),
+        full_url=_runtime_optional_string(
+            value, "full_url", "getUpdates", trim=False
+        ),
+    )
 
 
 def _raise_runtime_code(

@@ -289,6 +289,34 @@ def test_builds_selected_wechat_adapter_from_private_storage(
     assert calls[1][2]["runtime_state"] == wechat_module.WeChatRuntimeState()
 
 
+def test_selected_wechat_requires_media_extra_before_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    def missing_dependency() -> None:
+        raise wechat_module.WeChatMediaDependencyError(
+            "install kimi-bridge[wechat]"
+        )
+
+    monkeypatch.setattr(
+        wechat_module,
+        "require_wechat_media_dependency",
+        missing_dependency,
+    )
+
+    with pytest.raises(RuntimeError, match=r"kimi-bridge\[wechat\]"):
+        main_module._build_adapter(
+            Config(
+                platform="wechat",
+                wechat=WechatConfig(
+                    allowed_users=frozenset({"user-one"}),
+                    storage_path=tmp_path / "wechat",
+                ),
+            )
+        )
+
+
 @pytest.mark.parametrize("argument", ["--help", "--version"])
 def test_metadata_flags_do_not_start_runtime(
     argument: str,

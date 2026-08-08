@@ -15,18 +15,23 @@ from ..base import (
     ActorRef,
     ConversationRef,
     InboundAudio,
+    InboundFile,
     InboundHandler,
+    InboundImage,
     InboundMessage,
+    InboundVideo,
     InteractionHandler,
     MessageRef,
     OutboundFile,
 )
 from .formatting import sanitize_markdown
+from .media import WeChatMediaClient, WeChatOutboundClassification
 from .storage import WeChatRuntimeState, WeChatStorage
 from .types import (
     DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
     MAX_LONG_POLL_TIMEOUT_SECONDS,
     MEDIA_ITEM_TYPES,
+    MESSAGE_ITEM_TYPE_FILE,
     MESSAGE_ITEM_TYPE_TEXT,
     MESSAGE_TYPE_BOT,
     MESSAGE_TYPE_USER,
@@ -38,19 +43,20 @@ from .types import (
     WeChatAPIResult,
     WeChatAuthenticationExpired,
     WeChatInboundEvent,
+    WeChatMessageItem,
     WeChatPollResult,
     WeChatProtocolError,
     WeChatRetryableError,
     WeChatStorageError,
     WeChatTypingConfig,
+    WeChatUploadRequest,
+    WeChatUploadedMedia,
+    WeChatUploadTarget,
     WeChatUnsupportedOperation,
 )
 
 
 LOGGER = logging.getLogger(__name__)
-_UNSUPPORTED_MEDIA_NOTICE = (
-    "This WeChat bridge does not support media messages yet; send text instead."
-)
 _UNSUPPORTED_INTERACTION_NOTICE = (
     "Interactive prompts are unavailable on WeChat; steer with a normal message."
 )
@@ -89,6 +95,21 @@ class WeChatRuntimeAPI(Protocol):
         client_id: str,
     ) -> None: ...
 
+    async def get_upload_url(
+        self, request: WeChatUploadRequest
+    ) -> WeChatUploadTarget: ...
+
+    async def send_media(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        client_id: str,
+        item_type: int,
+        uploaded: WeChatUploadedMedia,
+        file_name: str | None = None,
+    ) -> None: ...
+
     async def get_config(
         self, *, ilink_user_id: str, context_token: str
     ) -> WeChatTypingConfig: ...
@@ -108,6 +129,18 @@ class WeChatRuntimeAPI(Protocol):
     async def close(self) -> None: ...
 
 
+class WeChatMediaRuntime(Protocol):
+    async def download_item(
+        self, item: WeChatMessageItem
+    ) -> InboundImage | InboundVideo | InboundFile | InboundAudio: ...
+
+    async def upload_file(
+        self, file: OutboundFile, *, to_user_id: str
+    ) -> tuple[WeChatOutboundClassification, WeChatUploadedMedia]: ...
+
+    async def close(self) -> None: ...
+
+
 class WeChatAdapter:
     """One QR-authorized, direct-message-only WeChat adapter."""
 
@@ -123,6 +156,7 @@ class WeChatAdapter:
         allowed_users: set[str] | frozenset[str],
         *,
         api: WeChatRuntimeAPI,
+        media: WeChatMediaRuntime | None = None,
         storage: WeChatStorage,
         runtime_state: WeChatRuntimeState | None = None,
         processed_message_limit: int = DEFAULT_PROCESSED_MESSAGE_LIMIT,
@@ -160,6 +194,7 @@ class WeChatAdapter:
         self._bot_id = bot_id.strip()
         self._allowed_users = frozenset(user.strip() for user in allowed_users)
         self._api = api
+        self._media = media or WeChatMediaClient(api)
         self._storage = storage
         self._runtime_state = runtime_state or storage.load_runtime_state()
         self._processed_message_limit = processed_message_limit
@@ -238,7 +273,10 @@ class WeChatAdapter:
             if poll_task is not None:
                 await self._notify_best_effort(starting=False)
         finally:
-            await self._api.close()
+            try:
+                await self._media.close()
+            finally:
+                await self._api.close()
 
     async def transcribe_audio(self, audio: InboundAudio) -> str:
         return audio.transcript.strip() if audio.transcript else ""
@@ -277,9 +315,31 @@ class WeChatAdapter:
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
     ) -> MessageRef:
-        raise WeChatUnsupportedOperation(
-            "WeChat file delivery is not available yet"
+        self._validate_conversation(conversation)
+        context_token = self._runtime_state.context_tokens.get(
+            (conversation.bot_id, conversation.conversation_id)
         )
+        if context_token is None:
+            raise WeChatProtocolError(
+                "WeChat reply context is unavailable for this conversation"
+            )
+        classification, uploaded = await self._media.upload_file(
+            file, to_user_id=conversation.conversation_id
+        )
+        client_id = secrets.token_hex(16)
+        await self._api.send_media(
+            to_user_id=conversation.conversation_id,
+            context_token=context_token,
+            client_id=client_id,
+            item_type=classification.message_item_type,
+            uploaded=uploaded,
+            file_name=(
+                classification.name
+                if classification.message_item_type == MESSAGE_ITEM_TYPE_FILE
+                else None
+            ),
+        )
+        return MessageRef(conversation, client_id)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
@@ -431,23 +491,27 @@ class WeChatAdapter:
                 "authorized WeChat message is missing a valid text item"
             )
         self._store_context_token(conversation, event.context_token)
-        if has_media:
-            try:
-                await self.send_final_text(conversation, _UNSUPPORTED_MEDIA_NOTICE)
-            except WeChatAuthenticationExpired:
-                raise
-            except Exception as exc:
-                # An uncertain send must not be repeated automatically. Treat the
-                # policy action as handled and let later media support replace it.
-                LOGGER.warning(
-                    "WeChat unsupported-media notice failed and will not be retried (%s)",
-                    type(exc).__name__,
-                )
-            return
-
-        assert text_item is not None and text_item.text is not None
         if self._on_message is None:
             raise RuntimeError("WeChat adapter has not been started")
+        images: list[InboundImage] = []
+        videos: list[InboundVideo] = []
+        files: list[InboundFile] = []
+        audios: list[InboundAudio] = []
+        if has_media:
+            for item in event.items:
+                if item.type not in MEDIA_ITEM_TYPES:
+                    continue
+                downloaded = await self._media.download_item(item)
+                if isinstance(downloaded, InboundImage):
+                    images.append(downloaded)
+                elif isinstance(downloaded, InboundVideo):
+                    videos.append(downloaded)
+                elif isinstance(downloaded, InboundFile):
+                    files.append(downloaded)
+                else:
+                    audios.append(downloaded)
+        assert text_item is not None or has_media
+        text = text_item.text if text_item is not None and text_item.text else ""
         self._start_typing(conversation, event.context_token)
         try:
             await self._on_message(
@@ -456,8 +520,12 @@ class WeChatAdapter:
                     conversation=conversation,
                     actor=ActorRef(id=sender),
                     message_id=str(event.message_id),
-                    text=text_item.text,
+                    text=text,
                     timestamp=event.create_time_ms / 1000,
+                    images=tuple(images),
+                    videos=tuple(videos),
+                    files=tuple(files),
+                    audios=tuple(audios),
                 ),
             )
         except BaseException:

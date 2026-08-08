@@ -199,9 +199,16 @@ def _build_adapter(config: Config) -> PlatformAdapter:
         from .platforms.wechat import (
             WeChatAPI,
             WeChatAdapter,
+            WeChatMediaDependencyError,
             WeChatStorage,
             WeChatStorageError,
+            require_wechat_media_dependency,
         )
+
+        try:
+            require_wechat_media_dependency()
+        except WeChatMediaDependencyError as exc:
+            raise AdapterConfigurationError(str(exc)) from exc
 
         storage = WeChatStorage(config.wechat.storage_path)
         try:

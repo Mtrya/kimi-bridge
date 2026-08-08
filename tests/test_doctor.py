@@ -288,6 +288,7 @@ def test_valid_wechat_config_checks_only_local_authorization(
 
     assert report.exit_code == 0
     assert _status(report, "adapter") is CheckStatus.OK
+    assert _status(report, "wechat media") is CheckStatus.OK
     assert _status(report, "wechat storage") is CheckStatus.OK
     assert _status(report, "wechat authorization") is CheckStatus.OK
     assert _status(report, "wechat runtime state") is CheckStatus.OK
@@ -296,6 +297,22 @@ def test_valid_wechat_config_checks_only_local_authorization(
     assert bot_id not in rendered
     assert user_id not in rendered
     assert ("/fake/ffmpeg", "-version") not in runner.calls
+
+
+def test_wechat_media_dependency_is_blocking_without_starting_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    config_path = tmp_path / "config.toml"
+    _write_wechat_config(config_path, tmp_path / "workspace")
+    monkeypatch.setattr(wechat_module, "cryptography_available", lambda: False)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 1
+    assert _status(report, "wechat media") is CheckStatus.ERROR
+    assert "kimi-bridge[wechat]" in _detail(report, "wechat media")
 
 
 def test_missing_ffmpeg_is_blocking_only_for_feishu(tmp_path: Path) -> None:

@@ -121,6 +121,7 @@ def diagnose(
         if config.platform == "feishu":
             _check_ffmpeg(runner, which, checks)
         elif config.platform == "wechat":
+            checks.append(_check_wechat_media_dependency())
             checks.extend(_check_wechat_storage(config, platform_name))
         checks.append(_check_directory_target("workspace", config.default_workspace))
         checks.append(_check_state(resolved_state))
@@ -324,6 +325,22 @@ def _check_wechat_storage(
             "not created; the selected adapter will initialize it locally",
         )
     return directory_check, authorization_check, runtime_state_check
+
+
+def _check_wechat_media_dependency() -> DoctorCheck:
+    from .platforms.wechat import cryptography_available
+
+    if not cryptography_available():
+        return DoctorCheck(
+            "wechat media",
+            CheckStatus.ERROR,
+            "encrypted media dependency is missing; install kimi-bridge[wechat]",
+        )
+    return DoctorCheck(
+        "wechat media",
+        CheckStatus.OK,
+        "encrypted media dependency is available",
+    )
 
 
 def _check_ffmpeg(
