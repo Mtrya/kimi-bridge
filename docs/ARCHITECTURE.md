@@ -72,6 +72,30 @@ Feishu and QQ have a complete TOML fallback: `[feishu] app_id` plus `app_secret`
 
 Managed files and configuration are protected local data. On POSIX systems the bridge creates storage directories with mode `700` and JSON files with mode `600`; Windows relies on the current user's ACL. Adapter credentials are not copied into bridge state, logs, command arguments, or environment variables; the voice ASR API key may use the supported `[voice.asr].api_key_env` setting. Diagnostic output reports presence and redacted metadata only.
 
+## Credential contracts (feasibility record)
+
+This section records the authoritative credential flows behind the QR controls. Both the Feishu and the QQ flow are credential bootstraps for the existing application identity; neither substitutes a user access token for bot credentials.
+
+### Feishu/Lark
+
+- Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., create_only=True)` and stores only the returned application `client_id`/`client_secret` plus tenant brand and API domain. Scanning the QR approves application registration in the operator's Feishu/Lark tenant. It is not a user OAuth or device flow, so no user token is stored.
+- Token type: application-level long-lived credentials. The bridge still acts as the application, and `lark-oapi` exchanges them for `tenant_access_token` values server-side.
+- Scopes: QR registration grants no OAuth scope. Feature permissions (bot capability, message/resource/voice-recognition permissions, `im.message.receive_v1`/`card.action.trigger` events, publication) remain console-managed and are documented as remaining steps.
+- Refresh: application credentials have no expiry and no refresh token (none is needed without user OAuth).
+- Transport: unchanged REST + WebSocket long connection. Feishu tenants use `https://open.feishu.cn` and Lark tenants `https://open.larksuite.com`; the managed record preserves the returned domain.
+
+### QQ
+
+- Flow: `kimi-bridge qq login` implements the official `@tencent-connect/qqbot-connector` bind flow against `q.qq.com`: create a bind task with a fresh random AES-256 key, show the connect URL, poll every two seconds, and on completed status decrypt `bot_encrypt_secret` locally. It is a bot bind, not QQ user login or OAuth; the temporary key, task ID, QR URL, and encrypted blob are never persisted.
+- Token type: application-level `bot_appid` plus the locally decrypted AppSecret, stored as the managed credential.
+- Scopes: no user OAuth scopes. Sandbox tester access, production review, and event Intents remain QQ-console prerequisites and are not established by QR completion.
+- Refresh: the AppSecret is long-lived; the adapter refreshes the short-lived `access_token` (about 7200 seconds) from the token endpoint using the stored app credentials, exactly as with manually configured credentials.
+- Transport: unchanged REST + WebSocket gateway; the QR result is a credential bootstrap only. The optional scanner `user_openid` is an app-scoped identity for the allowlist, not a QQ number or nickname.
+
+### WeChat
+
+`kimi-bridge wechat login` runs WeChat's iLink bot authorization and stores the bot credential plus a stable scanner identity locally. It is supported onboarding, not OAuth, has no TOML credential fallback, and one bot authorization supports one polling process.
+
 ## Runtime lifecycle
 
 The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, and then starts that adapter. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path`; Kimi owns its own sessions and model/profile state.

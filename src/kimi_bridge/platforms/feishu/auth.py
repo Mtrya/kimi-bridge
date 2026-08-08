@@ -53,14 +53,14 @@ async def authorize_with_qr(
 ) -> RegistrationResult:
     """Complete one QR app-registration flow and persist only its result."""
 
-    existing: FeishuCredential | None = None
+    replaced = False
     if storage.has_credential():
-        existing = storage.load_credential()
         if not replace:
             raise FeishuControlError(
                 "Feishu managed credentials already exist; use "
                 "feishu login --replace to register a replacement"
             )
+        replaced = True
 
     def on_qr_code(info: dict[str, Any]) -> None:
         url = info.get("url")
@@ -116,7 +116,7 @@ async def authorize_with_qr(
         "Configure at least one intended sender in [feishu].allowed_users before startup.\n"
     )
     stream.flush()
-    return RegistrationResult(credential, replaced=existing is not None)
+    return RegistrationResult(credential, replaced=replaced)
 
 
 async def _register_app(

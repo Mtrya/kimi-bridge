@@ -53,6 +53,8 @@ AUTHORIZED_AT = "2026-08-08T12:00:00+00:00"
 @dataclass(frozen=True, slots=True)
 class QQAuthConfigStub:
     storage_path: Path
+    app_id: str = ""
+    app_secret: str = ""
 
 
 def _completed(**overrides: Any) -> dict[str, Any]:
@@ -750,12 +752,13 @@ def test_run_login_prints_next_steps_without_leaking_secrets(
 
     rendered = output.getvalue()
     assert "QQ authorization saved locally." in rendered
-    assert f"Bot app_id: {APP_ID}" in rendered
+    assert "Bot app_id: 1234…7890" in rendered
     assert f"Scanner user openid: {SCANNER_OPENID}" in rendered
     assert "Add the scanner openid to qq.allowed_users." in rendered
     assert APP_SECRET not in rendered
     assert KEY not in rendered
     assert ENCRYPTED_SECRET not in rendered
+    assert APP_ID not in rendered
     assert QQStorage(config.storage_path).load_credential().app_secret == APP_SECRET
 
 
@@ -773,6 +776,68 @@ def test_run_status_is_local_redacted_and_reports_permissions(
     assert "Bot app_id: 1234…7890" in rendered
     assert "network status was not checked" in rendered
     assert APP_SECRET not in rendered
+
+
+def test_run_status_reports_complete_toml_fallback(tmp_path: Path) -> None:
+    config = QQAuthConfigStub(
+        tmp_path / "qq", app_id=APP_ID, app_secret=APP_SECRET
+    )
+    output = StringIO()
+
+    assert run_status(config, stream=output) == 0
+
+    rendered = output.getvalue()
+    assert "Managed authorization: not present locally." in rendered
+    assert "Legacy TOML authorization: present locally for 1234…7890" in rendered
+    assert APP_SECRET not in rendered
+    assert APP_ID not in rendered
+
+
+def test_run_status_incomplete_toml_pair_still_fails(tmp_path: Path) -> None:
+    config = QQAuthConfigStub(tmp_path / "qq", app_id=APP_ID)
+    output = StringIO()
+
+    assert run_status(config, stream=output) == 1
+
+    rendered = output.getvalue()
+    assert "Authorization: not configured locally." in rendered
+    assert APP_SECRET not in rendered
+
+
+def test_run_status_managed_credential_takes_precedence_over_toml(
+    tmp_path: Path,
+) -> None:
+    config = QQAuthConfigStub(
+        tmp_path / "qq", app_id="TOML-APP-ID", app_secret="TOML-SECRET"
+    )
+    QQStorage(config.storage_path).save_credential(_credential())
+    output = StringIO()
+
+    assert run_status(config, stream=output) == 0
+
+    rendered = output.getvalue()
+    assert "Authorization: present locally" in rendered
+    assert "TOML-APP-ID" not in rendered
+    assert "TOML-SECRET" not in rendered
+
+
+def test_run_status_reports_corrupt_managed_credential_without_secrets(
+    tmp_path: Path,
+) -> None:
+    config = QQAuthConfigStub(
+        tmp_path / "qq", app_id="TOML-APP-ID", app_secret="TOML-SECRET"
+    )
+    storage = QQStorage(config.storage_path)
+    storage.path.mkdir(mode=0o700, parents=True)
+    storage.credential_path.write_text("{not-json", encoding="utf-8")
+    storage.credential_path.chmod(0o600)
+    output = StringIO()
+
+    assert run_status(config, stream=output) == 1
+
+    rendered = output.getvalue()
+    assert "Authorization error" in rendered
+    assert "TOML-SECRET" not in rendered
 
 
 def test_run_logout_removes_only_owned_files_and_is_idempotent(

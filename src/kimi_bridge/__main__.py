@@ -33,7 +33,7 @@ from .platforms.qq import (
     QQGatewayClient,
     QQTokenManager,
 )
-from .platforms.qq.storage import QQStorage, QQStorageError
+from .platforms.qq.storage import QQStorage
 from .platforms.telegram import TelegramAdapter
 from .platforms.wechat import WeChatAuthenticationExpired
 from .router import ChatRouter
@@ -156,21 +156,21 @@ def _build_adapter(config: Config) -> PlatformAdapter:
                 "feishu.allowed_users must contain at least one user"
             )
         storage = FeishuStorage(config.feishu.storage_path)
-        try:
-            managed_credential = storage.has_credential()
-        except (FeishuStorageError, OSError, TypeError, ValueError) as exc:
+        inspection = storage.inspect(platform_name=sys.platform)
+        if inspection.directory_error is not None:
             raise AdapterConfigurationError(
-                "Feishu managed credentials are invalid or unavailable; "
+                "Feishu storage path is not usable "
+                f"({inspection.directory_error}); fix or remove {storage.path} "
+                "to use the [feishu] app_id/app_secret fallback"
+            )
+        if inspection.credential_error is not None:
+            raise AdapterConfigurationError(
+                "Feishu managed credentials are invalid or unavailable "
+                f"({inspection.credential_error}); "
                 "run kimi-bridge feishu login --replace"
-            ) from exc
-        if managed_credential:
-            try:
-                credential = storage.load_credential()
-            except (FeishuStorageError, OSError, TypeError, ValueError) as exc:
-                raise AdapterConfigurationError(
-                    "Feishu managed credentials are invalid or unavailable; "
-                    "run kimi-bridge feishu login --replace"
-                ) from exc
+            )
+        if inspection.credential is not None:
+            credential = inspection.credential
             app_id = credential.app_id
             app_secret = credential.app_secret
             api_domain = credential.api_domain
@@ -204,21 +204,21 @@ def _build_adapter(config: Config) -> PlatformAdapter:
                 "qq.allowed_users must contain at least one user"
             )
         storage = QQStorage(config.qq.storage_path)
-        try:
-            managed_credential = storage.has_credential()
-        except (QQStorageError, OSError, TypeError, ValueError) as exc:
+        inspection = storage.inspect(platform_name=sys.platform)
+        if inspection.directory_error is not None:
             raise AdapterConfigurationError(
-                "QQ managed credentials are invalid or unavailable; "
+                "QQ storage path is not usable "
+                f"({inspection.directory_error}); fix or remove {storage.path} "
+                "to use the [qq] app_id/app_secret fallback"
+            )
+        if inspection.credential_error is not None:
+            raise AdapterConfigurationError(
+                "QQ managed credentials are invalid or unavailable "
+                f"({inspection.credential_error}); "
                 "run kimi-bridge qq login --replace"
-            ) from exc
-        if managed_credential:
-            try:
-                credential = storage.load_credential()
-            except (QQStorageError, OSError, TypeError, ValueError) as exc:
-                raise AdapterConfigurationError(
-                    "QQ managed credentials are invalid or unavailable; "
-                    "run kimi-bridge qq login --replace"
-                ) from exc
+            )
+        if inspection.credential is not None:
+            credential = inspection.credential
             app_id = credential.app_id
             app_secret = credential.app_secret
         elif config.qq.app_id and config.qq.app_secret:

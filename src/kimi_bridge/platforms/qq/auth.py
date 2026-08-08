@@ -77,6 +77,12 @@ class QQAuthConfig(Protocol):
     @property
     def storage_path(self) -> Path: ...
 
+    @property
+    def app_id(self) -> str: ...
+
+    @property
+    def app_secret(self) -> str: ...
+
 
 @dataclass(frozen=True, slots=True)
 class QQRegistrationResult:
@@ -406,7 +412,7 @@ def run_login(
         )
     )
     stream.write("QQ authorization saved locally.\n")
-    stream.write(f"Bot app_id: {result.credential.app_id}\n")
+    stream.write(f"Bot app_id: {redact_app_id(result.credential.app_id)}\n")
     stream.write(f"Authorized at: {result.credential.authorized_at}\n")
     if result.user_openid is not None:
         stream.write(f"Scanner user openid: {result.user_openid}\n")
@@ -435,20 +441,29 @@ def run_status(
 
     if inspection.credential_error:
         stream.write(f"Authorization error: {inspection.credential_error}.\n")
-    elif inspection.credential is None:
-        stream.write("Authorization: not authorized locally.\n")
-    else:
+    elif inspection.credential is not None:
         credential = inspection.credential
         stream.write(
             "Authorization: present locally; network status was not checked.\n"
         )
         stream.write(f"Bot app_id: {redact_app_id(credential.app_id)}\n")
         stream.write(f"Authorized at: {credential.authorized_at}\n")
+    elif config.app_id and config.app_secret:
+        stream.write("Managed authorization: not present locally.\n")
+        stream.write(
+            f"Legacy TOML authorization: present locally for {redact_app_id(config.app_id)}; "
+            "network status was not checked.\n"
+        )
+    else:
+        stream.write("Authorization: not configured locally.\n")
     stream.flush()
     return int(
         inspection.directory_error is not None
         or inspection.credential_error is not None
-        or inspection.credential is None
+        or (
+            inspection.credential is None
+            and not (config.app_id and config.app_secret)
+        )
     )
 
 

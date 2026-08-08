@@ -12,7 +12,7 @@ kimi-bridge connects the local Kimi Code server to one chat platform, preserves 
 | --- | --- |
 | Feishu, QQ, and WeChat private chats | Supported |
 | Telegram private chats | Experimental |
-| Linux, macOS, and Windows | Intentionally supported |
+| Linux, macOS, and Windows | Supported |
 | Voice messages | Supported on Feishu, QQ, and WeChat |
 
 Each bridge process selects exactly one platform adapter. Feishu, QQ, and WeChat all support local QR onboarding, but the three QR flows have different meanings; see [QR onboarding](docs/QR_ONBOARDING.md). WeChat is a supported QR-authorized private-chat bot. It forces `auto` mode and has no approvals, questions, separate thinking stream, groups, or proactive delivery; it accepts inbound image, voice, file, and video messages and sends outbound images, videos, and files.

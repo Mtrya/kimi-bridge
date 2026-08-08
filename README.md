@@ -12,7 +12,7 @@ kimi-bridge 连接本地 Kimi Code 服务器与一个聊天平台，保持聊天
 | --- | --- |
 | 飞书、QQ、微信私聊 | 已支持 |
 | Telegram 私聊 | 实验性 |
-| Linux、macOS 和 Windows | 有意支持 |
+| Linux、macOS 和 Windows | 已支持 |
 | 语音消息 | 飞书、QQ 和微信支持 |
 
 每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信都支持本地 QR 授权；三种 QR 的含义不同，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。微信正式支持扫码授权的私聊机器人，但强制使用 `auto`，不提供审批、提问、独立思考流、群聊或主动推送；它支持接收图片、语音、文件和视频，以及发送图片、视频和文件。

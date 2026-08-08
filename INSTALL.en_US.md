@@ -13,7 +13,7 @@ kimi-bridge connects one local Kimi Code installation to one chat platform. This
 | WeChat | Supported | QR-authorized private chat; one bot authorization can have only one polling process; forced `auto` with no approvals, questions, separate thinking stream, groups, or proactive delivery |
 | Telegram | Experimental | Private chats only; startup takes over long polling and drops pending updates |
 
-Linux, macOS, and Windows are intentionally supported. Each kimi-bridge process selects exactly one `platform`. To run multiple platforms, use separate processes, configuration files, state files, workspaces, and bot resources.
+Linux, macOS, and Windows are supported platforms. Each kimi-bridge process selects exactly one `platform`. To run multiple platforms, use separate processes, configuration files, state files, workspaces, and bot resources.
 
 ## 1. Verify Kimi Code first
 

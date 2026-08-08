@@ -257,7 +257,7 @@ def test_invalid_managed_feishu_credential_does_not_fallback(
     from kimi_bridge.platforms.feishu.storage import FeishuStorage
 
     storage = FeishuStorage(tmp_path / "feishu")
-    storage.path.mkdir(parents=True)
+    storage.path.mkdir(parents=True, mode=0o700)
     storage.credential_path.write_text("{not-json", encoding="utf-8")
     storage.credential_path.chmod(0o600)
 
@@ -281,7 +281,7 @@ def test_invalid_managed_qq_credential_does_not_fallback(tmp_path: Path) -> None
     from kimi_bridge.platforms.qq.storage import QQStorage
 
     storage = QQStorage(tmp_path / "qq")
-    storage.path.mkdir(parents=True)
+    storage.path.mkdir(parents=True, mode=0o700)
     storage.credential_path.write_text("{not-json", encoding="utf-8")
     storage.credential_path.chmod(0o600)
 
@@ -301,8 +301,48 @@ def test_invalid_managed_qq_credential_does_not_fallback(tmp_path: Path) -> None
     assert "toml-secret" not in str(caught.value)
 
 
+def test_unsafe_feishu_storage_path_blocks_toml_fallback(tmp_path: Path) -> None:
+    blocker = tmp_path / "feishu-blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="storage path is not usable") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="feishu",
+                feishu=FeishuConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"ou_one"}),
+                    storage_path=blocker,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
+def test_unsafe_qq_storage_path_blocks_toml_fallback(tmp_path: Path) -> None:
+    blocker = tmp_path / "qq-blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="storage path is not usable") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="qq",
+                qq=QQConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"O1"}),
+                    storage_path=blocker,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
 def test_selected_feishu_adapter_requires_ffmpeg(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(main_module.shutil, "which", lambda _name: None)
 
