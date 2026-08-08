@@ -35,6 +35,7 @@ from kimi_bridge.platforms.wechat import (
     WeChatControlError,
     WeChatCredential,
     WeChatInboundEvent,
+    WeChatMediaError,
     WeChatMessageItem,
     WeChatPollResult,
     WeChatProtocolError,
@@ -335,6 +336,40 @@ async def test_redirect_switches_only_the_polling_origin(tmp_path: Path) -> None
     ]
 
 
+async def test_qr_refresh_restores_default_polling_origin(
+    tmp_path: Path,
+) -> None:
+    server = QRServer(
+        [
+            {
+                "status": "scaned_but_redirect",
+                "redirect_host": "edge.weixin.qq.com",
+            },
+            {"status": "expired"},
+            _confirmed(baseurl="https://ilinkai.weixin.qq.com"),
+        ],
+        qr_codes=[
+            {
+                "qrcode": "QR_ONE_SECRET",
+                "qrcode_img_content": "https://weixin.example/authorize/one",
+            },
+            {
+                "qrcode": "QR_TWO_SECRET",
+                "qrcode_img_content": "https://weixin.example/authorize/two",
+            },
+        ],
+    )
+
+    await _authorize(server, WeChatStorage(tmp_path / "wechat"))
+
+    status_requests = [request for request in server.requests if request.method == "GET"]
+    assert [request.url.host for request in status_requests] == [
+        "ilinkai.weixin.qq.com",
+        "edge.weixin.qq.com",
+        "ilinkai.weixin.qq.com",
+    ]
+
+
 async def test_binded_redirect_retains_existing_authorization(
     tmp_path: Path,
 ) -> None:
@@ -416,6 +451,46 @@ async def test_successful_replacement_atomically_commits_the_new_credential(
     assert json.loads(creation.content) == {
         "local_token_list": ["EXISTING_TOKEN_SECRET"]
     }
+
+
+async def test_replacement_with_new_bot_resets_runtime_state(tmp_path: Path) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_credential(_credential("EXISTING_TOKEN_SECRET"))
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            get_updates_buf="OLD_CURSOR",
+            context_tokens={("abcd1234efgh5678@im.bot", "user-one"): "OLD_CONTEXT"},
+            processed_message_ids=(("abcd1234efgh5678@im.bot", "user-one", 7),),
+        )
+    )
+    server = QRServer(
+        [
+            _confirmed(
+                bot_token="NEW_TOKEN_SECRET",
+                ilink_bot_id="new-bot-identity@im.bot",
+            )
+        ]
+    )
+
+    await _authorize(server, storage, replace=True)
+
+    assert storage.load_runtime_state() == WeChatRuntimeState()
+
+
+async def test_replacement_with_same_bot_preserves_runtime_state(tmp_path: Path) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_credential(_credential("EXISTING_TOKEN_SECRET"))
+    previous = WeChatRuntimeState(
+        get_updates_buf="OLD_CURSOR",
+        context_tokens={("abcd1234efgh5678@im.bot", "user-one"): "OLD_CONTEXT"},
+        processed_message_ids=(("abcd1234efgh5678@im.bot", "user-one", 7),),
+    )
+    storage.save_runtime_state(previous)
+    server = QRServer([_confirmed(bot_token="REFRESHED_TOKEN_SECRET")])
+
+    await _authorize(server, storage, replace=True)
+
+    assert storage.load_runtime_state() == previous
 
 
 @pytest.mark.parametrize(
@@ -592,15 +667,42 @@ def test_storage_is_atomic_private_and_secret_safe(
     assert not tuple(storage.path.glob("*.tmp"))
 
 
+@requires_posix_modes
+def test_normal_storage_load_rejects_unsafe_modes(tmp_path: Path) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_credential(_credential("MODE_TOKEN_SECRET"))
+    storage.save_runtime_state(WeChatRuntimeState(get_updates_buf="MODE_CURSOR"))
+
+    storage.path.chmod(0o755)
+    with pytest.raises(WeChatStorageError, match="storage directory mode must be 700"):
+        storage.load_credential()
+    with pytest.raises(WeChatStorageError, match="storage directory mode must be 700"):
+        storage.load_runtime_state()
+
+    storage.path.chmod(0o700)
+    storage.credential_path.chmod(0o644)
+    with pytest.raises(WeChatStorageError, match="credential file mode must be 600"):
+        storage.load_credential()
+
+    storage.credential_path.chmod(0o600)
+    storage.runtime_state_path.chmod(0o644)
+    with pytest.raises(
+        WeChatStorageError, match="runtime-state file mode must be 600"
+    ):
+        storage.load_runtime_state()
+
+
+
 def test_storage_rejects_unknown_versions_without_exposing_token(
     tmp_path: Path,
 ) -> None:
     storage = WeChatStorage(tmp_path / "wechat")
-    storage.path.mkdir(parents=True)
+    storage.path.mkdir(mode=0o700, parents=True)
     storage.credential_path.write_text(
         '{"version": 999, "bot_token": "FUTURE_TOKEN_SECRET"}\n',
         encoding="utf-8",
     )
+    storage.credential_path.chmod(0o600)
 
     with pytest.raises(WeChatStorageError) as caught:
         storage.load_credential()
@@ -1259,7 +1361,7 @@ def test_runtime_state_rejects_unknown_schema_without_exposing_secrets(
     tmp_path: Path,
 ) -> None:
     storage = WeChatStorage(tmp_path / "wechat")
-    storage.path.mkdir(parents=True)
+    storage.path.mkdir(mode=0o700, parents=True)
     storage.runtime_state_path.write_text(
         json.dumps(
             {
@@ -1270,6 +1372,7 @@ def test_runtime_state_rejects_unknown_schema_without_exposing_secrets(
         ),
         encoding="utf-8",
     )
+    storage.runtime_state_path.chmod(0o600)
 
     with pytest.raises(WeChatStorageError) as caught:
         storage.load_runtime_state()
@@ -1331,6 +1434,7 @@ def test_runtime_state_rejects_duplicate_composite_identities(
         ),
         encoding="utf-8",
     )
+    storage.runtime_state_path.chmod(0o600)
 
     with pytest.raises(WeChatStorageError, match="unique"):
         storage.load_runtime_state()
@@ -1430,39 +1534,105 @@ async def test_filtered_events_do_not_reach_the_router(
     assert "intruder" in caplog.text
 
 
-async def test_malformed_authorized_messages_leave_cursor_uncommitted(
-    tmp_path: Path,
+async def test_malformed_authorized_messages_are_isolated_and_committed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     inbound: list[InboundMessage] = []
 
     async def handler(_adapter: WeChatAdapter, message: InboundMessage) -> None:
         inbound.append(message)
 
+    caplog.set_level(logging.WARNING)
     initial = WeChatRuntimeState(get_updates_buf="COMMITTED_CURSOR")
     adapter, _api, storage = await _start_runtime_adapter(
         tmp_path, handler, initial_state=initial
     )
-    malformed = (
-        replace(_runtime_event(), from_user_id=None),
-        replace(_runtime_event(), message_type=None),
-        replace(_runtime_event(), message_id=None),
-        replace(_runtime_event(), create_time_ms=None),
-        replace(_runtime_event(), context_token=None),
-        replace(_runtime_event(), items=()),
+    messages = (
+        replace(_runtime_event(message_id=601), from_user_id=None),
+        replace(_runtime_event(message_id=602), message_type=None),
+        replace(_runtime_event(message_id=603), message_id=None),
+        replace(_runtime_event(message_id=604), create_time_ms=None),
+        replace(_runtime_event(message_id=605), context_token=None),
+        replace(_runtime_event(message_id=606), items=()),
+        _runtime_event(message_id=607, context_token="VALID_CONTEXT"),
     )
     try:
-        for event in malformed:
-            with pytest.raises(WeChatProtocolError):
-                await adapter.handle_poll_result(
-                    WeChatPollResult(
-                        messages=(event,), get_updates_buf="UNSAFE_CURSOR"
-                    )
-                )
-            assert storage.load_runtime_state().get_updates_buf == "COMMITTED_CURSOR"
+        await adapter.handle_poll_result(
+            WeChatPollResult(
+                messages=messages,
+                get_updates_buf="CURSOR_AFTER_MALFORMED",
+            )
+        )
+        await adapter.handle_poll_result(
+            WeChatPollResult(
+                messages=messages,
+                get_updates_buf="CURSOR_AFTER_REPLAY",
+            )
+        )
     finally:
         await adapter.stop()
 
-    assert inbound == []
+    assert [message.message_id for message in inbound] == ["607"]
+    state = storage.load_runtime_state()
+    assert state.get_updates_buf == "CURSOR_AFTER_REPLAY"
+    assert state.processed_message_ids == (
+        ("bot-one@im.bot", "user-one", 602),
+        ("bot-one@im.bot", "user-one", 604),
+        ("bot-one@im.bot", "user-one", 605),
+        ("bot-one@im.bot", "user-one", 606),
+        ("bot-one@im.bot", "user-one", 607),
+    )
+    assert "malformed" in caplog.text
+    assert "CONTEXT_TOKEN_SECRET_ONE" not in caplog.text
+
+
+async def test_media_failure_does_not_block_later_event_or_cursor_dedupe(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class FailingMedia:
+        async def download_item(self, _item: WeChatMessageItem) -> object:
+            raise WeChatMediaError("invalid inbound media")
+
+        async def close(self) -> None:
+            return None
+
+    inbound: list[str] = []
+
+    async def handler(_adapter: WeChatAdapter, message: InboundMessage) -> None:
+        inbound.append(message.message_id)
+
+    caplog.set_level(logging.WARNING)
+    adapter, _api, storage = await _start_runtime_adapter(
+        tmp_path,
+        handler,
+        adapter_kwargs={"media": FailingMedia()},
+    )
+    messages = (
+        _runtime_event(
+            message_id=701,
+            context_token="MEDIA_CONTEXT_SECRET",
+            items=(WeChatMessageItem(type=2),),
+        ),
+        _runtime_event(message_id=702, context_token="VALID_CONTEXT"),
+    )
+    try:
+        await adapter.handle_poll_result(
+            WeChatPollResult(messages=messages, get_updates_buf="MEDIA_CURSOR")
+        )
+        await adapter.handle_poll_result(
+            WeChatPollResult(messages=messages, get_updates_buf="REPLAY_CURSOR")
+        )
+    finally:
+        await adapter.stop()
+
+    assert inbound == ["702"]
+    assert storage.load_runtime_state().get_updates_buf == "REPLAY_CURSOR"
+    assert storage.load_runtime_state().processed_message_ids == (
+        ("bot-one@im.bot", "user-one", 701),
+        ("bot-one@im.bot", "user-one", 702),
+    )
+    assert "invalid inbound media" not in caplog.text
+    assert "MEDIA_CONTEXT_SECRET" not in caplog.text
 
 
 async def test_batch_failure_replay_skips_durable_prefix_and_commits_suffix(
@@ -1878,6 +2048,162 @@ async def test_send_requires_current_context_and_deferred_features_fail_closed(
     assert "normal message" in api.sends[-1]["text"]
 
 
+async def test_formatter_state_spans_chunks_and_resets_after_finalization(
+    tmp_path: Path,
+) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            context_tokens={("bot-one@im.bot", "user-one"): "CURRENT_CONTEXT"}
+        )
+    )
+    api = RuntimeAPIStub()
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        storage=storage,
+    )
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    first_chunk = "````\n" + "x" * (adapter.message_limit - len("````\n"))
+    second_chunk = (
+        "~~inside~~ [link](https://example.test)\n"
+        "```\n"
+        "~~~~\n"
+        "````\n"
+    )
+
+    await adapter.send_text(conversation, first_chunk)
+    await adapter.send_final_text(conversation, second_chunk)
+    await adapter.send_final_text(conversation, "~~next response~~")
+    await adapter.stop()
+
+    assert len(first_chunk) == 4000
+    assert [send["text"] for send in api.sends] == [
+        first_chunk,
+        second_chunk,
+        "next response",
+    ]
+
+
+async def test_empty_final_text_is_noop_and_finishes_typing(
+    tmp_path: Path,
+) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            context_tokens={("bot-one@im.bot", "user-one"): "CURRENT_CONTEXT"}
+        )
+    )
+    api = RuntimeAPIStub()
+    api.typing_ticket = "TYPING_TICKET_SECRET"
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        storage=storage,
+    )
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    adapter._start_typing(conversation, "CURRENT_CONTEXT")
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_ACTIVE
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+
+    await adapter.send_text(conversation, "```\n")
+    message = await adapter.send_final_text(conversation, "")
+    await adapter.send_text(conversation, "~~next response~~")
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_CANCEL
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+    await adapter.stop()
+
+    assert message.conversation == conversation
+    assert message.message_id
+    assert [send["text"] for send in api.sends] == ["```\n", "next response"]
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_send_file_finishes_typing_after_success_or_failure(
+    tmp_path: Path, failed: bool
+) -> None:
+    class FileAPI(RuntimeAPIStub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.typing_ticket = "TYPING_TICKET_SECRET"
+            self.media_sends: list[dict[str, object]] = []
+
+        async def send_media(self, **kwargs: object) -> None:
+            self.media_sends.append(kwargs)
+
+    class FileMedia:
+        async def upload_file(
+            self, _file: OutboundFile, *, to_user_id: str
+        ) -> tuple[object, object]:
+            assert to_user_id == "user-one"
+            if failed:
+                raise WeChatMediaError("upload failed")
+
+            class Classification:
+                message_item_type = 4
+                name = "one.txt"
+
+            return Classification(), object()
+
+        async def close(self) -> None:
+            return None
+
+    async def yield_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            context_tokens={("bot-one@im.bot", "user-one"): "CURRENT_CONTEXT"}
+        )
+    )
+    api = FileAPI()
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        media=FileMedia(),
+        storage=storage,
+        sleep=yield_sleep,
+    )
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    adapter._start_typing(conversation, "CURRENT_CONTEXT")
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_ACTIVE
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+
+    if failed:
+        with pytest.raises(WeChatMediaError, match="upload failed"):
+            await adapter.send_file(
+                conversation, OutboundFile("one.txt", b"one", "text/plain")
+            )
+    else:
+        await adapter.send_file(
+            conversation, OutboundFile("one.txt", b"one", "text/plain")
+        )
+        assert api.media_sends
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_CANCEL
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+    await adapter.stop()
+
+
 async def test_typing_fetch_refresh_cancel_and_safe_retries(
     tmp_path: Path,
 ) -> None:
@@ -2029,6 +2355,69 @@ async def test_typing_cancel_follows_an_inflight_active_request(
     ]
 
 
+async def test_stop_awaits_cleanup_created_by_poll_cancellation(
+    tmp_path: Path,
+) -> None:
+    class OrderedAPI(RuntimeAPIStub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.typing_ticket = "TYPING_TICKET_SECRET"
+            self.events: list[str] = []
+
+        async def send_typing(
+            self,
+            *,
+            ilink_user_id: str,
+            typing_ticket: str,
+            status: int,
+        ) -> None:
+            self.events.append(
+                "cancel" if status == TYPING_STATUS_CANCEL else "active"
+            )
+            await super().send_typing(
+                ilink_user_id=ilink_user_id,
+                typing_ticket=typing_ticket,
+                status=status,
+            )
+
+        async def close(self) -> None:
+            self.events.append("close")
+            await super().close()
+
+    api = OrderedAPI()
+    handler_started = asyncio.Event()
+
+    async def yield_sleep(_delay: float) -> None:
+        await asyncio.sleep(0)
+
+    async def handler(_adapter: WeChatAdapter, _message: InboundMessage) -> None:
+        handler_started.set()
+        await asyncio.Event().wait()
+
+    adapter, _runtime_api, _storage = await _start_runtime_adapter(
+        tmp_path,
+        handler,
+        api=api,
+        adapter_kwargs={"sleep": yield_sleep},
+    )
+    await api.polls.put(
+        WeChatPollResult(
+            messages=(_runtime_event(message_id=905),),
+            get_updates_buf="STOP_CURSOR",
+        )
+    )
+    await handler_started.wait()
+    await _wait_until(
+        lambda: any(status == TYPING_STATUS_ACTIVE for _user, _ticket, status in api.typing_calls)
+    )
+
+    await adapter.stop()
+
+    assert api.events[-1] == "close"
+    close_index = api.events.index("close")
+    assert all(event != "cancel" or index < close_index for index, event in enumerate(api.events))
+
+
 async def test_typing_failure_never_blocks_handler_or_cursor_commit(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2118,6 +2507,82 @@ def test_whole_message_formatter_preserves_code_and_readable_links() -> None:
     assert image_target not in rendered
     assert "`~~inline code~~`" in rendered
     assert "```python\n> # ~~fenced code~~\n```" in rendered
+
+
+def test_formatter_supports_matching_backtick_and_tilde_fences() -> None:
+    text = (
+        "````python\n"
+        "triple ``` stays code\n"
+        "~~~ stays code\n"
+        "```\n"
+        "````\n"
+        "~~visible~~\n"
+        "~~~text\n"
+        "triple ``` stays code\n"
+        "~~~~\n"
+        "~~visible again~~\n"
+    )
+
+    assert sanitize_markdown(text) == (
+        "````python\n"
+        "triple ``` stays code\n"
+        "~~~ stays code\n"
+        "```\n"
+        "````\n"
+        "visible\n"
+        "~~~text\n"
+        "triple ``` stays code\n"
+        "~~~~\n"
+        "visible again\n"
+    )
+
+
+def test_formatter_preserves_escaped_and_incomplete_images_and_links() -> None:
+    image_url = "https://images.example/diagram.png"
+    link_url = "https://docs.example/path"
+    text = "\n".join(
+        (
+            rf"\![escaped]({image_url})",
+            rf"\\![active]({image_url})",
+            rf"![incomplete]({image_url}",
+            rf"\[escaped]({link_url})",
+            rf"\\[active]({link_url})",
+            rf"[incomplete]({link_url}",
+        )
+    )
+
+    assert sanitize_markdown(text) == "\n".join(
+        (
+            rf"\![escaped]({image_url})",
+            r"\\active",
+            rf"![incomplete]({image_url}",
+            rf"\[escaped]({link_url})",
+            rf"\\active ({link_url})",
+            rf"[incomplete]({link_url}",
+        )
+    )
+
+
+def test_formatter_only_removes_matched_unescaped_strikethrough() -> None:
+    text = "\n".join(
+        (
+            "~~matched~~",
+            "keep ~~unmatched",
+            r"\~~escaped~~",
+            r"~~open \~~ inner~~",
+            "`~~inline code~~`",
+        )
+    )
+
+    assert sanitize_markdown(text) == "\n".join(
+        (
+            "matched",
+            "keep ~~unmatched",
+            r"\~~escaped~~",
+            r"open \~~ inner",
+            "`~~inline code~~`",
+        )
+    )
 
 
 async def test_lifecycle_honors_bounded_timeout_and_cancels_promptly(

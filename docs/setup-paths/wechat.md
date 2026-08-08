@@ -31,7 +31,7 @@ Read the [setup agent contract](../../INSTALL_AI.md) before using this path. Fol
 
 Native images and videos become model media only when the selected Kimi model advertises `image_in` or `video_in`; otherwise the bridge saves them in the workspace inbox and supplies the path. Native voice transcription is best effort and may contain recognition errors. A `typing...` indication can refresh intermittently while a turn or tool call is active, but it must clear after the final answer or shutdown.
 
-The live verification used one allowlisted scanner. The code contract isolates cursor context and Kimi bindings per sender, but two-sender interleaving has not been project-live-validated and must not be reported as such. Delivery is at-least-once across the narrow crash window between Kimi acceptance and local completion recording.
+The live verification used one allowlisted scanner. The bridge keeps cursor context and Kimi bindings per sender, but only one Kimi response stream may be active: an overlapping model prompt from another sender is rejected with retry guidance instead of cancelling the active response. Do not report two-sender interleaving as live-validated. Delivery is at-least-once across the narrow crash window between Kimi acceptance and local completion recording.
 
 ## Replacement, expiry, and cleanup
 

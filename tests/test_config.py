@@ -156,7 +156,7 @@ def test_loads_wechat_policy_and_resolves_storage_path(tmp_path: Path) -> None:
                 'platform = "wechat"',
                 "[wechat]",
                 'allowed_users = [" user-one ", "user-two"]',
-                f'storage_path = "{storage}"',
+                f"storage_path = '{storage}'",
             ]
         ),
         encoding="utf-8",

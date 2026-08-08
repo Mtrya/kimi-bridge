@@ -18,7 +18,7 @@ from .api import (
     normalize_https_base_url,
     redirect_base_url,
 )
-from .storage import WeChatStorage, redact_bot_id
+from .storage import WeChatRuntimeState, WeChatStorage, redact_bot_id
 from .types import (
     DEFAULT_ILINK_BASE_URL,
     LoginResult,
@@ -136,6 +136,7 @@ async def authorize_with_qr(
                 )
             attempts += 1
             qr_code = await api.fetch_qr_code(local_tokens=local_tokens)
+            current_base_url = DEFAULT_ILINK_BASE_URL
             scanned_reported = False
             _show_qr_url(stream, qr_code, refreshed=True)
             continue
@@ -163,12 +164,37 @@ async def authorize_with_qr(
 
         if status.status == "confirmed":
             result = _confirmed_result(status, authorized_at=authorized_at)
-            storage.save_credential(result.credential)
+            _persist_confirmed_credential(storage, existing, result.credential)
             return result
 
         raise AssertionError(f"unhandled QR status: {status.status}")
 
     raise WeChatControlError("WeChat QR authorization timed out")
+
+
+def _persist_confirmed_credential(
+    storage: WeChatStorage,
+    existing: WeChatCredential | None,
+    credential: WeChatCredential,
+) -> None:
+    reset_runtime_state = (
+        existing is not None and existing.bot_id != credential.bot_id
+    )
+    if not reset_runtime_state:
+        storage.save_credential(credential)
+        return
+
+    runtime_state_existed = storage.runtime_state_path.exists()
+    previous_runtime_state = storage.load_runtime_state()
+    storage.save_runtime_state(WeChatRuntimeState())
+    try:
+        storage.save_credential(credential)
+    except BaseException:
+        if runtime_state_existed:
+            storage.save_runtime_state(previous_runtime_state)
+        else:
+            storage.runtime_state_path.unlink(missing_ok=True)
+        raise
 
 
 def run_login(

@@ -269,6 +269,8 @@ class _RenderingMixin:
         final: bool = False,
     ) -> None:
         if not render.text:
+            if final and not active.adapter.supports_edits:
+                await self._flush_empty_deferred_final(active, render)
             return
         if not active.adapter.supports_edits:
             await self._flush_deferred(active, render, final=final)
@@ -345,6 +347,25 @@ class _RenderingMixin:
             message.message_id,
             edit_limit,
         )
+
+    async def _flush_empty_deferred_final(
+        self, active: _ActiveStream, render: _RenderState
+    ) -> None:
+        async with render.lock:
+            if render.emitted_text or render.messages:
+                return
+            try:
+                message = await active.adapter.send_final_text(
+                    active.conversation, ""
+                )
+            except Exception:
+                LOGGER.exception(
+                    "%s deferred finalization failed; keeping the Kimi event stream active",
+                    active.adapter.name,
+                )
+                return
+            render.messages.append(message)
+            render.last_flush = self._clock()
 
     async def _flush_deferred(
         self,

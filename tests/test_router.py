@@ -948,6 +948,51 @@ async def test_persisted_selected_model_is_not_replaced_by_startup_default(
     ]
 
 
+async def test_cross_conversation_prompt_is_rejected_without_stopping_active_stream(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter_a = FakeAdapter()
+    adapter_b = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter_a, _message("start A"))
+        active = router._active
+        assert active is not None
+        active_task = active.task
+        assert active_task is not None
+        assert not active_task.done()
+
+        await router.handle_inbound(
+            adapter_b,
+            _message("start B", user_id="ou_other", conversation_id="oc_other"),
+        )
+
+        assert len(adapter_b.final_texts) == 1
+        assert adapter_b.final_texts[0][2].startswith("Prompt failed:")
+        assert client.prompts == [
+            (
+                "session-1",
+                PromptContent(text="start A"),
+                {"permission_mode": "manual"},
+            )
+        ]
+        assert client.stream_actions == [("subscribe", "session-1")]
+        assert router._active is active
+        assert active.task is active_task
+        assert not active_task.done()
+    finally:
+        await router.close()
+
+    assert router._active is None
+    assert active_task.cancelled()
+
+
 async def test_close_after_runtime_stream_failure_is_clean(tmp_path: Path) -> None:
     client = FakeKimiClient()
     adapter = FakeAdapter()
@@ -1780,6 +1825,97 @@ async def test_compact_edits_progress_for_api_and_stream_failures(
     assert "No messages to compact" in adapter.edits[0][1]
     assert adapter.edits[1][0] == adapter.sent[1][0]
     assert "event stream failed" in adapter.edits[1][1]
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    (
+        (
+            "compaction.completed",
+            "Compaction complete: 7 prompts compacted; tokens 12345 -> 2345.",
+        ),
+        ("compaction.blocked", "Compaction failed: Kimi blocked the compaction."),
+        (
+            "compaction.cancelled",
+            "Compaction failed: Kimi cancelled the compaction.",
+        ),
+    ),
+)
+async def test_compact_non_editable_sends_final_result_without_edits(
+    tmp_path: Path, terminal: str, expected: str
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: bool(client.compact_calls))
+        client.emit("session-control", _event("compaction.started", trigger="manual"))
+        if terminal == "compaction.completed":
+            client.emit(
+                "session-control",
+                _event(
+                    terminal,
+                    result={
+                        "compactedCount": 7,
+                        "tokensBefore": 12_345,
+                        "tokensAfter": 2345,
+                    },
+                ),
+            )
+        else:
+            client.emit("session-control", _event(terminal))
+        await command
+    finally:
+        await router.close()
+
+    assert adapter.edits == []
+    assert [text for _ref, _conversation, text in adapter.final_texts] == [expected]
+    assert adapter.final_texts[0] == adapter.sent[-1]
+
+
+async def test_compact_non_editable_renders_api_and_stream_failures(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.compact_error = KimiServerAPIError(40910, "No messages to compact")
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/compact"))
+        client.compact_error = None
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: len(client.compact_calls) == 2)
+        client.fail_stream("session-control", RuntimeError("socket lost"))
+        await command
+    finally:
+        await router.close()
+
+    assert adapter.edits == []
+    assert [text for _ref, _conversation, text in adapter.final_texts] == [
+        "Compaction failed: kimi server API error 40910: No messages to compact",
+        "Compaction failed: kimi event stream failed: socket lost",
+    ]
 
 
 async def test_compact_and_undo_validate_arguments_and_busy_state(
@@ -4005,6 +4141,34 @@ async def test_thinking_retry_resync_final_flush_chunk_growth_and_turn_reset(
         "Thinking\n\nne",
         "w",
     ]
+
+
+async def test_deferred_empty_finalization_is_once_and_non_final_is_noop(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        active = router._active
+        assert active is not None
+
+        await router._flush(active, active.render)
+        assert adapter.final_texts == []
+
+        await router._flush(active, active.render, final=True)
+        await router._flush(active, active.render, final=True)
+    finally:
+        await router.close()
+
+    assert adapter.edits == []
+    assert [text for _ref, _conversation, text in adapter.final_texts] == [""]
 
 
 async def test_deferred_rendering_batches_by_step_boundary_without_edits(

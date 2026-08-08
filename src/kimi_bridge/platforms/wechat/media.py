@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -47,6 +48,7 @@ LOGGER = logging.getLogger(__name__)
 WECHAT_MEDIA_MAX_BYTES = 100 * 1024 * 1024
 WECHAT_CDN_TIMEOUT_SECONDS = 60.0
 WECHAT_CDN_UPLOAD_ATTEMPTS = 3
+WECHAT_CDN_UPLOAD_BACKOFF_SECONDS = 0.5
 _AES_BLOCK_BYTES = 16
 _MAX_SECRET_FIELD_BYTES = 16 * 1024
 _MAX_MEDIA_NAME_BYTES = 255
@@ -191,8 +193,6 @@ class WeChatMediaClient:
         if max_bytes <= 0 or timeout_seconds <= 0 or upload_attempts <= 0:
             raise ValueError("WeChat media limits and attempts must be positive")
         self._api = api
-        logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("httpcore").setLevel(logging.WARNING)
         self._cdn_base_url = _normalize_cdn_base_url(cdn_base_url)
         parsed = urlsplit(self._cdn_base_url)
         self._cdn_host = parsed.hostname or ""
@@ -397,6 +397,9 @@ class WeChatMediaClient:
             if attempt + 1 >= self._upload_attempts:
                 raise error
             LOGGER.warning("WeChat CDN upload transient failure; retrying")
+            await asyncio.sleep(
+                WECHAT_CDN_UPLOAD_BACKOFF_SECONDS * (2**attempt)
+            )
         raise AssertionError("unreachable WeChat CDN retry state")
 
     def _download_url(self, reference: WeChatCDNMedia) -> str:

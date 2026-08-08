@@ -33,6 +33,7 @@ from .platforms.qq import (
     QQTokenManager,
 )
 from .platforms.telegram import TelegramAdapter
+from .platforms.wechat import WeChatAuthenticationExpired
 from .router import ChatRouter
 from .speech import HttpSpeechTranscriber
 from .state import StateStore
@@ -460,6 +461,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         AdapterConfigurationError,
         KimiServerError,
+        WeChatAuthenticationExpired,
         ValueError,
         TypeError,
     ) as exc:

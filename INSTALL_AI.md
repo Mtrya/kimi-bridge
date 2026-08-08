@@ -352,7 +352,7 @@ Start one foreground bridge and validate serially with the allowlisted scanner:
 
 Image/video routing depends on the selected model's `image_in`/`video_in` capabilities; capability absence must produce the documented workspace-inbox fallback rather than a false native-media claim. Native ASR quality is best-effort. A refreshed `typing...` indication may appear intermittently while a turn or tool call remains active, but it must clear after the final response or shutdown.
 
-The verified path covers one allowlisted scanner. Do not report two-sender context isolation as live-validated unless two identities were actually interleaved. WeChat delivery is at-least-once across the narrow crash window, not exactly-once, and outbound delivery is reactive to an inbound context token rather than proactive.
+The verified path covers one allowlisted scanner. The router keeps one live Kimi response stream and rejects an overlapping model prompt from another sender with retry guidance instead of cancelling the active response. Do not report two-sender interleaving as live-validated unless it was actually exercised. WeChat delivery is at-least-once across the narrow crash window, not exactly-once, and outbound delivery is reactive to an inbound context token rather than proactive.
 
 ### 7.4 Replace, recover, or remove authorization
 

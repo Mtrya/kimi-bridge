@@ -36,7 +36,7 @@ REQUIRED_SOURCE_FILES = {
     "docs/setup-paths/qq.md",
     "docs/setup-paths/wechat.md",
 }
-FORBIDDEN_SOURCE_PREFIXES = (".agents/", "roadmap/")
+FORBIDDEN_SOURCE_PREFIXES = (".agents/", "references/", "roadmap/")
 PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
     "project"
 ]["version"]

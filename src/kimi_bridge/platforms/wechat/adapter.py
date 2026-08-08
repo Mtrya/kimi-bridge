@@ -24,8 +24,12 @@ from ..base import (
     MessageRef,
     OutboundFile,
 )
-from .formatting import sanitize_markdown
-from .media import WeChatMediaClient, WeChatOutboundClassification
+from .formatting import MarkdownFormatter
+from .media import (
+    WeChatMediaClient,
+    WeChatMediaError,
+    WeChatOutboundClassification,
+)
 from .storage import WeChatRuntimeState, WeChatStorage
 from .types import (
     DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
@@ -215,6 +219,7 @@ class WeChatAdapter:
         self._typing_tasks: dict[ConversationRef, asyncio.Task[None]] = {}
         self._typing_cleanup_tasks: set[asyncio.Task[None]] = set()
         self._typing_tickets: dict[ConversationRef, _TypingTicket] = {}
+        self._formatter_states: dict[ConversationRef, MarkdownFormatter] = {}
         self._terminal_error: BaseException | None = None
         self._closed = False
 
@@ -258,11 +263,11 @@ class WeChatAdapter:
         for conversation in tuple(self._typing_tasks):
             self._finish_typing(conversation)
 
-        cleanup_tasks = tuple(self._typing_cleanup_tasks)
         for task in typing_tasks:
             task.cancel()
         if poll_task is not None:
             await asyncio.gather(poll_task, return_exceptions=True)
+        cleanup_tasks = tuple(self._typing_cleanup_tasks)
         if typing_tasks or cleanup_tasks:
             await asyncio.gather(
                 *typing_tasks,
@@ -292,21 +297,32 @@ class WeChatAdapter:
             raise WeChatProtocolError(
                 "WeChat reply context is unavailable for this conversation"
             )
+        formatter = self._formatter_states.get(conversation)
+        if formatter is None:
+            formatter = MarkdownFormatter()
+        else:
+            formatter = formatter.copy()
+        rendered = formatter.sanitize(text)
         client_id = secrets.token_hex(16)
         await self._api.send_text(
             to_user_id=conversation.conversation_id,
             context_token=context_token,
-            text=sanitize_markdown(text),
+            text=rendered,
             client_id=client_id,
         )
+        self._formatter_states[conversation] = formatter
         return MessageRef(conversation, client_id)
 
     async def send_final_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef:
         try:
+            self._validate_conversation(conversation)
+            if text == "":
+                return MessageRef(conversation, secrets.token_hex(16))
             return await self.send_text(conversation, text)
         finally:
+            self._formatter_states.pop(conversation, None)
             self._finish_typing(conversation)
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
@@ -315,31 +331,34 @@ class WeChatAdapter:
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
     ) -> MessageRef:
-        self._validate_conversation(conversation)
-        context_token = self._runtime_state.context_tokens.get(
-            (conversation.bot_id, conversation.conversation_id)
-        )
-        if context_token is None:
-            raise WeChatProtocolError(
-                "WeChat reply context is unavailable for this conversation"
+        try:
+            self._validate_conversation(conversation)
+            context_token = self._runtime_state.context_tokens.get(
+                (conversation.bot_id, conversation.conversation_id)
             )
-        classification, uploaded = await self._media.upload_file(
-            file, to_user_id=conversation.conversation_id
-        )
-        client_id = secrets.token_hex(16)
-        await self._api.send_media(
-            to_user_id=conversation.conversation_id,
-            context_token=context_token,
-            client_id=client_id,
-            item_type=classification.message_item_type,
-            uploaded=uploaded,
-            file_name=(
-                classification.name
-                if classification.message_item_type == MESSAGE_ITEM_TYPE_FILE
-                else None
-            ),
-        )
-        return MessageRef(conversation, client_id)
+            if context_token is None:
+                raise WeChatProtocolError(
+                    "WeChat reply context is unavailable for this conversation"
+                )
+            classification, uploaded = await self._media.upload_file(
+                file, to_user_id=conversation.conversation_id
+            )
+            client_id = secrets.token_hex(16)
+            await self._api.send_media(
+                to_user_id=conversation.conversation_id,
+                context_token=context_token,
+                client_id=client_id,
+                item_type=classification.message_item_type,
+                uploaded=uploaded,
+                file_name=(
+                    classification.name
+                    if classification.message_item_type == MESSAGE_ITEM_TYPE_FILE
+                    else None
+                ),
+            )
+            return MessageRef(conversation, client_id)
+        finally:
+            self._finish_typing(conversation)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
@@ -447,22 +466,88 @@ class WeChatAdapter:
             return
         sender = event.from_user_id
         if not sender:
-            raise WeChatProtocolError(
-                "authorized WeChat message is missing from_user_id"
-            )
+            LOGGER.warning("malformed WeChat event ignored (missing sender)")
+            return
         if sender not in self._allowed_users:
             LOGGER.warning(
                 "unauthorized WeChat sender %s; add it to [wechat].allowed_users",
                 sender,
             )
             return
+        if event.group_id:
+            LOGGER.warning("unsupported WeChat group message from %s", sender)
+            return
+
+        try:
+            has_media, text_item = self._validate_authorized_event(event)
+        except WeChatProtocolError as exc:
+            LOGGER.warning(
+                "malformed authorized WeChat event ignored (%s)",
+                type(exc).__name__,
+            )
+            return
+
+        conversation = ConversationRef(
+            platform="wechat",
+            bot_id=self._bot_id,
+            conversation_id=sender,
+        )
+        self._store_context_token(conversation, event.context_token or "")
+        if self._on_message is None:
+            raise RuntimeError("WeChat adapter has not been started")
+        images: list[InboundImage] = []
+        videos: list[InboundVideo] = []
+        files: list[InboundFile] = []
+        audios: list[InboundAudio] = []
+        if has_media:
+            try:
+                for item in event.items:
+                    if item.type not in MEDIA_ITEM_TYPES:
+                        continue
+                    downloaded = await self._media.download_item(item)
+                    if isinstance(downloaded, InboundImage):
+                        images.append(downloaded)
+                    elif isinstance(downloaded, InboundVideo):
+                        videos.append(downloaded)
+                    elif isinstance(downloaded, InboundFile):
+                        files.append(downloaded)
+                    else:
+                        audios.append(downloaded)
+            except WeChatMediaError as exc:
+                LOGGER.warning(
+                    "malformed authorized WeChat media ignored (%s)",
+                    type(exc).__name__,
+                )
+                return
+        assert text_item is not None or has_media
+        text = text_item.text if text_item is not None and text_item.text else ""
+        self._start_typing(conversation, event.context_token or "")
+        try:
+            await self._on_message(
+                self,
+                InboundMessage(
+                    conversation=conversation,
+                    actor=ActorRef(id=sender),
+                    message_id=str(event.message_id),
+                    text=text,
+                    timestamp=(event.create_time_ms or 0) / 1000,
+                    images=tuple(images),
+                    videos=tuple(videos),
+                    files=tuple(files),
+                    audios=tuple(audios),
+                ),
+            )
+        except BaseException:
+            self._finish_typing(conversation)
+            raise
+
+    def _validate_authorized_event(
+        self, event: WeChatInboundEvent
+    ) -> tuple[bool, WeChatMessageItem | None]:
         if event.message_type is None:
             raise WeChatProtocolError(
                 "authorized WeChat message is missing message_type"
             )
-        if event.group_id:
-            LOGGER.warning("unsupported WeChat group message from %s", sender)
-            return
         if event.message_id is None or event.message_id <= 0:
             raise WeChatProtocolError(
                 "authorized WeChat message has an invalid message_id"
@@ -475,12 +560,6 @@ class WeChatAdapter:
             raise WeChatProtocolError(
                 "authorized WeChat message is missing context_token"
             )
-
-        conversation = ConversationRef(
-            platform="wechat",
-            bot_id=self._bot_id,
-            conversation_id=sender,
-        )
         has_media = any(item.type in MEDIA_ITEM_TYPES for item in event.items)
         text_item = next(
             (item for item in event.items if item.type == MESSAGE_ITEM_TYPE_TEXT),
@@ -490,47 +569,7 @@ class WeChatAdapter:
             raise WeChatProtocolError(
                 "authorized WeChat message is missing a valid text item"
             )
-        self._store_context_token(conversation, event.context_token)
-        if self._on_message is None:
-            raise RuntimeError("WeChat adapter has not been started")
-        images: list[InboundImage] = []
-        videos: list[InboundVideo] = []
-        files: list[InboundFile] = []
-        audios: list[InboundAudio] = []
-        if has_media:
-            for item in event.items:
-                if item.type not in MEDIA_ITEM_TYPES:
-                    continue
-                downloaded = await self._media.download_item(item)
-                if isinstance(downloaded, InboundImage):
-                    images.append(downloaded)
-                elif isinstance(downloaded, InboundVideo):
-                    videos.append(downloaded)
-                elif isinstance(downloaded, InboundFile):
-                    files.append(downloaded)
-                else:
-                    audios.append(downloaded)
-        assert text_item is not None or has_media
-        text = text_item.text if text_item is not None and text_item.text else ""
-        self._start_typing(conversation, event.context_token)
-        try:
-            await self._on_message(
-                self,
-                InboundMessage(
-                    conversation=conversation,
-                    actor=ActorRef(id=sender),
-                    message_id=str(event.message_id),
-                    text=text,
-                    timestamp=event.create_time_ms / 1000,
-                    images=tuple(images),
-                    videos=tuple(videos),
-                    files=tuple(files),
-                    audios=tuple(audios),
-                ),
-            )
-        except BaseException:
-            self._finish_typing(conversation)
-            raise
+        return has_media, text_item
 
     def _store_context_token(
         self, conversation: ConversationRef, context_token: str

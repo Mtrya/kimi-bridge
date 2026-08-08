@@ -107,5 +107,5 @@ The WeChat adapter accepts private-chat text, native images, voice messages, gen
 - One selected adapter per process and one trusted-operator security model.
 - Feishu direct messages only; Telegram private chats only; QQ C2C and WeChat private chats only.
 - Telegram remains experimental and has not been live-validated by the project; QQ is supported and live-validated in sandbox; WeChat is supported and was live-validated on 2026-08-08 against Tencent tag `v2.4.6` with one allowlisted scanner.
-- Isolation between two simultaneous WeChat senders is covered by automated tests but has not been exercised in a live deployment, and the adapter provides no group chat or proactive delivery.
+- While one WeChat conversation is receiving a response, a new model prompt from another sender is rejected with retry guidance instead of interrupting the active conversation. Per-sender state isolation is covered by automated tests; live validation covered one scanner. The adapter provides no group chat or proactive delivery.
 - No tool-call or transcript rendering, multi-tenant isolation, generic plugin/UI framework, webhooks, Telegram groups/topics/albums, QQ group chat, or remote Kimi server mode.

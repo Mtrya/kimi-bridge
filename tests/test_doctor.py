@@ -142,7 +142,7 @@ def _write_wechat_config(path: Path, workspace: Path) -> tuple[str, str, str]:
                 f"default_workspace = '{workspace}'",
                 "[wechat]",
                 f'allowed_users = ["{user_id}"]',
-                f'storage_path = "{storage_path}"',
+                f"storage_path = '{storage_path}'",
             ]
         ),
         encoding="utf-8",

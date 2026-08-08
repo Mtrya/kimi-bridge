@@ -204,7 +204,7 @@ def test_builds_qq_adapter_with_wired_transport(
     )
 
 
-def test_selected_platform_requires_its_own_credentials() -> None:
+def test_selected_platform_requires_its_own_credentials(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Telegram bot token"):
         main_module._build_adapter(Config(platform="telegram"))
 
@@ -229,7 +229,10 @@ def test_selected_platform_requires_its_own_credentials() -> None:
         main_module._build_adapter(
             Config(
                 platform="wechat",
-                wechat=WechatConfig(allowed_users=frozenset({"user-one"})),
+                wechat=WechatConfig(
+                    allowed_users=frozenset({"user-one"}),
+                    storage_path=tmp_path / "empty-wechat",
+                ),
             )
         )
 
@@ -499,6 +502,23 @@ def test_startup_authentication_failure_is_one_stderr_line(
     assert captured.out == ""
     assert captured.err.strip().splitlines() == [
         "kimi-bridge: kimi-code is not authenticated; authenticate via /login"
+    ]
+
+
+def test_stale_wechat_authorization_is_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def failing_run(_config_path: object) -> None:
+        raise main_module.WeChatAuthenticationExpired("getUpdates")
+
+    monkeypatch.setattr(main_module, "run", failing_run)
+
+    assert main_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip().splitlines() == [
+        "kimi-bridge: getUpdates reported expired WeChat authorization; run "
+        "kimi-bridge wechat login --replace"
     ]
 
 

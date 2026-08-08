@@ -138,7 +138,7 @@ WeChat authorization is local and separate from chat commands. With the protecte
 
 The storage directory must remain private and its adapter-owned JSON files are written with mode `600` on POSIX systems. Exactly one process may poll a bot authorization. Multiple configurations must use distinct `storage_path`, `state_path`, and workspace values as well as distinct bot authorizations. Do not run OpenClaw or another iLink consumer against the same bot while kimi-bridge is active.
 
-The WeChat adapter is private-chat only, QR-authorized, and was live-validated on 2026-08-08 against Tencent source tag `v2.4.6`. It forces `auto`, emits immutable replies in chunks of at most 4,000 characters, and provides no approvals, questions, separate thinking stream, editable messages, group chat, or proactive delivery. Live validation covered one allowlisted scanner; isolation between two simultaneous allowlisted senders is covered by automated tests but has not been exercised in a live deployment.
+The WeChat adapter is private-chat only, QR-authorized, and was live-validated on 2026-08-08 against Tencent source tag `v2.4.6`. It forces `auto`, emits immutable replies in chunks of at most 4,000 characters, and provides no approvals, questions, separate thinking stream, editable messages, group chat, or proactive delivery. The runtime keeps one live Kimi response stream: while one conversation is receiving a response, a new model prompt from another sender is rejected with retry guidance instead of interrupting the active conversation. Per-sender state isolation is covered by automated tests; live validation covered one allowlisted scanner.
 
 ## Inbound media
 

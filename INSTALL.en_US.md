@@ -16,7 +16,7 @@ kimi-bridge connects one local Kimi Code installation to one supported chat bot.
 
 One kimi-bridge process runs one platform adapter. Use separate processes, configs, state files, workspaces, services, and bot accounts for multiple platforms.
 
-WeChat private-chat support was live-validated on 2026-08-08 against Tencent's openclaw-weixin tag `v2.4.6` with one allowlisted scanner. Isolation between two simultaneous senders is covered by automated tests but has not yet been exercised in a live deployment.
+WeChat private-chat support was live-validated on 2026-08-08 against Tencent's openclaw-weixin tag `v2.4.6` with one allowlisted scanner. The bridge keeps one live Kimi response stream at a time: if another account submits a new model prompt while a response is still running, it receives retry guidance instead of interrupting the first conversation. Per-sender context isolation is covered by automated tests; live validation covered only the scanner above.
 
 ## Prerequisites
 

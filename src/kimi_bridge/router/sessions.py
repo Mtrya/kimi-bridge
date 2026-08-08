@@ -273,17 +273,17 @@ class _SessionMixin:
             replace_existing=False,
         )
         active = self._active
-        if (
-            active is not None
-            and active.conversation_key == conversation_key
-            and active.session_id == session_id
-            and active.task is not None
-            and not active.task.done()
-        ):
-            active.adapter = adapter
-            active.conversation = conversation
-            active.actor = actor
-            return
+        if active is not None and active.task is not None and not active.task.done():
+            if active.conversation_key != conversation_key:
+                raise KimiServerError(
+                    "another conversation is still receiving a response; "
+                    "retry after it finishes"
+                )
+            if active.session_id == session_id:
+                active.adapter = adapter
+                active.conversation = conversation
+                active.actor = actor
+                return
 
         await self._stop_active_stream()
         active = _ActiveStream(

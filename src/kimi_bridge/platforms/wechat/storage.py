@@ -22,6 +22,17 @@ RUNTIME_STATE_FILE_NAME = "runtime-state.json"
 _OWNED_FILE_NAMES = (CREDENTIAL_FILE_NAME, RUNTIME_STATE_FILE_NAME)
 
 
+def _require_private_mode(path: Path, expected: int, label: str) -> None:
+    if os.name != "posix":
+        return
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise WeChatStorageError(f"WeChat {label} mode could not be inspected") from exc
+    if mode != expected:
+        raise WeChatStorageError(f"WeChat {label} mode must be {expected:o}")
+
+
 @dataclass(frozen=True, slots=True)
 class StorageInspection:
     """Secret-safe local storage inspection used by status and doctor."""
@@ -72,9 +83,11 @@ class WeChatStorage:
     def load_credential(self) -> WeChatCredential:
         if self.path.is_symlink() or not self.path.is_dir():
             raise WeChatStorageError("WeChat storage path is missing or unsafe")
+        _require_private_mode(self.path, 0o700, "storage directory")
         path = self.credential_path
         if path.is_symlink() or not path.is_file():
             raise WeChatStorageError("WeChat credential file is missing or unsafe")
+        _require_private_mode(path, 0o600, "credential file")
         try:
             with path.open(encoding="utf-8") as credential_file:
                 payload = json.load(credential_file)
@@ -98,11 +111,13 @@ class WeChatStorage:
             return WeChatRuntimeState()
         if self.path.is_symlink() or not self.path.is_dir():
             raise WeChatStorageError("WeChat storage path is missing or unsafe")
+        _require_private_mode(self.path, 0o700, "storage directory")
         path = self.runtime_state_path
         if not os.path.lexists(path):
             return WeChatRuntimeState()
         if path.is_symlink() or not path.is_file():
             raise WeChatStorageError("WeChat runtime state is missing or unsafe")
+        _require_private_mode(path, 0o600, "runtime-state file")
         try:
             with path.open(encoding="utf-8") as state_file:
                 payload = json.load(state_file)
