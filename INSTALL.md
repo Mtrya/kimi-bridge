@@ -10,13 +10,13 @@ kimi-bridge 把一份本地的 Kimi Code 安装连接到一个受支持的聊天
 | --- | --- | --- |
 | 飞书 | 已支持并经过真实环境验证 | 需要 FFmpeg、已发布的自建应用、长连接事件、相应权限和白名单 |
 | QQ | 已支持，C2C 场景经过真实环境验证 | 强制 `auto` 权限模式；没有审批提示、提问和独立的思考流 |
-| 微信 | 实验性，私聊场景经过真实环境验证 | 扫码授权、独占轮询、强制 `auto`、不可编辑回复，且没有审批、提问和独立思考流 |
+| 微信 | 已支持，私聊场景经过真实环境验证 | 扫码授权、独占轮询、强制 `auto`、不可编辑回复，且没有审批、提问和独立思考流 |
 | Telegram | 实验性 | 仅限私聊；启动时会替换已有的 webhook 并丢弃待处理的更新 |
 | Lark 国际版 | 不支持 | 当前适配器使用飞书的 API 和 WebSocket 域名 |
 
 一个 kimi-bridge 进程只运行一个平台适配器。如需接入多个平台，请使用各自独立的进程、配置、状态文件、工作区、服务和机器人账号。
 
-微信的实验性能力已于 2026-08-08 基于腾讯 `v2.4.6` 标签使用一个白名单扫码账号完成真实验证。双发送者上下文隔离仅经过契约测试，尚未完成项目级真实验证。
+微信私聊能力已于 2026-08-08 基于腾讯 openclaw-weixin 的 `v2.4.6` 标签、使用一个白名单扫码账号完成真实环境验证。两个账号同时发消息时的会话隔离目前只通过了自动化测试，尚未在真实环境中验证。
 
 ## 前置条件
 
@@ -36,7 +36,7 @@ kimi --help
 kimi doctor config
 ```
 
-必须保证 Kimi Code 是可以使用的，最简单的测试方法就是终端输入 `kimi -p "hi"`，有正常回答就说明可用。
+最直接的验证是在终端运行 `kimi -p "hi"`，能得到正常回答即说明可用。
 
 ## 安装
 
@@ -60,7 +60,7 @@ touch ~/.kimi-bridge/config.toml
 chmod 600 ~/.kimi-bridge/config.toml
 ```
 
-参照[完整的配置参考](docs/CONFIGURATION.md)填写一个适配器。请通过本地私有编辑器或密钥管理工具输入凭据；不要把凭据写在命令行里、提交进版本库，或粘贴到 issue 报告中。
+参照[完整的配置参考](docs/CONFIGURATION.md)填写一个适配器。凭据请直接在本地编辑写入，或使用密钥管理工具；不要把凭据写在命令行里、提交进版本库，或粘贴到 issue 报告中。
 
 平台侧的配置不止需要凭据：
 
@@ -71,7 +71,7 @@ chmod 600 ~/.kimi-bridge/config.toml
 
 智能体安装指南包含各平台具体的初始化与验证流程。手动操作者可以从该指南中找到官方平台文档的链接。
 
-微信首次配置时，先保留空的 `wechat.allowed_users`，运行 `kimi-bridge wechat login`，在微信中完成命令打印的扫码链接，再通过本地私有编辑器把返回的扫码身份写入白名单。`kimi-bridge wechat status` 只检查本地状态；授权过期时使用 `login --replace`，旧凭据会保留到新授权确认；`kimi-bridge wechat logout` 只删除本地适配器授权文件。请逐项遵循带日期的[微信验证路径](docs/setup-paths/wechat.md)。
+微信首次配置时，先保留空的 `wechat.allowed_users`，运行 `kimi-bridge wechat login`，在微信中打开命令打印的授权链接并完成扫码，然后把返回的扫码身份写入白名单（不要在聊天或 issue 中泄露完整身份）。`kimi-bridge wechat status` 只检查本地状态；授权过期时使用 `login --replace`，旧凭据会保留到新授权确认为止；`kimi-bridge wechat logout` 只删除本地适配器授权文件。完整的分步操作与故障排查见[微信验证路径](docs/setup-paths/wechat.md)（英文）。
 
 ## 验证
 
@@ -81,7 +81,7 @@ chmod 600 ~/.kimi-bridge/config.toml
 kimi-bridge doctor
 ```
 
-启动前解决所有报错。`doctor` 检查本地配置、路径、Kimi Code、凭据是否存在；选择飞书时检查 FFmpeg，选择微信时检查加密媒体依赖和私有本地授权目录。它不会连接聊天平台、验证机器人权限、接收事件或发送消息。
+启动前解决所有报错。`doctor` 检查本地配置、路径、Kimi Code、凭据是否存在；选择飞书时检查 FFmpeg，选择微信时检查媒体加密依赖（cryptography）和私有本地授权目录。它不会连接聊天平台、验证机器人权限、接收事件或发送消息。
 
 前台启动：
 
@@ -121,7 +121,7 @@ kimi-bridge doctor
 uv tool upgrade kimi-bridge
 ```
 
-停止或卸载 kimi-bridge 时，`config.toml`、`state.json`、工作区、接收的文件、Kimi 会话以及平台机器人应用都应保留，除非你明确选择删除这些具名资源。
+停止或卸载 kimi-bridge 时，`config.toml`、`state.json`、工作区、接收的文件、Kimi 会话以及平台机器人应用都应保留，除非你明确选择删除上述各项。
 
 ## 参考
 

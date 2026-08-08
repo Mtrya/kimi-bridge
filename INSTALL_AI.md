@@ -20,7 +20,7 @@ Minimize user-only work. An official link is a source for you to research, not a
 Additional rules:
 
 - Detect before asking. Do not ask for information available from commands, files you may safely inspect, or platform APIs.
-- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input. 
+- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input.
 - Preserve existing installations, configuration, state, workspaces, bot settings, webhooks, and event consumers unless the user explicitly approves changing them.
 - Do not report success after `doctor`. Setup is complete only after a real allowlisted inbound message and a real completed reply on the selected platform.
 - Before researching platform setup from scratch, inspect the [verified setup paths](docs/setup-paths/README.md). Use one only when its preconditions match and its `reverify_after` date has not passed. A stale path is evidence, not instructions: research current official sources before asking the user to perform platform-side actions.
@@ -59,7 +59,7 @@ Run:
 uv --version
 ```
 
-The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step does not involve user actions, if not user approval.
+The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step involves no user action beyond approval.
 
 Installing kimi-bridge without `uv` is feasible but is not tested by this project. If the user chooses another Python installation method, assist using your own packaging knowledge, state that the route is untested, and validate the resulting `kimi-bridge` executable and dependencies.
 
@@ -137,7 +137,7 @@ Explain the relevant choices:
 
 - **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, file transfer, and inbound voice transcription. Requires FFmpeg on `PATH` plus a published custom app, permissions, event subscriptions, and long-connection delivery.
 - **QQ:** supported and live-validated for C2C messaging. It has no interactive approvals, questions, or separate thinking stream, so sessions are forced into `auto` permission mode. Obtain explicit acceptance of this security posture.
-- **WeChat:** experimental and live-validated for private chats. It uses QR authorization and immutable replies, forces `auto`, and has no approvals, questions, or separate thinking stream. It supports inbound image/voice/file/video and outbound image/video/file; outbound audio is a generic file. Obtain explicit acceptance of the autonomous security posture and single-poller ownership.
+- **WeChat:** supported and live-validated for private chats. It uses QR authorization and immutable replies, forces `auto`, and has no approvals, questions, or separate thinking stream. It supports inbound image/voice/file/video and outbound image/video/file; outbound audio is a generic file. Obtain explicit acceptance of the autonomous security posture and single-poller ownership.
 - **Telegram:** experimental and not project-live-validated. It supports private chats only. Startup uses long polling and takes over any existing webhook.
 
 Before configuring the selected platform, establish:

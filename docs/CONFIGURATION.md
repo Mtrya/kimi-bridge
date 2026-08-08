@@ -85,7 +85,7 @@ allowed_users = [123456789]
 
 Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered in the [Telegram bootstrap](../INSTALL_AI.md#8-telegram-bootstrap). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
 
-The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
+The Telegram adapter is experimental and covered only by automated Bot API tests, not a live deployment. Verify your own installation with a real private chat before relying on it.
 
 ## QQ example
 
@@ -108,13 +108,13 @@ app_secret = "replace-me"
 allowed_users = ["replace-me"]
 ```
 
-Bot registration at [q.qq.com](https://q.qq.com/), sandbox tester access, and `user_openid` discovery are covered in the [QQ bootstrap](../INSTALL_AI.md#6-qq-bootstrap) and the dated [verified QQ setup path](setup-paths/qq.md). The current adapter receives C2C messages over QQ's WebSocket gateway; its verified setup does not configure callbacks, event webhooks, or an IP whitelist. Investigate those controls only if QQ returns a specific error that requires one. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance whenever an unrecognized sender messages the bot.
+Bot registration at [q.qq.com](https://q.qq.com/), sandbox tester access, and `user_openid` discovery are covered in the [QQ bootstrap](../INSTALL_AI.md#6-qq-bootstrap) and the [verified QQ setup path](setup-paths/qq.md). The current adapter receives C2C messages over QQ's WebSocket gateway; its verified setup does not configure callbacks, event webhooks, or an IP whitelist. Investigate those controls only if QQ returns a specific error that requires one. `allowed_users` holds the sender's `user_openid`, which the adapter logs with copy-paste guidance whenever an unrecognized sender messages the bot.
 
-The supported QQ adapter is C2C (private-chat) only and its core lifecycle is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 outbound media uploads, native inbound media, and clean shutdown. Streaming exposes complete lines and closed fenced blocks through one non-expanding compact rendering strategy; immutable messages retain richer one-shot formatting. A correction to the rendered frontier uses QQ's message-withdrawal endpoint before sending the corrected final response. That exceptional path is contract-tested and requires a credentialed sandbox check before merge. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
+The supported QQ adapter is C2C (private-chat) only and its core lifecycle is live-validated in sandbox. Validation covered gateway heartbeat/resume, allowlisting and redelivery dedupe, 5,000-character append-monotonic streams, the four-reply passive budget and active fallback, native markdown, base64 outbound media uploads, native inbound media, and clean shutdown. Streaming exposes complete lines and closed fenced blocks through one non-expanding compact rendering strategy; immutable messages retain richer one-shot formatting. A correction to the rendered frontier uses QQ's message-withdrawal endpoint before sending the corrected final response. That exceptional path has only automated test coverage; it has not been exercised against a live QQ sandbox. The general OpenAPI host also served the sandbox app, so no sandbox/production URL setting is required.
 
 QQ has no interactive approvals, questions, or separate thinking stream: every session runs in `auto` permission mode, `/mode` and `/render-thinking on` are rejected with an explanatory reply, and an unexpected interactive prompt is replaced by a short notice. `/send` delivers PNG/JPEG images and MP4 video as native media and every other file type as a file card (QQ's `file_type=4`, 200 MB hard limit). Inbound attachments must use HTTPS and are downloaded with a 20 MB limit. Sandbox accepted ordinary external Markdown links without returning `304003`; the adapter still retries once with defanged URLs if another deployment enforces that error. See the official [QQ bot documentation](https://bot.q.qq.com/wiki/) for full protocol detail.
 
-## WeChat example (experimental)
+## WeChat example
 
 ```toml
 platform = "wechat"
@@ -138,7 +138,7 @@ WeChat authorization is local and separate from chat commands. With the protecte
 
 The storage directory must remain private and its adapter-owned JSON files are written with mode `600` on POSIX systems. Exactly one process may poll a bot authorization. Multiple configurations must use distinct `storage_path`, `state_path`, and workspace values as well as distinct bot authorizations. Do not run OpenClaw or another iLink consumer against the same bot while kimi-bridge is active.
 
-The WeChat adapter is experimental, private-chat only, QR-authorized, and was live-validated on 2026-08-08 against Tencent source tag `v2.4.6`. It forces `auto`, emits immutable replies in chunks of at most 4,000 characters, and provides no approvals, questions, separate thinking stream, editable messages, group chat, or proactive delivery. Live validation covered one allowlisted scanner; isolation between two simultaneous allowlisted senders remains contract-tested rather than project-live-validated.
+The WeChat adapter is private-chat only, QR-authorized, and was live-validated on 2026-08-08 against Tencent source tag `v2.4.6`. It forces `auto`, emits immutable replies in chunks of at most 4,000 characters, and provides no approvals, questions, separate thinking stream, editable messages, group chat, or proactive delivery. Live validation covered one allowlisted scanner; isolation between two simultaneous allowlisted senders is covered by automated tests but has not been exercised in a live deployment.
 
 ## Inbound media
 

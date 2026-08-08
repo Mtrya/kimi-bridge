@@ -17,7 +17,7 @@ kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings 
 
 Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram, QQ, and WeChat use small handwritten `httpx`/`websockets` transports without a platform SDK dependency.
 
-WeChat support is private-chat and QR-authorized, and was live-validated on 2026-08-08 against Tencent tag `v2.4.6`. It forces `auto`, sends immutable replies, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file; outbound audio is a generic downloadable file rather than a native voice message. One bot authorization must have exactly one poller.
+WeChat support is private-chat and QR-authorized, and was live-validated on 2026-08-08 against Tencent's openclaw-weixin tag `v2.4.6`. It forces `auto`, sends immutable replies, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file; outbound audio is a generic downloadable file rather than a native voice message. One bot authorization must have exactly one poller.
 
 ## Features
 
@@ -61,7 +61,7 @@ Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact 
 ## Architecture and security
 
 ```text
-Feishu, QQ, experimental Telegram, or experimental WeChat
+Feishu, QQ, WeChat, or experimental Telegram
               │
               ▼
        semantic chat router

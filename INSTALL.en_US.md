@@ -10,13 +10,13 @@ kimi-bridge connects one local Kimi Code installation to one supported chat bot.
 | --- | --- | --- |
 | Feishu | Supported and live-validated | Requires FFmpeg plus a published custom app, long-connection events, permissions, and an allowlist |
 | QQ | Supported and live-validated for C2C | Forced `auto` permission mode; no approval prompts, questions, or separate thinking stream |
-| WeChat | Experimental and live-validated for private chats | QR authorization, one exclusive poller, forced `auto`, immutable replies, and no approval/question/separate-thinking surface |
+| WeChat | Supported and live-validated for private chats | QR authorization, one exclusive poller, forced `auto`, immutable replies, and no approval/question/separate-thinking surface |
 | Telegram | Experimental | Private chats only; startup replaces any webhook and drops pending updates |
 | Lark International | Unsupported | The current adapter uses Feishu API and WebSocket domains |
 
 One kimi-bridge process runs one platform adapter. Use separate processes, configs, state files, workspaces, services, and bot accounts for multiple platforms.
 
-WeChat's promoted experimental surface was live-validated on 2026-08-08 against Tencent tag `v2.4.6` with one allowlisted scanner. Two-sender context isolation remains contract-tested rather than project-live-validated.
+WeChat private-chat support was live-validated on 2026-08-08 against Tencent's openclaw-weixin tag `v2.4.6` with one allowlisted scanner. Isolation between two simultaneous senders is covered by automated tests but has not yet been exercised in a live deployment.
 
 ## Prerequisites
 
@@ -62,7 +62,7 @@ touch ~/.kimi-bridge/config.toml
 chmod 600 ~/.kimi-bridge/config.toml
 ```
 
-Populate one adapter using [the complete configuration reference](docs/CONFIGURATION.md). Enter credentials through a private local editor or secret manager; do not put them on command lines, commit them, or paste them into issue reports.
+Populate one adapter using [the complete configuration reference](docs/CONFIGURATION.md). Type credentials directly into the local file, or use a secret manager; do not put them on command lines, commit them, or paste them into issue reports.
 
 Platform setup requires more than credentials:
 
@@ -73,7 +73,7 @@ Platform setup requires more than credentials:
 
 The setup agent guide contains the platform-specific bootstrap and verification procedures. Official platform references are linked from there for manual operators.
 
-For WeChat, begin with an empty `wechat.allowed_users`, run `kimi-bridge wechat login`, complete the printed QR URL in WeChat, then privately replace the empty list with the returned scanner identity. `kimi-bridge wechat status` is local-only. Use `login --replace` for reported expiry; it preserves the previous credential until confirmation. `kimi-bridge wechat logout` removes only local adapter-owned authorization files. Follow the dated [verified WeChat path](docs/setup-paths/wechat.md) one checkpoint at a time.
+For WeChat, begin with an empty `wechat.allowed_users`, run `kimi-bridge wechat login`, open the printed authorization URL in WeChat and complete the QR flow, then copy the returned scanner identity into the empty list without exposing it elsewhere. `kimi-bridge wechat status` is local-only. Use `login --replace` for reported expiry; it preserves the previous credential until confirmation. `kimi-bridge wechat logout` removes only local adapter-owned authorization files. The [verified WeChat path](docs/setup-paths/wechat.md) has the full step-by-step procedure with recovery checkpoints.
 
 ## Validate
 
@@ -123,7 +123,7 @@ kimi-bridge doctor
 uv tool upgrade kimi-bridge
 ```
 
-Stopping or uninstalling kimi-bridge should preserve `config.toml`, `state.json`, workspaces, inbound files, Kimi sessions, and platform bot applications unless you explicitly choose to remove those named resources.
+Stopping or uninstalling kimi-bridge should preserve `config.toml`, `state.json`, workspaces, inbound files, Kimi sessions, and platform bot applications unless you explicitly choose to remove the items listed above.
 
 ## References
 
