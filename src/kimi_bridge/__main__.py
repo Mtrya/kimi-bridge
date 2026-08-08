@@ -196,9 +196,29 @@ def _build_adapter(config: Config) -> PlatformAdapter:
             raise AdapterConfigurationError(
                 "wechat.allowed_users must contain at least one user"
             )
-        raise AdapterConfigurationError(
-            "WeChat runtime messaging is not available yet; use the local "
-            "wechat login, status, or logout commands"
+        from .platforms.wechat import (
+            WeChatAPI,
+            WeChatAdapter,
+            WeChatStorage,
+            WeChatStorageError,
+        )
+
+        storage = WeChatStorage(config.wechat.storage_path)
+        try:
+            credential = storage.load_credential()
+            runtime_state = storage.load_runtime_state()
+        except WeChatStorageError as exc:
+            raise AdapterConfigurationError(
+                f"WeChat local authorization/state is unavailable: {exc}; "
+                "run kimi-bridge wechat login"
+            ) from exc
+        api = WeChatAPI(credential)
+        return WeChatAdapter(
+            credential.bot_id,
+            config.wechat.allowed_users,
+            api=api,
+            storage=storage,
+            runtime_state=runtime_state,
         )
 
     if not config.telegram.bot_token:

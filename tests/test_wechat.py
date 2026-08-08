@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 from collections import deque
 from dataclasses import replace
@@ -14,12 +15,32 @@ import httpx
 import pytest
 
 from kimi_bridge.config import WechatConfig
+from kimi_bridge.interactions import (
+    ApprovalPrompt,
+    ApprovalRequest,
+    InteractionOutcome,
+)
+from kimi_bridge.platforms.base import (
+    ConversationRef,
+    InboundMessage,
+    MessageRef,
+    OutboundFile,
+)
 from kimi_bridge.platforms.wechat import (
+    WeChatAPI,
     WeChatAPIError,
+    WeChatAPIResult,
+    WeChatAdapter,
     WeChatControlError,
     WeChatCredential,
+    WeChatInboundEvent,
+    WeChatMessageItem,
+    WeChatPollResult,
+    WeChatProtocolError,
+    WeChatRuntimeState,
     WeChatStorage,
     WeChatStorageError,
+    WeChatUnsupportedOperation,
     authorize_with_qr,
     run_logout,
     run_status,
@@ -29,9 +50,18 @@ from kimi_bridge.platforms.wechat.api import (
     build_base_info,
     normalize_https_base_url,
 )
-from kimi_bridge.platforms.wechat.storage import RUNTIME_STATE_FILE_NAME
+from kimi_bridge.platforms.wechat.formatting import sanitize_markdown
+from kimi_bridge.platforms.wechat.storage import (
+    RUNTIME_STATE_FILE_NAME,
+    RUNTIME_STATE_VERSION,
+)
 from kimi_bridge.platforms.wechat.types import (
+    DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
     ILINK_APP_CLIENT_VERSION,
+    MESSAGE_ITEM_TYPE_IMAGE,
+    MESSAGE_ITEM_TYPE_TEXT,
+    MESSAGE_TYPE_BOT,
+    MESSAGE_TYPE_USER,
     PINNED_SOURCE_COMMIT,
     PINNED_SOURCE_TAG,
 )
@@ -535,6 +565,14 @@ def test_status_is_local_redacted_and_reports_permissions(tmp_path: Path) -> Non
     storage = WeChatStorage(tmp_path / "wechat")
     credential = _credential()
     storage.save_credential(credential)
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            get_updates_buf="STATUS_CURSOR_SECRET",
+            context_tokens={
+                (credential.bot_id, "user-one"): "STATUS_CONTEXT_SECRET"
+            },
+        )
+    )
     output = StringIO()
 
     assert (
@@ -548,6 +586,8 @@ def test_status_is_local_redacted_and_reports_permissions(tmp_path: Path) -> Non
     rendered = output.getvalue()
     assert credential.bot_token not in rendered
     assert credential.bot_id not in rendered
+    assert "STATUS_CURSOR_SECRET" not in rendered
+    assert "STATUS_CONTEXT_SECRET" not in rendered
     assert "Bot identity: abcd…" in rendered
     assert "network status was not checked" in rendered
     assert "ilinkai.weixin.qq.com" in rendered
@@ -596,3 +636,774 @@ def test_logout_refuses_to_follow_a_symlinked_storage_root(tmp_path: Path) -> No
         run_logout(WechatConfig(storage_path=linked_root), stream=StringIO())
 
     assert credential.read_text(encoding="utf-8") == "preserve"
+
+
+class RuntimeAPIStub:
+    def __init__(self) -> None:
+        self.polls: asyncio.Queue[WeChatPollResult | BaseException] = asyncio.Queue()
+        self.poll_calls: list[tuple[str, float]] = []
+        self.poll_started = asyncio.Event()
+        self.poll_cancelled = asyncio.Event()
+        self.sends: list[dict[str, str]] = []
+        self.send_error: BaseException | None = None
+        self.notify_start_result = WeChatAPIResult()
+        self.notify_stop_result = WeChatAPIResult()
+        self.notify_start_error: Exception | None = None
+        self.notify_stop_error: Exception | None = None
+        self.notify_calls: list[str] = []
+        self.closed = False
+
+    async def get_updates(
+        self, get_updates_buf: str, *, timeout_seconds: float
+    ) -> WeChatPollResult:
+        self.poll_calls.append((get_updates_buf, timeout_seconds))
+        self.poll_started.set()
+        try:
+            result = await self.polls.get()
+        except asyncio.CancelledError:
+            self.poll_cancelled.set()
+            raise
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def send_text(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        text: str,
+        client_id: str,
+    ) -> None:
+        self.sends.append(
+            {
+                "to_user_id": to_user_id,
+                "context_token": context_token,
+                "text": text,
+                "client_id": client_id,
+            }
+        )
+        if self.send_error is not None:
+            raise self.send_error
+
+    async def notify_start(self) -> WeChatAPIResult:
+        self.notify_calls.append("start")
+        if self.notify_start_error is not None:
+            raise self.notify_start_error
+        return self.notify_start_result
+
+    async def notify_stop(self) -> WeChatAPIResult:
+        self.notify_calls.append("stop")
+        if self.notify_stop_error is not None:
+            raise self.notify_stop_error
+        return self.notify_stop_result
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _runtime_event(
+    *,
+    sender: str = "user-one",
+    message_id: int = 101,
+    context_token: str = "CONTEXT_TOKEN_SECRET_ONE",
+    text: str = "hello",
+    message_type: int = MESSAGE_TYPE_USER,
+    group_id: str | None = None,
+    items: tuple[WeChatMessageItem, ...] | None = None,
+) -> WeChatInboundEvent:
+    return WeChatInboundEvent(
+        message_id=message_id,
+        from_user_id=sender,
+        create_time_ms=1_754_640_000_123,
+        message_type=message_type,
+        group_id=group_id,
+        items=items
+        if items is not None
+        else (WeChatMessageItem(type=MESSAGE_ITEM_TYPE_TEXT, text=text),),
+        context_token=context_token,
+    )
+
+
+async def _start_runtime_adapter(
+    tmp_path: Path,
+    on_message: Any,
+    *,
+    allowed_users: frozenset[str] = frozenset({"user-one", "user-two"}),
+    initial_state: WeChatRuntimeState | None = None,
+    api: RuntimeAPIStub | None = None,
+) -> tuple[WeChatAdapter, RuntimeAPIStub, WeChatStorage]:
+    storage = WeChatStorage(tmp_path / "wechat")
+    if initial_state is not None:
+        storage.save_runtime_state(initial_state)
+    runtime_api = api or RuntimeAPIStub()
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        allowed_users,
+        api=runtime_api,
+        storage=storage,
+    )
+
+    async def forbidden_interaction(*_args: Any) -> None:
+        raise AssertionError("WeChat must not deliver interactions")
+
+    await adapter.start(on_message, forbidden_interaction)
+    await runtime_api.poll_started.wait()
+    return adapter, runtime_api, storage
+
+
+async def _wait_until(predicate: Any) -> None:
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition did not become true")
+
+
+async def test_runtime_transport_matches_pinned_headers_and_envelopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kimi_bridge.platforms.wechat import api as api_module
+
+    uins = iter(("UIN-1", "UIN-2", "UIN-3", "UIN-4"))
+    monkeypatch.setattr(api_module, "_random_wechat_uin", lambda: next(uins))
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/getupdates"):
+            return httpx.Response(
+                200,
+                json={
+                    "ret": 0,
+                    "msgs": [
+                        {
+                            "message_id": 42,
+                            "from_user_id": "user-one",
+                            "create_time_ms": 1_754_640_000_123,
+                            "message_type": 1,
+                            "item_list": [
+                                {"type": 1, "text_item": {"text": "hello"}}
+                            ],
+                            "context_token": "INBOUND_CONTEXT_SECRET",
+                        }
+                    ],
+                    "get_updates_buf": "NEXT_CURSOR_SECRET",
+                    "longpolling_timeout_ms": 42000,
+                },
+            )
+        return httpx.Response(200, json={"ret": 0})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        api = WeChatAPI(_credential(), client)
+        poll = await api.get_updates("OLD_CURSOR_SECRET", timeout_seconds=35)
+        await api.send_text(
+            to_user_id="user-one",
+            context_token="OUTBOUND_CONTEXT_SECRET",
+            text="reply",
+            client_id="client-one",
+        )
+        assert (await api.notify_start()).ret == 0
+        assert (await api.notify_stop()).ret == 0
+
+    assert poll.long_poll_timeout_seconds == 42
+    assert poll.messages[0].message_id == 42
+    assert poll.messages[0].items == (
+        WeChatMessageItem(type=MESSAGE_ITEM_TYPE_TEXT, text="hello"),
+    )
+    assert "INBOUND_CONTEXT_SECRET" not in repr(poll)
+    assert "NEXT_CURSOR_SECRET" not in repr(poll)
+    assert [request.headers["x-wechat-uin"] for request in requests] == [
+        "UIN-1",
+        "UIN-2",
+        "UIN-3",
+        "UIN-4",
+    ]
+    for request in requests:
+        assert request.headers["authorization"] == "Bearer TOKEN_SECRET"
+        assert request.headers["authorizationtype"] == "ilink_bot_token"
+        assert request.headers["ilink-app-id"] == "bot"
+        assert request.headers["ilink-app-clientversion"] == "132102"
+        assert request.extensions["timeout"]["read"] > 0
+        body = json.loads(request.content)
+        assert body["base_info"] == build_base_info()
+    assert json.loads(requests[0].content)["get_updates_buf"] == "OLD_CURSOR_SECRET"
+    sent = json.loads(requests[1].content)["msg"]
+    assert sent == {
+        "from_user_id": "",
+        "to_user_id": "user-one",
+        "client_id": "client-one",
+        "message_type": 2,
+        "message_state": 2,
+        "item_list": [{"type": 1, "text_item": {"text": "reply"}}],
+        "context_token": "OUTBOUND_CONTEXT_SECRET",
+    }
+
+
+async def test_fake_ilink_service_drives_real_adapter_and_reply_context(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+    reply_sent = asyncio.Event()
+    poll_cancelled = asyncio.Event()
+    poll_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal poll_count
+        requests.append(request)
+        if request.url.path.endswith("/notifystart"):
+            return httpx.Response(200, json={"ret": 0})
+        if request.url.path.endswith("/notifystop"):
+            return httpx.Response(200, json={"ret": 0})
+        if request.url.path.endswith("/sendmessage"):
+            reply_sent.set()
+            return httpx.Response(200, json={"ret": 0})
+        if request.url.path.endswith("/getupdates"):
+            poll_count += 1
+            if poll_count == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "ret": 0,
+                        "msgs": [
+                            {
+                                "message_id": 7001,
+                                "from_user_id": "user-one",
+                                "create_time_ms": 1_754_640_000_123,
+                                "message_type": 1,
+                                "item_list": [
+                                    {
+                                        "type": 1,
+                                        "text_item": {"text": "/status"},
+                                    }
+                                ],
+                                "context_token": "ROUND_TRIP_CONTEXT_SECRET",
+                            }
+                        ],
+                        "get_updates_buf": "ROUND_TRIP_CURSOR_SECRET",
+                    },
+                )
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                poll_cancelled.set()
+                raise
+        raise AssertionError(f"unexpected endpoint: {request.url.path}")
+
+    storage = WeChatStorage(tmp_path / "wechat")
+    inbound: list[InboundMessage] = []
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = WeChatAdapter(
+            "abcd1234efgh5678@im.bot",
+            frozenset({"user-one"}),
+            api=WeChatAPI(_credential(), client),
+            storage=storage,
+        )
+
+        async def on_message(
+            received_adapter: WeChatAdapter, message: InboundMessage
+        ) -> None:
+            inbound.append(message)
+            await received_adapter.send_final_text(
+                message.conversation, "**command reply**"
+            )
+
+        async def forbidden_interaction(*_args: Any) -> None:
+            raise AssertionError("unexpected interaction")
+
+        await adapter.start(on_message, forbidden_interaction)
+        await reply_sent.wait()
+        await _wait_until(
+            lambda: storage.load_runtime_state().get_updates_buf
+            == "ROUND_TRIP_CURSOR_SECRET"
+        )
+        await adapter.stop()
+
+    assert [message.message_id for message in inbound] == ["7001"]
+    send_request = next(
+        request for request in requests if request.url.path.endswith("/sendmessage")
+    )
+    sent_message = json.loads(send_request.content)["msg"]
+    assert sent_message["context_token"] == "ROUND_TRIP_CONTEXT_SECRET"
+    assert sent_message["to_user_id"] == "user-one"
+    assert sent_message["item_list"][0]["text_item"]["text"] == "**command reply**"
+    assert poll_cancelled.is_set()
+
+
+async def test_runtime_transport_timeout_is_empty_and_send_is_not_retried() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise httpx.ReadTimeout("uncertain transport failure", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        api = WeChatAPI(_credential(), client)
+        result = await api.get_updates("CURRENT_CURSOR", timeout_seconds=1)
+        assert result == WeChatPollResult(
+            messages=(), get_updates_buf="CURRENT_CURSOR"
+        )
+        with pytest.raises(httpx.ReadTimeout):
+            await api.send_text(
+                to_user_id="user-one",
+                context_token="CONTEXT_SECRET",
+                text="reply",
+                client_id="client-one",
+            )
+
+    assert calls == [
+        "/ilink/bot/getupdates",
+        "/ilink/bot/sendmessage",
+    ]
+
+
+async def test_runtime_transport_rejects_nonzero_send_without_retry() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200, json={"ret": 23, "errmsg": "SEND_RESPONSE_SECRET"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        api = WeChatAPI(_credential(), client)
+        with pytest.raises(WeChatProtocolError, match="ret=23") as caught:
+            await api.send_text(
+                to_user_id="user-one",
+                context_token="CONTEXT_SECRET",
+                text="reply",
+                client_id="client-one",
+            )
+
+    assert calls == 1
+    assert "SEND_RESPONSE_SECRET" not in str(caught.value)
+    assert "CONTEXT_SECRET" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "message"),
+    [
+        (500, "RAW_RESPONSE_SECRET", "HTTP 500"),
+        (200, "RAW_RESPONSE_SECRET", "valid JSON"),
+        (200, {"ret": -7, "errmsg": "RAW_RESPONSE_SECRET"}, "ret=-7"),
+        (200, {"ret": 0, "msgs": {}}, "invalid msgs"),
+    ],
+)
+async def test_runtime_transport_failures_are_typed_and_redacted(
+    status: int, payload: object, message: str
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(payload, str):
+            return httpx.Response(status, text=payload)
+        return httpx.Response(status, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        api = WeChatAPI(_credential(), client)
+        with pytest.raises(WeChatProtocolError, match=message) as caught:
+            await api.get_updates("CURSOR_SECRET", timeout_seconds=1)
+
+    assert "RAW_RESPONSE_SECRET" not in str(caught.value)
+    assert "CURSOR_SECRET" not in str(caught.value)
+    assert "TOKEN_SECRET" not in str(caught.value)
+
+
+async def test_runtime_transport_cancellation_aborts_the_inflight_request() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        api = WeChatAPI(_credential(), client)
+        task = asyncio.create_task(api.get_updates("", timeout_seconds=60))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert cancelled.is_set()
+
+
+@requires_posix_modes
+def test_runtime_state_is_versioned_atomic_private_and_secret_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kimi_bridge.platforms.wechat import storage as storage_module
+
+    storage = WeChatStorage(tmp_path / "wechat")
+    original = WeChatRuntimeState(
+        get_updates_buf="CURSOR_SECRET_ONE",
+        context_tokens={
+            ("bot-one@im.bot", "user-one"): "CONTEXT_TOKEN_SECRET_ONE"
+        },
+    )
+    storage.save_runtime_state(original)
+
+    assert storage.load_runtime_state() == original
+    assert oct(storage.runtime_state_path.stat().st_mode & 0o777) == "0o600"
+    assert "CURSOR_SECRET_ONE" not in repr(original)
+    assert "CONTEXT_TOKEN_SECRET_ONE" not in repr(original)
+    before = storage.runtime_state_path.read_bytes()
+
+    def fail_replace(_source: object, _target: object) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(storage_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        storage.save_runtime_state(
+            WeChatRuntimeState(get_updates_buf="CURSOR_SECRET_TWO")
+        )
+
+    assert storage.runtime_state_path.read_bytes() == before
+    assert storage.load_runtime_state() == original
+    assert not tuple(storage.path.glob("*.tmp"))
+
+
+def test_runtime_state_rejects_unknown_schema_without_exposing_secrets(
+    tmp_path: Path,
+) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.path.mkdir(parents=True)
+    storage.runtime_state_path.write_text(
+        json.dumps(
+            {
+                "version": RUNTIME_STATE_VERSION + 1,
+                "get_updates_buf": "FUTURE_CURSOR_SECRET",
+                "context_tokens": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(WeChatStorageError) as caught:
+        storage.load_runtime_state()
+
+    assert "unsupported" in str(caught.value)
+    assert "FUTURE_CURSOR_SECRET" not in str(caught.value)
+
+
+async def test_allowlisted_text_maps_semantics_and_rotates_isolated_contexts(
+    tmp_path: Path,
+) -> None:
+    inbound: list[InboundMessage] = []
+
+    async def handler(adapter: WeChatAdapter, message: InboundMessage) -> None:
+        inbound.append(message)
+        await adapter.send_final_text(message.conversation, f"reply {message.message_id}")
+
+    adapter, api, storage = await _start_runtime_adapter(tmp_path, handler)
+    try:
+        await adapter.handle_poll_result(
+            WeChatPollResult(
+                messages=(
+                    _runtime_event(
+                        sender="user-one",
+                        message_id=101,
+                        context_token="CONTEXT_ONE",
+                    ),
+                    _runtime_event(
+                        sender="user-two",
+                        message_id=202,
+                        context_token="CONTEXT_TWO",
+                    ),
+                    _runtime_event(
+                        sender="user-one",
+                        message_id=303,
+                        context_token="CONTEXT_THREE",
+                    ),
+                ),
+                get_updates_buf="CURSOR_AFTER_BATCH",
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert [message.message_id for message in inbound] == ["101", "202", "303"]
+    assert inbound[0].conversation == ConversationRef(
+        platform="wechat",
+        bot_id="bot-one@im.bot",
+        conversation_id="user-one",
+    )
+    assert inbound[0].actor.id == "user-one"
+    assert inbound[0].timestamp == 1_754_640_000.123
+    assert [send["context_token"] for send in api.sends] == [
+        "CONTEXT_ONE",
+        "CONTEXT_TWO",
+        "CONTEXT_THREE",
+    ]
+    state = storage.load_runtime_state()
+    assert state.get_updates_buf == "CURSOR_AFTER_BATCH"
+    assert state.context_tokens == {
+        ("bot-one@im.bot", "user-one"): "CONTEXT_THREE",
+        ("bot-one@im.bot", "user-two"): "CONTEXT_TWO",
+    }
+
+
+async def test_filtered_events_and_media_do_not_reach_the_router(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    inbound: list[InboundMessage] = []
+
+    async def handler(_adapter: WeChatAdapter, message: InboundMessage) -> None:
+        inbound.append(message)
+
+    caplog.set_level(logging.WARNING)
+    adapter, api, storage = await _start_runtime_adapter(tmp_path, handler)
+    media = _runtime_event(
+        message_id=505,
+        context_token="MEDIA_CONTEXT",
+        items=(
+            WeChatMessageItem(type=MESSAGE_ITEM_TYPE_TEXT, text="caption"),
+            WeChatMessageItem(type=MESSAGE_ITEM_TYPE_IMAGE),
+        ),
+    )
+    try:
+        await adapter.handle_poll_result(
+            WeChatPollResult(
+                messages=(
+                    _runtime_event(sender="intruder", message_id=501),
+                    replace(
+                        _runtime_event(
+                            message_id=502, message_type=MESSAGE_TYPE_BOT
+                        ),
+                        from_user_id=None,
+                    ),
+                    _runtime_event(message_id=503, message_type=99),
+                    _runtime_event(message_id=504, group_id="group-one"),
+                    media,
+                ),
+                get_updates_buf="FILTERED_CURSOR",
+            )
+        )
+    finally:
+        await adapter.stop()
+
+    assert inbound == []
+    assert len(api.sends) == 1
+    assert api.sends[0]["context_token"] == "MEDIA_CONTEXT"
+    assert "media" in api.sends[0]["text"].lower()
+    assert storage.load_runtime_state().get_updates_buf == "FILTERED_CURSOR"
+    assert "[wechat].allowed_users" in caplog.text
+    assert "intruder" in caplog.text
+    assert "caption" not in caplog.text
+
+
+async def test_malformed_authorized_messages_leave_cursor_uncommitted(
+    tmp_path: Path,
+) -> None:
+    inbound: list[InboundMessage] = []
+
+    async def handler(_adapter: WeChatAdapter, message: InboundMessage) -> None:
+        inbound.append(message)
+
+    initial = WeChatRuntimeState(get_updates_buf="COMMITTED_CURSOR")
+    adapter, _api, storage = await _start_runtime_adapter(
+        tmp_path, handler, initial_state=initial
+    )
+    malformed = (
+        replace(_runtime_event(), from_user_id=None),
+        replace(_runtime_event(), message_type=None),
+        replace(_runtime_event(), message_id=None),
+        replace(_runtime_event(), create_time_ms=None),
+        replace(_runtime_event(), context_token=None),
+        replace(_runtime_event(), items=()),
+    )
+    try:
+        for event in malformed:
+            with pytest.raises(WeChatProtocolError):
+                await adapter.handle_poll_result(
+                    WeChatPollResult(
+                        messages=(event,), get_updates_buf="UNSAFE_CURSOR"
+                    )
+                )
+            assert storage.load_runtime_state().get_updates_buf == "COMMITTED_CURSOR"
+    finally:
+        await adapter.stop()
+
+    assert inbound == []
+
+
+async def test_batch_handler_failure_preserves_previous_cursor(
+    tmp_path: Path,
+) -> None:
+    handled: list[str] = []
+
+    async def handler(_adapter: WeChatAdapter, message: InboundMessage) -> None:
+        handled.append(message.message_id)
+        if message.message_id == "2":
+            raise RuntimeError("handler failed")
+
+    initial = WeChatRuntimeState(get_updates_buf="COMMITTED_CURSOR")
+    adapter, _api, storage = await _start_runtime_adapter(
+        tmp_path, handler, initial_state=initial
+    )
+    try:
+        with pytest.raises(RuntimeError, match="handler failed"):
+            await adapter.handle_poll_result(
+                WeChatPollResult(
+                    messages=(
+                        _runtime_event(message_id=1, context_token="CONTEXT_ONE"),
+                        _runtime_event(message_id=2, context_token="CONTEXT_TWO"),
+                    ),
+                    get_updates_buf="UNSAFE_CURSOR",
+                )
+            )
+    finally:
+        await adapter.stop()
+
+    assert handled == ["1", "2"]
+    state = storage.load_runtime_state()
+    assert state.get_updates_buf == "COMMITTED_CURSOR"
+    assert state.context_tokens[("bot-one@im.bot", "user-one")] == "CONTEXT_TWO"
+
+
+async def test_empty_poll_commits_only_a_nonempty_replacement_cursor(
+    tmp_path: Path,
+) -> None:
+    async def handler(_adapter: WeChatAdapter, _message: InboundMessage) -> None:
+        raise AssertionError("empty poll reached the router")
+
+    initial = WeChatRuntimeState(get_updates_buf="CURRENT_CURSOR")
+    adapter, _api, storage = await _start_runtime_adapter(
+        tmp_path, handler, initial_state=initial
+    )
+    try:
+        await adapter.handle_poll_result(
+            WeChatPollResult(messages=(), get_updates_buf="")
+        )
+        assert storage.load_runtime_state().get_updates_buf == "CURRENT_CURSOR"
+        await adapter.handle_poll_result(
+            WeChatPollResult(messages=(), get_updates_buf="NEXT_CURSOR")
+        )
+    finally:
+        await adapter.stop()
+
+    assert storage.load_runtime_state().get_updates_buf == "NEXT_CURSOR"
+
+
+async def test_send_requires_current_context_and_deferred_features_fail_closed(
+    tmp_path: Path,
+) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    api = RuntimeAPIStub()
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        storage=storage,
+    )
+
+    with pytest.raises(WeChatProtocolError, match="context"):
+        await adapter.send_text(conversation, "hello")
+    with pytest.raises(WeChatUnsupportedOperation, match="edited"):
+        await adapter.edit_text(
+            MessageRef(conversation, "message-one"), "edit"
+        )
+    with pytest.raises(WeChatUnsupportedOperation, match="file delivery"):
+        await adapter.send_file(
+            conversation,
+            OutboundFile("one.txt", b"one", "text/plain"),
+        )
+    assert api.sends == []
+
+    state = WeChatRuntimeState(
+        context_tokens={("bot-one@im.bot", "user-one"): "CURRENT_CONTEXT"}
+    )
+    storage.save_runtime_state(state)
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        storage=storage,
+    )
+    message = await adapter.present_interaction(
+        conversation,
+        ApprovalPrompt(
+            interaction_id="interaction-one",
+            request=ApprovalRequest(
+                id="request-one",
+                session_id="session-one",
+                tool_name="shell",
+                action="run",
+            ),
+            session_title="Session",
+            workspace="/workspace",
+        ),
+    )
+    await adapter.finish_interaction(
+        message, InteractionOutcome(state="cancelled", detail="cancelled")
+    )
+    assert api.sends[-1]["context_token"] == "CURRENT_CONTEXT"
+    assert "normal message" in api.sends[-1]["text"]
+
+
+def test_whole_message_formatter_preserves_code_and_readable_links() -> None:
+    image_target = "https://signed.example/IMAGE_TARGET_SECRET"
+    rendered = sanitize_markdown(
+        "> quoted\n"
+        "##### Heading\n"
+        "~~removed markers~~ and [docs](https://docs.example/path)\n"
+        f"![diagram]({image_target})\n"
+        "`~~inline code~~`\n"
+        "```python\n"
+        "> # ~~fenced code~~\n"
+        "```\n"
+    )
+
+    assert rendered.startswith("quoted\nHeading\n")
+    assert "removed markers" in rendered
+    assert "~~removed markers~~" not in rendered
+    assert "docs (https://docs.example/path)" in rendered
+    assert "diagram" in rendered
+    assert image_target not in rendered
+    assert "`~~inline code~~`" in rendered
+    assert "```python\n> # ~~fenced code~~\n```" in rendered
+
+
+async def test_lifecycle_honors_bounded_timeout_and_cancels_promptly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    api = RuntimeAPIStub()
+    api.notify_start_result = WeChatAPIResult(ret=7)
+    api.notify_stop_error = RuntimeError("stop failed")
+    await api.polls.put(
+        WeChatPollResult(
+            messages=(),
+            get_updates_buf="",
+            long_poll_timeout_seconds=0.01,
+        )
+    )
+
+    async def handler(_adapter: WeChatAdapter, _message: InboundMessage) -> None:
+        raise AssertionError("empty poll reached the router")
+
+    adapter, runtime_api, _storage = await _start_runtime_adapter(
+        tmp_path, handler, api=api
+    )
+    await _wait_until(lambda: len(runtime_api.poll_calls) >= 2)
+    wait_task = asyncio.create_task(adapter.wait())
+    await adapter.stop()
+
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+    assert runtime_api.poll_calls[0] == (
+        "",
+        DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
+    )
+    assert runtime_api.poll_calls[1] == ("", 1.0)
+    assert runtime_api.poll_cancelled.is_set()
+    assert runtime_api.notify_calls == ["start", "stop"]
+    assert runtime_api.closed
+    assert "ret=7" in caplog.text
+    assert "notifyStop failed" in caplog.text

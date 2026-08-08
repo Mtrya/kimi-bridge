@@ -225,13 +225,68 @@ def test_selected_platform_requires_its_own_credentials() -> None:
     with pytest.raises(RuntimeError, match="wechat.allowed_users"):
         main_module._build_adapter(Config(platform="wechat"))
 
-    with pytest.raises(RuntimeError, match="runtime messaging is not available"):
+    with pytest.raises(RuntimeError, match="local authorization/state"):
         main_module._build_adapter(
             Config(
                 platform="wechat",
                 wechat=WechatConfig(allowed_users=frozenset({"user-one"})),
             )
         )
+
+
+def test_builds_selected_wechat_adapter_from_private_storage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    storage_path = tmp_path / "wechat"
+    storage = wechat_module.WeChatStorage(storage_path)
+    credential = wechat_module.WeChatCredential(
+        bot_token="WECHAT_TOKEN_SECRET",
+        bot_id="bot-one@im.bot",
+        base_url="https://ilinkai.weixin.qq.com",
+        authorized_at="2026-08-08T12:00:00+00:00",
+    )
+    storage.save_credential(credential)
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+    api = object()
+
+    def api_factory(received: object) -> object:
+        calls.append(("api", (received,), {}))
+        return api
+
+    def adapter_factory(*args: Any, **kwargs: Any) -> _Adapter:
+        calls.append(("adapter", args, kwargs))
+        return _Adapter()
+
+    def forbidden_factory(*_args: Any, **_kwargs: Any) -> _Adapter:
+        raise AssertionError("unselected adapter was constructed")
+
+    monkeypatch.setattr(wechat_module, "WeChatAPI", api_factory)
+    monkeypatch.setattr(wechat_module, "WeChatAdapter", adapter_factory)
+    monkeypatch.setattr(main_module, "TelegramAdapter", forbidden_factory)
+    monkeypatch.setattr(main_module, "FeishuAdapter", forbidden_factory)
+    monkeypatch.setattr(main_module, "QQAdapter", forbidden_factory)
+
+    adapter = main_module._build_adapter(
+        Config(
+            platform="wechat",
+            wechat=WechatConfig(
+                allowed_users=frozenset({"user-one"}),
+                storage_path=storage_path,
+            ),
+        )
+    )
+
+    assert isinstance(adapter, _Adapter)
+    assert calls[0] == ("api", (credential,), {})
+    assert calls[1][0:2] == (
+        "adapter",
+        (credential.bot_id, frozenset({"user-one"})),
+    )
+    assert calls[1][2]["api"] is api
+    assert isinstance(calls[1][2]["storage"], wechat_module.WeChatStorage)
+    assert calls[1][2]["runtime_state"] == wechat_module.WeChatRuntimeState()
 
 
 @pytest.mark.parametrize("argument", ["--help", "--version"])

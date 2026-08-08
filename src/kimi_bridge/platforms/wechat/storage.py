@@ -6,7 +6,7 @@ import json
 import os
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from .types import WeChatAPIError, WeChatCredential, WeChatStorageError
 
 
 CREDENTIAL_VERSION = 1
+RUNTIME_STATE_VERSION = 1
 CREDENTIAL_FILE_NAME = "credentials.json"
 RUNTIME_STATE_FILE_NAME = "runtime-state.json"
 _OWNED_FILE_NAMES = (CREDENTIAL_FILE_NAME, RUNTIME_STATE_FILE_NAME)
@@ -30,6 +31,16 @@ class StorageInspection:
     credential: WeChatCredential | None
     directory_error: str | None = None
     credential_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WeChatRuntimeState:
+    """Adapter-private cursor and per-conversation reply contexts."""
+
+    get_updates_buf: str = field(default="", repr=False)
+    context_tokens: dict[tuple[str, str], str] = field(
+        default_factory=dict, repr=False
+    )
 
 
 class WeChatStorage:
@@ -68,7 +79,6 @@ class WeChatStorage:
 
     def save_credential(self, credential: WeChatCredential) -> None:
         validated = _validate_credential(credential)
-        self._ensure_directory()
         payload: dict[str, Any] = {
             "version": CREDENTIAL_VERSION,
             "bot_token": validated.bot_token,
@@ -76,9 +86,53 @@ class WeChatStorage:
             "base_url": validated.base_url,
             "authorized_at": validated.authorized_at,
         }
+        self._write_private_json(self.credential_path, payload)
+
+    def load_runtime_state(self) -> WeChatRuntimeState:
+        if not os.path.lexists(self.path):
+            return WeChatRuntimeState()
+        if self.path.is_symlink() or not self.path.is_dir():
+            raise WeChatStorageError("WeChat storage path is missing or unsafe")
+        path = self.runtime_state_path
+        if not os.path.lexists(path):
+            return WeChatRuntimeState()
+        if path.is_symlink() or not path.is_file():
+            raise WeChatStorageError("WeChat runtime state is missing or unsafe")
+        try:
+            with path.open(encoding="utf-8") as state_file:
+                payload = json.load(state_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WeChatStorageError(
+                "WeChat runtime state is unreadable or invalid"
+            ) from exc
+        return _runtime_state_from_payload(payload)
+
+    def save_runtime_state(self, state: WeChatRuntimeState) -> None:
+        validated = _validate_runtime_state(state)
+        contexts = [
+            {
+                "bot_id": bot_id,
+                "conversation_id": conversation_id,
+                "context_token": token,
+            }
+            for (bot_id, conversation_id), token in sorted(
+                validated.context_tokens.items()
+            )
+        ]
+        self._write_private_json(
+            self.runtime_state_path,
+            {
+                "version": RUNTIME_STATE_VERSION,
+                "get_updates_buf": validated.get_updates_buf,
+                "context_tokens": contexts,
+            },
+        )
+
+    def _write_private_json(self, path: Path, payload: dict[str, Any]) -> None:
+        self._ensure_directory()
         descriptor, temporary_name = tempfile.mkstemp(
             dir=self.path,
-            prefix=f".{CREDENTIAL_FILE_NAME}.",
+            prefix=f".{path.name}.",
             suffix=".tmp",
         )
         temporary_path = Path(temporary_name)
@@ -90,9 +144,9 @@ class WeChatStorage:
                 credential_file.write("\n")
                 credential_file.flush()
                 os.fsync(credential_file.fileno())
-            os.replace(temporary_path, self.credential_path)
+            os.replace(temporary_path, path)
             if os.name == "posix":
-                self.credential_path.chmod(0o600)
+                path.chmod(0o600)
         finally:
             temporary_path.unlink(missing_ok=True)
 
@@ -207,6 +261,43 @@ def _credential_from_payload(payload: object) -> WeChatCredential:
     return _validate_credential(credential)
 
 
+def _runtime_state_from_payload(payload: object) -> WeChatRuntimeState:
+    if not isinstance(payload, dict):
+        raise WeChatStorageError("unsupported WeChat runtime state format")
+    version = payload.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise WeChatStorageError("unsupported WeChat runtime state format")
+    if version != RUNTIME_STATE_VERSION:
+        raise WeChatStorageError("unsupported WeChat runtime state version")
+    if set(payload) != {"version", "get_updates_buf", "context_tokens"}:
+        raise WeChatStorageError("unsupported WeChat runtime state format")
+    cursor = payload.get("get_updates_buf")
+    contexts = payload.get("context_tokens")
+    if not isinstance(cursor, str) or not isinstance(contexts, list):
+        raise WeChatStorageError("unsupported WeChat runtime state format")
+    context_tokens: dict[tuple[str, str], str] = {}
+    for entry in contexts:
+        if not isinstance(entry, dict) or set(entry) != {
+            "bot_id",
+            "conversation_id",
+            "context_token",
+        }:
+            raise WeChatStorageError("unsupported WeChat runtime state format")
+        bot_id = _required_string(entry, "bot_id")
+        conversation_id = _required_string(entry, "conversation_id")
+        token = _required_string(entry, "context_token")
+        key = (bot_id, conversation_id)
+        if key in context_tokens:
+            raise WeChatStorageError("unsupported WeChat runtime state format")
+        context_tokens[key] = token
+    return _validate_runtime_state(
+        WeChatRuntimeState(
+            get_updates_buf=cursor,
+            context_tokens=context_tokens,
+        )
+    )
+
+
 def _validate_credential(credential: WeChatCredential) -> WeChatCredential:
     bot_token = credential.bot_token.strip()
     bot_id = credential.bot_id.strip()
@@ -233,8 +324,28 @@ def _validate_credential(credential: WeChatCredential) -> WeChatCredential:
     )
 
 
+def _validate_runtime_state(state: WeChatRuntimeState) -> WeChatRuntimeState:
+    if not isinstance(state.get_updates_buf, str):
+        raise WeChatStorageError("WeChat runtime cursor must be a string")
+    contexts: dict[tuple[str, str], str] = {}
+    for key, token in state.context_tokens.items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not all(isinstance(value, str) and value.strip() for value in key)
+            or not isinstance(token, str)
+            or not token.strip()
+        ):
+            raise WeChatStorageError("WeChat runtime context fields are invalid")
+        contexts[(key[0].strip(), key[1].strip())] = token.strip()
+    return WeChatRuntimeState(
+        get_updates_buf=state.get_updates_buf,
+        context_tokens=contexts,
+    )
+
+
 def _required_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
-        raise WeChatStorageError("WeChat credential fields are invalid")
+        raise WeChatStorageError("WeChat stored fields are invalid")
     return value
