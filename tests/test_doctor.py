@@ -13,7 +13,11 @@ from kimi_bridge.doctor import (
     DoctorReport,
     diagnose,
 )
-from kimi_bridge.platforms.wechat import WeChatCredential, WeChatStorage
+from kimi_bridge.platforms.wechat import (
+    WeChatCredential,
+    WeChatRuntimeState,
+    WeChatStorage,
+)
 
 
 requires_posix_modes = pytest.mark.skipif(
@@ -286,6 +290,7 @@ def test_valid_wechat_config_checks_only_local_authorization(
     assert _status(report, "adapter") is CheckStatus.OK
     assert _status(report, "wechat storage") is CheckStatus.OK
     assert _status(report, "wechat authorization") is CheckStatus.OK
+    assert _status(report, "wechat runtime state") is CheckStatus.OK
     assert "only a live inbound round trip proves" in rendered
     assert token not in rendered
     assert bot_id not in rendered
@@ -472,6 +477,40 @@ def test_wechat_unknown_credential_version_is_blocking_and_redacted(
     assert report.exit_code == 1
     assert _status(report, "wechat authorization") is CheckStatus.ERROR
     assert token not in report.render()
+
+
+def test_wechat_malformed_runtime_state_is_blocking_and_redacted(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_wechat_config(config_path, tmp_path / "workspace")
+    runtime_path = tmp_path / "wechat-private" / "runtime-state.json"
+    secret = "DO_NOT_PRINT_WECHAT_RUNTIME_SECRET"
+    runtime_path.write_text(
+        '{"version": 999, "get_updates_buf": "' + secret + '"}\n',
+        encoding="utf-8",
+    )
+    runtime_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 1
+    assert _status(report, "wechat runtime state") is CheckStatus.ERROR
+    assert secret not in report.render()
+
+
+@requires_posix_modes
+def test_wechat_runtime_state_permissions_are_blocking(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    _write_wechat_config(config_path, tmp_path / "workspace")
+    storage = WeChatStorage(tmp_path / "wechat-private")
+    storage.save_runtime_state(WeChatRuntimeState(get_updates_buf="secret"))
+    storage.runtime_state_path.chmod(0o644)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 1
+    assert _status(report, "wechat runtime state") is CheckStatus.ERROR
 
 
 def test_missing_kimi_is_blocking_without_running_commands(tmp_path: Path) -> None:

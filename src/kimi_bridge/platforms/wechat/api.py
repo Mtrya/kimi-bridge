@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import math
 import secrets
+import ssl
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -26,13 +27,19 @@ from .types import (
     QRCode,
     QRStatus,
     QRStatusName,
+    STALE_TOKEN_ERROR_CODE,
+    TYPING_STATUS_ACTIVE,
+    TYPING_STATUS_CANCEL,
     WeChatAPIResult,
     WeChatAPIError,
+    WeChatAuthenticationExpired,
     WeChatCredential,
     WeChatInboundEvent,
     WeChatMessageItem,
     WeChatPollResult,
     WeChatProtocolError,
+    WeChatRetryableError,
+    WeChatTypingConfig,
 )
 
 
@@ -155,14 +162,17 @@ class WeChatAuthAPI:
         self, *, local_tokens: Sequence[str] = ()
     ) -> QRCode:
         tokens = [token for token in local_tokens if token.strip()][-10:]
-        response = await self._client.post(
-            f"{DEFAULT_ILINK_BASE_URL}/ilink/bot/get_bot_qrcode",
-            params={"bot_type": DEFAULT_ILINK_BOT_TYPE},
-            headers=_post_headers(),
-            json={"local_token_list": tokens},
-            timeout=self._request_timeout_seconds,
-            follow_redirects=False,
-        )
+        try:
+            response = await self._client.post(
+                f"{DEFAULT_ILINK_BASE_URL}/ilink/bot/get_bot_qrcode",
+                params={"bot_type": DEFAULT_ILINK_BOT_TYPE},
+                headers=_post_headers(),
+                json={"local_token_list": tokens},
+                timeout=self._request_timeout_seconds,
+                follow_redirects=False,
+            )
+        except httpx.TransportError as exc:
+            _raise_transport_failure("QR creation", exc)
         payload = _response_object(response, "QR creation")
         token = _required_string(payload, "qrcode", "QR creation")
         authorization_url = _required_string(
@@ -181,13 +191,16 @@ class WeChatAuthAPI:
         params = {"qrcode": qr_token}
         if verify_code:
             params["verify_code"] = verify_code
-        response = await self._client.get(
-            f"{origin}/ilink/bot/get_qrcode_status",
-            params=params,
-            headers=_common_headers(),
-            timeout=self._request_timeout_seconds,
-            follow_redirects=False,
-        )
+        try:
+            response = await self._client.get(
+                f"{origin}/ilink/bot/get_qrcode_status",
+                params=params,
+                headers=_common_headers(),
+                timeout=self._request_timeout_seconds,
+                follow_redirects=False,
+            )
+        except httpx.TransportError as exc:
+            _raise_transport_failure("QR status", exc)
         payload = _response_object(response, "QR status")
         status = _required_string(payload, "status", "QR status")
         if status not in _QR_STATUSES:
@@ -229,8 +242,12 @@ class WeChatAPI:
         self._owns_client = client is None
         self._send_timeout_seconds = send_timeout_seconds
         self._notify_timeout_seconds = notify_timeout_seconds
+        self._closed = False
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self._owns_client:
             await self._client.aclose()
 
@@ -248,7 +265,9 @@ class WeChatAPI:
                 timeout_seconds=timeout_seconds,
                 endpoint_name="getUpdates",
             )
-        except httpx.TimeoutException:
+        except WeChatRetryableError as exc:
+            if exc.category != "long-poll timeout":
+                raise
             return WeChatPollResult(
                 messages=(), get_updates_buf=get_updates_buf
             )
@@ -323,6 +342,49 @@ class WeChatAPI:
     async def notify_stop(self) -> WeChatAPIResult:
         return await self._notify("notifystop", "notifyStop")
 
+    async def get_config(
+        self, *, ilink_user_id: str, context_token: str
+    ) -> WeChatTypingConfig:
+        if not ilink_user_id.strip() or not context_token.strip():
+            raise ValueError("WeChat typing identity and context must be non-empty")
+        payload = await self._post(
+            "ilink/bot/getconfig",
+            {
+                "ilink_user_id": ilink_user_id,
+                "context_token": context_token,
+            },
+            timeout_seconds=self._notify_timeout_seconds,
+            endpoint_name="getConfig",
+        )
+        _raise_runtime_code(payload, "getConfig", check_errcode=True)
+        ticket = _runtime_optional_string(
+            payload, "typing_ticket", "getConfig", trim=False
+        )
+        return WeChatTypingConfig(typing_ticket=ticket or None)
+
+    async def send_typing(
+        self,
+        *,
+        ilink_user_id: str,
+        typing_ticket: str,
+        status: int,
+    ) -> None:
+        if not ilink_user_id.strip() or not typing_ticket.strip():
+            raise ValueError("WeChat typing identity and ticket must be non-empty")
+        if status not in {TYPING_STATUS_ACTIVE, TYPING_STATUS_CANCEL}:
+            raise ValueError("unsupported WeChat typing status")
+        payload = await self._post(
+            "ilink/bot/sendtyping",
+            {
+                "ilink_user_id": ilink_user_id,
+                "typing_ticket": typing_ticket,
+                "status": status,
+            },
+            timeout_seconds=self._notify_timeout_seconds,
+            endpoint_name="sendTyping",
+        )
+        _raise_runtime_code(payload, "sendTyping", check_errcode=True)
+
     async def _notify(self, endpoint: str, name: str) -> WeChatAPIResult:
         payload = await self._post(
             f"ilink/bot/msg/{endpoint}",
@@ -330,6 +392,7 @@ class WeChatAPI:
             timeout_seconds=self._notify_timeout_seconds,
             endpoint_name=name,
         )
+        _raise_runtime_code(payload, name, check_errcode=True)
         return WeChatAPIResult(ret=_runtime_optional_int(payload, "ret", name))
 
     async def _post(
@@ -340,13 +403,19 @@ class WeChatAPI:
         timeout_seconds: float,
         endpoint_name: str,
     ) -> Mapping[str, Any]:
-        response = await self._client.post(
-            f"{self._base_url}/{endpoint}",
-            headers=_post_headers(self._bot_token),
-            json={**body, "base_info": build_base_info()},
-            timeout=timeout_seconds,
-            follow_redirects=False,
-        )
+        try:
+            response = await self._client.post(
+                f"{self._base_url}/{endpoint}",
+                headers=_post_headers(self._bot_token),
+                json={**body, "base_info": build_base_info()},
+                timeout=timeout_seconds,
+                follow_redirects=False,
+            )
+        except httpx.TransportError as exc:
+            try:
+                _raise_transport_failure(endpoint_name, exc)
+            except WeChatAPIError as api_exc:
+                raise WeChatProtocolError(str(api_exc)) from api_exc
         try:
             return _response_object(response, endpoint_name)
         except WeChatAPIError as exc:
@@ -355,6 +424,12 @@ class WeChatAPI:
 
 def _response_object(response: httpx.Response, endpoint: str) -> Mapping[str, Any]:
     if response.status_code < 200 or response.status_code >= 300:
+        if response.status_code in {408, 425, 429} or response.status_code >= 500:
+            raise WeChatRetryableError(
+                endpoint,
+                "HTTP",
+                status_code=response.status_code,
+            )
         raise WeChatAPIError(f"{endpoint} request failed with HTTP {response.status_code}")
     try:
         payload = response.json()
@@ -448,6 +523,8 @@ def _raise_runtime_code(
         if check_errcode
         else None
     )
+    if ret == STALE_TOKEN_ERROR_CODE or errcode == STALE_TOKEN_ERROR_CODE:
+        raise WeChatAuthenticationExpired(endpoint)
     if ret not in {None, 0} or errcode not in {None, 0}:
         parts = []
         if ret not in {None, 0}:
@@ -457,6 +534,33 @@ def _raise_runtime_code(
         raise WeChatProtocolError(
             f"{endpoint} response reported " + ", ".join(parts)
         )
+
+
+def _raise_transport_failure(endpoint: str, exc: httpx.TransportError) -> NoReturn:
+    if _is_tls_identity_failure(exc):
+        raise WeChatAPIError(f"{endpoint} TLS identity verification failed") from None
+    if isinstance(exc, httpx.ReadTimeout) and endpoint == "getUpdates":
+        category = "long-poll timeout"
+    elif isinstance(exc, httpx.TimeoutException):
+        category = "timeout"
+    else:
+        category = "transport"
+    raise WeChatRetryableError(endpoint, category) from None
+
+
+def _is_tls_identity_failure(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    for _ in range(8):
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        detail = str(current).lower()
+        if "certificate verify" in detail or "certificate_verify_failed" in detail:
+            return True
+        next_error = current.__cause__ or current.__context__
+        if not isinstance(next_error, BaseException) or next_error is current:
+            break
+        current = next_error
+    return False
 
 
 def _runtime_optional_int(

@@ -262,7 +262,7 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
 
 def _check_wechat_storage(
     config: Config, platform_name: str
-) -> tuple[DoctorCheck, DoctorCheck]:
+) -> tuple[DoctorCheck, DoctorCheck, DoctorCheck]:
     from .platforms.wechat import WeChatStorage
     from .platforms.wechat.storage import redact_bot_id
 
@@ -304,7 +304,26 @@ def _check_wechat_storage(
             f"{redact_bot_id(inspection.credential.bot_id)}; only a live inbound "
             "round trip proves it is active",
         )
-    return directory_check, authorization_check
+
+    if inspection.runtime_state_error is not None:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.ERROR,
+            inspection.runtime_state_error,
+        )
+    elif inspection.runtime_state_exists:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.OK,
+            "private cursor, context, and dedupe state is locally valid",
+        )
+    else:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.OK,
+            "not created; the selected adapter will initialize it locally",
+        )
+    return directory_check, authorization_check, runtime_state_check
 
 
 def _check_ffmpeg(

@@ -26,12 +26,14 @@ from .types import (
     QRStatus,
     WeChatControlError,
     WeChatCredential,
+    WeChatRetryableError,
 )
 
 
 DEFAULT_LOGIN_TIMEOUT_SECONDS = 480.0
 MAX_QR_ATTEMPTS = 3
 POLL_DELAY_SECONDS = 1.0
+MAX_POLL_RETRY_DELAY_SECONDS = 8.0
 
 Sleep = Callable[[float], Awaitable[None]]
 Clock = Callable[[], float]
@@ -53,6 +55,7 @@ async def authorize_with_qr(
     ).isoformat(),
     timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS,
     max_qr_attempts: int = MAX_QR_ATTEMPTS,
+    max_poll_retry_delay_seconds: float = MAX_POLL_RETRY_DELAY_SECONDS,
 ) -> LoginResult:
     """Complete one QR flow and atomically persist only a confirmed result."""
 
@@ -60,6 +63,10 @@ async def authorize_with_qr(
         raise ValueError("timeout_seconds must be positive")
     if max_qr_attempts <= 0:
         raise ValueError("max_qr_attempts must be positive")
+    if max_poll_retry_delay_seconds < POLL_DELAY_SECONDS:
+        raise ValueError(
+            "max_poll_retry_delay_seconds must be at least the poll delay"
+        )
 
     existing: WeChatCredential | None = None
     if storage.has_credential():
@@ -77,6 +84,7 @@ async def authorize_with_qr(
     pending_verify_code: str | None = None
     scanned_reported = False
     deadline = clock() + timeout_seconds
+    retry_delay = POLL_DELAY_SECONDS
 
     while clock() < deadline:
         try:
@@ -85,9 +93,15 @@ async def authorize_with_qr(
                 base_url=current_base_url,
                 verify_code=pending_verify_code,
             )
-        except (httpx.TimeoutException, httpx.TransportError):
-            await sleep(POLL_DELAY_SECONDS)
+        except (
+            WeChatRetryableError,
+            httpx.TimeoutException,
+            httpx.TransportError,
+        ):
+            await sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_poll_retry_delay_seconds)
             continue
+        retry_delay = POLL_DELAY_SECONDS
 
         if status.status == "wait":
             await sleep(POLL_DELAY_SECONDS)
@@ -176,7 +190,7 @@ def run_login(
 
     try:
         result = asyncio.run(login())
-    except httpx.TransportError as exc:
+    except (httpx.TransportError, WeChatRetryableError) as exc:
         raise WeChatControlError("WeChat QR authorization request failed") from exc
     if result.reused_existing:
         stream.write("Existing local WeChat authorization was retained.\n")

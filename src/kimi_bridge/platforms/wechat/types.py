@@ -16,8 +16,13 @@ DEFAULT_ILINK_BOT_TYPE = "3"
 DEFAULT_LONG_POLL_TIMEOUT_SECONDS = 35.0
 DEFAULT_SEND_TIMEOUT_SECONDS = 15.0
 DEFAULT_NOTIFY_TIMEOUT_SECONDS = 10.0
+TYPING_TICKET_TTL_SECONDS = 24 * 60 * 60.0
+TYPING_REFRESH_SECONDS = 5.0
 MIN_LONG_POLL_TIMEOUT_SECONDS = 1.0
 MAX_LONG_POLL_TIMEOUT_SECONDS = 60.0
+STALE_TOKEN_ERROR_CODE = -14
+TYPING_STATUS_ACTIVE = 1
+TYPING_STATUS_CANCEL = 2
 
 MESSAGE_TYPE_USER = 1
 MESSAGE_TYPE_BOT = 2
@@ -92,7 +97,7 @@ class WeChatMessageItem:
     """Typed subset of one inbound iLink message item."""
 
     type: int | None
-    text: str | None = None
+    text: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +129,13 @@ class WeChatAPIResult:
     ret: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class WeChatTypingConfig:
+    """Adapter-private projection of the typing ticket response."""
+
+    typing_ticket: str | None = field(default=None, repr=False)
+
+
 class WeChatControlError(RuntimeError):
     """Expected, secret-safe WeChat control-plane failure."""
 
@@ -138,6 +150,35 @@ class WeChatStorageError(WeChatControlError):
 
 class WeChatProtocolError(RuntimeError):
     """Malformed or failed runtime iLink protocol operation."""
+
+
+class WeChatRetryableError(RuntimeError):
+    """Redacted transient failure; callers decide whether repetition is safe."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        category: str,
+        *,
+        status_code: int | None = None,
+    ) -> None:
+        detail = f"{endpoint} {category} failure"
+        if status_code is not None:
+            detail += f" (HTTP {status_code})"
+        super().__init__(detail)
+        self.endpoint = endpoint
+        self.category = category
+        self.status_code = status_code
+
+
+class WeChatAuthenticationExpired(WeChatProtocolError):
+    """The stored iLink bot authorization is stale and must be replaced."""
+
+    def __init__(self, endpoint: str) -> None:
+        super().__init__(
+            f"{endpoint} reported expired WeChat authorization; run "
+            "kimi-bridge wechat login --replace"
+        )
 
 
 class WeChatUnsupportedOperation(RuntimeError):

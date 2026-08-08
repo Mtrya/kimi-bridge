@@ -16,7 +16,7 @@ from .types import WeChatAPIError, WeChatCredential, WeChatStorageError
 
 
 CREDENTIAL_VERSION = 1
-RUNTIME_STATE_VERSION = 1
+RUNTIME_STATE_VERSION = 2
 CREDENTIAL_FILE_NAME = "credentials.json"
 RUNTIME_STATE_FILE_NAME = "runtime-state.json"
 _OWNED_FILE_NAMES = (CREDENTIAL_FILE_NAME, RUNTIME_STATE_FILE_NAME)
@@ -31,15 +31,20 @@ class StorageInspection:
     credential: WeChatCredential | None
     directory_error: str | None = None
     credential_error: str | None = None
+    runtime_state_exists: bool = False
+    runtime_state_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class WeChatRuntimeState:
-    """Adapter-private cursor and per-conversation reply contexts."""
+    """Adapter-private cursor, durable dedupe window, and reply contexts."""
 
     get_updates_buf: str = field(default="", repr=False)
     context_tokens: dict[tuple[str, str], str] = field(
         default_factory=dict, repr=False
+    )
+    processed_message_ids: tuple[tuple[str, str, int], ...] = field(
+        default=(), repr=False
     )
 
 
@@ -125,6 +130,14 @@ class WeChatStorage:
                 "version": RUNTIME_STATE_VERSION,
                 "get_updates_buf": validated.get_updates_buf,
                 "context_tokens": contexts,
+                "processed_message_ids": [
+                    {
+                        "bot_id": bot_id,
+                        "sender_id": sender_id,
+                        "message_id": message_id,
+                    }
+                    for bot_id, sender_id, message_id in validated.processed_message_ids
+                ],
             },
         )
 
@@ -209,12 +222,42 @@ class WeChatStorage:
                 except (OSError, TypeError, ValueError, WeChatStorageError):
                     credential_error = "credential file is unreadable or invalid"
 
+        runtime_state_exists = (
+            directory_error is None and os.path.lexists(self.runtime_state_path)
+        )
+        runtime_state_error: str | None = None
+        if runtime_state_exists:
+            if (
+                self.runtime_state_path.is_symlink()
+                or not self.runtime_state_path.is_file()
+            ):
+                runtime_state_error = "runtime-state path is not a safe regular file"
+            elif not platform_name.startswith("win"):
+                try:
+                    mode = stat.S_IMODE(self.runtime_state_path.stat().st_mode)
+                except OSError:
+                    runtime_state_error = (
+                        "runtime-state file mode could not be inspected"
+                    )
+                else:
+                    if mode != 0o600:
+                        runtime_state_error = "runtime-state file mode must be 600"
+            if runtime_state_error is None:
+                try:
+                    self.load_runtime_state()
+                except (OSError, TypeError, ValueError, WeChatStorageError):
+                    runtime_state_error = (
+                        "runtime-state file is unreadable or invalid"
+                    )
+
         return StorageInspection(
             directory_exists=directory_exists,
             credential_exists=credential_exists,
             credential=credential,
             directory_error=directory_error,
             credential_error=credential_error,
+            runtime_state_exists=runtime_state_exists,
+            runtime_state_error=runtime_state_error,
         )
 
     def _ensure_directory(self) -> None:
@@ -267,9 +310,12 @@ def _runtime_state_from_payload(payload: object) -> WeChatRuntimeState:
     version = payload.get("version")
     if isinstance(version, bool) or not isinstance(version, int):
         raise WeChatStorageError("unsupported WeChat runtime state format")
-    if version != RUNTIME_STATE_VERSION:
+    if version not in {1, RUNTIME_STATE_VERSION}:
         raise WeChatStorageError("unsupported WeChat runtime state version")
-    if set(payload) != {"version", "get_updates_buf", "context_tokens"}:
+    expected = {"version", "get_updates_buf", "context_tokens"}
+    if version == RUNTIME_STATE_VERSION:
+        expected.add("processed_message_ids")
+    if set(payload) != expected:
         raise WeChatStorageError("unsupported WeChat runtime state format")
     cursor = payload.get("get_updates_buf")
     contexts = payload.get("context_tokens")
@@ -290,10 +336,32 @@ def _runtime_state_from_payload(payload: object) -> WeChatRuntimeState:
         if key in context_tokens:
             raise WeChatStorageError("unsupported WeChat runtime state format")
         context_tokens[key] = token
+    processed_message_ids: list[tuple[str, str, int]] = []
+    raw_processed = payload.get("processed_message_ids", [])
+    if not isinstance(raw_processed, list):
+        raise WeChatStorageError("unsupported WeChat runtime state format")
+    for entry in raw_processed:
+        if not isinstance(entry, dict) or set(entry) != {
+            "bot_id",
+            "sender_id",
+            "message_id",
+        }:
+            raise WeChatStorageError("unsupported WeChat runtime state format")
+        bot_id = _required_string(entry, "bot_id")
+        sender_id = _required_string(entry, "sender_id")
+        message_id = entry.get("message_id")
+        if (
+            isinstance(message_id, bool)
+            or not isinstance(message_id, int)
+            or message_id <= 0
+        ):
+            raise WeChatStorageError("unsupported WeChat runtime state format")
+        processed_message_ids.append((bot_id, sender_id, message_id))
     return _validate_runtime_state(
         WeChatRuntimeState(
             get_updates_buf=cursor,
             context_tokens=context_tokens,
+            processed_message_ids=tuple(processed_message_ids),
         )
     )
 
@@ -338,9 +406,32 @@ def _validate_runtime_state(state: WeChatRuntimeState) -> WeChatRuntimeState:
         ):
             raise WeChatStorageError("WeChat runtime context fields are invalid")
         contexts[(key[0].strip(), key[1].strip())] = token.strip()
+    processed: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str, int]] = set()
+    for identity in state.processed_message_ids:
+        if (
+            not isinstance(identity, tuple)
+            or len(identity) != 3
+            or not isinstance(identity[0], str)
+            or not identity[0].strip()
+            or not isinstance(identity[1], str)
+            or not identity[1].strip()
+            or isinstance(identity[2], bool)
+            or not isinstance(identity[2], int)
+            or identity[2] <= 0
+        ):
+            raise WeChatStorageError("WeChat processed-message identity is invalid")
+        normalized = (identity[0].strip(), identity[1].strip(), identity[2])
+        if normalized in seen:
+            raise WeChatStorageError(
+                "WeChat processed-message identities must be unique"
+            )
+        seen.add(normalized)
+        processed.append(normalized)
     return WeChatRuntimeState(
         get_updates_buf=state.get_updates_buf,
         context_tokens=contexts,
+        processed_message_ids=tuple(processed),
     )
 
 
