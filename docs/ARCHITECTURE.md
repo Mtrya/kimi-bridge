@@ -78,9 +78,9 @@ This section records the authoritative credential flows behind the QR controls. 
 
 ### Feishu/Lark
 
-- Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., create_only=True)` and stores only the returned application `client_id`/`client_secret` plus tenant brand and API domain. Scanning the QR approves application registration in the operator's Feishu/Lark tenant. It is not a user OAuth or device flow, so no user token is stored.
+- Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., addons=...)` without `create_only=True`, so the confirmation page can create or select an application. The fixed add-ons pre-fill the bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. The flow stores only the returned application `client_id`/`client_secret` plus tenant brand and API domain. It is not a user OAuth flow, so no user token is stored.
 - Token type: application-level long-lived credentials. The bridge still acts as the application, and `lark-oapi` exchanges them for `tenant_access_token` values server-side.
-- Scopes: QR registration grants no OAuth scope. Feature permissions (bot capability, message/resource/voice-recognition permissions, `im.message.receive_v1`/`card.action.trigger` events, publication) remain console-managed and are documented as remaining steps.
+- Scopes: the operator must approve the pre-filled application settings on the confirmation page. Bot capability, publication, target-user availability, and `feishu.allowed_users` remain manual platform/bridge steps.
 - Refresh: application credentials have no expiry and no refresh token (none is needed without user OAuth).
 - Transport: unchanged REST + WebSocket long connection. Feishu tenants use `https://open.feishu.cn` and Lark tenants `https://open.larksuite.com`; the managed record preserves the returned domain.
 

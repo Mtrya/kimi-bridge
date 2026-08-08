@@ -37,7 +37,7 @@ kimi-bridge --version
 
 然后按所选平台完成授权和配置：
 
-- 飞书、QQ 或微信：先填写对应的 bootstrap 配置，运行对应的 `login`，再完成平台端设置和 `allowed_users` 白名单；
+- 飞书、QQ 或微信：先填写对应的 bootstrap 配置，运行对应的 `login`，按页面提示确认平台设置，再完成剩余平台端设置和 `allowed_users` 白名单；
 - Telegram：按安装指南中的手工 Bot API 流程，将 bot token 和数值用户 ID 写入 `[telegram]`。
 
 配置完成后再运行本地诊断并前台启动：

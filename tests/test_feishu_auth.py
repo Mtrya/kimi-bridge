@@ -15,8 +15,10 @@ import pytest
 
 from kimi_bridge.config import FeishuConfig
 from kimi_bridge.platforms.feishu.auth import (
+    FEISHU_REGISTRATION_ADDONS,
     FeishuControlError,
     RegistrationResult,
+    _register_app,
     authorize_with_qr,
     run_logout,
     run_status,
@@ -108,6 +110,31 @@ def _write_credential_json(storage: FeishuStorage, payload: dict[str, Any]) -> N
 # ---------------------------------------------------------------------------
 
 
+async def test_sdk_registration_requests_bridge_addons_and_allows_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lark = pytest.importorskip("lark_oapi")
+    captured: dict[str, Any] = {}
+
+    async def fake_aregister_app(
+        _on_qr_code: Callable[[dict[str, Any]], None],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        captured.update(kwargs)
+        return _registration()
+
+    monkeypatch.setattr(lark, "aregister_app", fake_aregister_app)
+
+    await _register_app(lambda _info: None, lambda _info: None)
+
+    assert captured["source"] == "kimi-bridge"
+    assert captured["domain"] == "https://accounts.feishu.cn"
+    assert captured["lark_domain"] == "https://accounts.larksuite.com"
+    assert captured["addons"] == FEISHU_REGISTRATION_ADDONS
+    assert "create_only" not in captured
+    assert "app_id" not in captured
+
+
 async def test_registration_success_persists_feishu_credential(
     tmp_path: Path,
 ) -> None:
@@ -127,6 +154,8 @@ async def test_registration_success_persists_feishu_credential(
     rendered = output.getvalue()
     assert "Feishu application registration URL:" in rendered
     assert "https://accounts.feishu.cn/qr" in rendered
+    assert "create or select an application" in rendered
+    assert "required permissions, message event, and card callback" in rendered
     assert "Application identity: cli_…ef56" in rendered
     assert APP_SECRET not in rendered
 

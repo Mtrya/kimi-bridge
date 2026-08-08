@@ -37,7 +37,7 @@ kimi-bridge --version
 
 Complete setup for the selected platform before running diagnostics:
 
-- Feishu, QQ, or WeChat: start with the platform's bootstrap config, run its `login` command, then complete platform-side setup and fill `allowed_users`;
+- Feishu, QQ, or WeChat: start with the platform's bootstrap config, run its `login` command, approve any guided platform settings, then complete the remaining platform-side setup and fill `allowed_users`;
 - Telegram: follow the manual Bot API flow in the installation guide and set the bot token and numeric user ID under `[telegram]`.
 
 Then run the local diagnostic and start the bridge in the foreground:

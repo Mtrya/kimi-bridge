@@ -69,9 +69,9 @@ storage_path = "~/.kimi-bridge/feishu"
 allowed_users = []
 ```
 
-Run `kimi-bridge feishu login`, open the URL printed by the command in a browser, and follow the page instructions to scan with or approve in Feishu/Lark. The result is an application credential, not a user OAuth token. The managed file records whether the tenant is Feishu or Lark and the corresponding API domain. QR registration does not enable the bot, grant permissions, subscribe to events, publish an app version, or fill `allowed_users`.
+Run `kimi-bridge feishu login` and open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. The result is an application credential, not a user OAuth token. The managed file records whether the tenant is Feishu or Lark and the corresponding API domain.
 
-Before foreground startup, complete and confirm the platform-side requirements for the features you need: bot capability, message/resource/voice-recognition permissions, `im.message.receive_v1` and `card.action.trigger` events over long connection, app publication, and target-user availability. Obtain the target user's `open_id` in the same app/tenant context and put it in `feishu.allowed_users` manually. Current console labels and available permission names are authoritative; do not assume QR approval granted a specific scope. The person who approves application registration is not automatically added to the bridge allowlist.
+The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. Obtain the target user's `open_id` in the same app/tenant context and put it in `feishu.allowed_users` manually. The person who approves application registration is not automatically added to the bridge allowlist.
 
 After those steps, replace the empty array with the real identity (the value below is a location marker, not a value to copy literally):
 

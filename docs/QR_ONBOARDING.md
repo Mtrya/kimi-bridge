@@ -29,7 +29,7 @@ kimi-bridge wechat login|status|logout [--replace on login]
 
 | Platform | QR meaning | Successful local result | What QR does not do |
 | --- | --- | --- | --- |
-| Feishu/Lark | Official application registration | `client_id`/`client_secret`, plus the tenant brand and API domain | It is not user OAuth; it does not configure bot capability, permissions, events, publication, or `feishu.allowed_users` |
+| Feishu/Lark | Official application registration or existing-application selection | `client_id`/`client_secret`, plus the tenant brand and API domain | It is not user OAuth; publication, target-user availability, and `feishu.allowed_users` still require follow-up |
 | QQ | Official bot credential bootstrap/bind | `bot_appid` and the AppSecret decrypted locally from `bot_encrypt_secret` | It is not QQ user login or OAuth; it does not establish every sandbox/review/event/message prerequisite or configure `qq.allowed_users` |
 | WeChat | WeChat iLink bot authorization | A bot credential and a stable scanner identity stored locally | It does not write credentials to TOML, add an arbitrary user to the allowlist, or permit a second polling process |
 
@@ -59,19 +59,17 @@ Then run:
 kimi-bridge feishu login
 ```
 
-Open the short-lived URL printed by the command in a browser, then follow the page instructions to scan with or approve in Feishu/Lark. The managed credential is written only after the command completes successfully; without `--replace`, an existing credential is protected from overwrite.
+Open the short-lived URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. Scan with or approve in Feishu/Lark and confirm those requested settings. The managed credential is written only after the command completes successfully; without `--replace`, an existing credential is protected from overwrite.
 
 ### What still has to happen
 
-In the Feishu/Lark developer console, complete and confirm the platform-side setup required by the features you intend to use:
+The registration confirmation applies the pre-filled bridge permissions, event subscription, and callback only after the operator approves them. The remaining platform-side steps are:
 
-- enable the bot capability;
-- grant the message, resource, and voice-recognition permissions required by the bridge features you will use; the exact available permissions can change, so follow the current console and official documentation;
-- subscribe to `im.message.receive_v1` and `card.action.trigger` and configure long-connection delivery;
+- confirm bot capability and any console settings not represented by the registration add-ons;
 - publish an application version and make it available to the intended tenant/user;
 - obtain the intended sender's `open_id` for the same application and tenant, then manually add it to `feishu.allowed_users`.
 
-QR registration does not automatically complete any of those steps. Do not add the scanner to the bridge allowlist merely because they approved registration.
+QR completion does not publish the application or populate the bridge allowlist. Do not add the scanner to the bridge allowlist merely because they approved registration.
 
 Check and test:
 

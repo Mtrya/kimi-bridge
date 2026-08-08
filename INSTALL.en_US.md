@@ -105,9 +105,9 @@ Run:
 kimi-bridge feishu login
 ```
 
-Open the URL printed by the command in a browser, then follow the page instructions to scan with or approve in Feishu/Lark. The result is an application `client_id` and `client_secret`, saved to `~/.kimi-bridge/feishu/credentials.json` (or the configured `storage_path`). The managed record also preserves whether the tenant is Feishu or Lark and the API domain to use.
+Open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. Scan with or approve in Feishu/Lark and confirm those requested settings. The result is an application `client_id` and `client_secret`, saved to `~/.kimi-bridge/feishu/credentials.json` (or the configured `storage_path`). The managed record also preserves whether the tenant is Feishu or Lark and the API domain to use.
 
-QR registration does not enable the bot capability, grant the permissions needed for message prompts/resources/voice recognition, subscribe to events, publish an app version, or add a bridge user to `feishu.allowed_users`. In the platform console, confirm the requirements for the features you will use, including `im.message.receive_v1` and `card.action.trigger` event subscriptions with long-connection delivery, then publish the app and confirm the intended user's availability. Obtain the user's `open_id` in the same app and tenant context and enter it manually in `feishu.allowed_users`. Do not claim that scanning completed any of these platform-side steps. Feishu inbound voice also requires `ffmpeg` on PATH.
+The operator must still confirm bot capability and any console settings not represented by the registration add-ons, publish an app version, and confirm the intended user's availability. Obtain the user's `open_id` in the same app and tenant context and enter it manually in `feishu.allowed_users`. QR completion does not populate the bridge allowlist, and Feishu inbound voice still requires `ffmpeg` on PATH.
 
 After those steps, replace the empty array with the real identity (the value below is a location marker, not a value to copy literally):
 

@@ -181,7 +181,7 @@ Run:
 kimi-bridge feishu login
 ```
 
-Have the user open the URL printed by the command in a browser, then follow the page instructions to scan with or approve in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records Feishu or Lark tenant brand and API domain. The QR flow does not automatically enable the bot, grant scopes, subscribe to events, publish an app, or add an allowlist user.
+Have the user open the URL printed by the command in a browser. The page lets the user create a new application or select an existing one and pre-fills kimi-bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. Have the user confirm those requested settings in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records Feishu or Lark tenant brand and API domain. The QR flow does not publish the app or add an allowlist user.
 
 After the platform-side identity is known, put the real `open_id` in `feishu.allowed_users` before foreground startup. The following is a location marker, not a value to copy literally:
 
@@ -210,13 +210,12 @@ The pair must be complete. A complete TOML pair is used only when the managed cr
 
 Research the current official console and guide the user through the identity-bound steps. Confirm:
 
-- bot capability is enabled;
-- permissions cover the message prompts and sends, resource upload/download, and voice recognition required by the selected workflow; current code paths include message permissions, resource access, and `speech_to_text:speech`, but do not claim a QR scan granted a particular scope;
-- `im.message.receive_v1` and `card.action.trigger` are subscribed with long-connection delivery;
+- the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback were approved on the registration confirmation page;
+- bot capability and any console settings not represented by the registration add-ons are configured;
 - the application version is published and available to the intended user/tenant;
 - the intended sender's `open_id` is discovered in the same app/tenant context and entered manually in `feishu.allowed_users`.
 
-If the user scans but has not completed these console steps, pause rather than report readiness. Require `ffmpeg` on PATH for Feishu voice messages.
+If the user scans but has not completed these steps, pause rather than report readiness. Require `ffmpeg` on PATH for Feishu voice messages.
 
 ### 6.4 Feishu validation
 

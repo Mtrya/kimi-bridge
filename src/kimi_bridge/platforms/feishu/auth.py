@@ -22,6 +22,26 @@ from .storage import (
 
 FEISHU_ACCOUNT_DOMAIN = "https://accounts.feishu.cn"
 LARK_ACCOUNT_DOMAIN = "https://accounts.larksuite.com"
+FEISHU_REGISTRATION_ADDONS: dict[str, Any] = {
+    "scopes": {
+        "tenant": [
+            "im:message:send_as_bot",
+            "im:message:update",
+            "im:message.p2p_msg:readonly",
+            "im:message:readonly",
+            "im:resource",
+            "speech_to_text:speech",
+        ],
+        "user": [],
+    },
+    "events": {
+        "items": {
+            "tenant": ["im.message.receive_v1"],
+            "user": [],
+        }
+    },
+    "callbacks": {"items": ["card.action.trigger"]},
+}
 
 
 class FeishuControlError(RuntimeError):
@@ -71,7 +91,10 @@ async def authorize_with_qr(
         stream.write(f"{url}\n")
         if isinstance(expire_in, int) and expire_in > 0:
             stream.write(f"This URL expires in about {expire_in} seconds.\n")
-        stream.write("Open the URL and approve application registration in Feishu or Lark.\n")
+        stream.write(
+            "Open the URL, create or select an application, and approve kimi-bridge's "
+            "required permissions, message event, and card callback.\n"
+        )
         stream.flush()
 
     def on_status_change(info: dict[str, Any]) -> None:
@@ -135,7 +158,7 @@ async def _register_app(
         source="kimi-bridge",
         domain=FEISHU_ACCOUNT_DOMAIN,
         lark_domain=LARK_ACCOUNT_DOMAIN,
-        create_only=True,
+        addons=FEISHU_REGISTRATION_ADDONS,
     )
 
 

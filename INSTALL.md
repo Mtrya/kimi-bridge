@@ -105,13 +105,9 @@ allowed_users = []
 kimi-bridge feishu login
 ```
 
-在浏览器中打开命令输出的 URL，然后按页面提示使用飞书/Lark 扫码或确认。该流程返回应用 `client_id` 和 `client_secret`，bridge 将其安全保存为 `~/.kimi-bridge/feishu/credentials.json`（或 `storage_path` 指定的路径），并记录返回的 Feishu/Lark tenant 与 API domain。它不是用户 OAuth，也不会自动完成下面的平台端步骤：
+在浏览器中打开命令输出的 URL。页面允许创建新应用或选择已有应用，并预填 bridge 所需的 tenant 权限、`im.message.receive_v1` 事件和 `card.action.trigger` 回调。按页面提示使用飞书/Lark 扫码或确认这些设置。该流程返回应用 `client_id` 和 `client_secret`，bridge 将其安全保存为 `~/.kimi-bridge/feishu/credentials.json`（或 `storage_path` 指定的路径），并记录返回的 Feishu/Lark tenant 与 API domain。它不是用户 OAuth。
 
-1. 启用机器人能力。
-2. 按实际功能确认消息收发、资源上传下载和语音识别所需权限；例如当前功能涉及消息权限、资源权限和 `speech_to_text:speech`，具体可用项以当前控制台和官方文档为准。
-3. 订阅 `im.message.receive_v1` 和 `card.action.trigger` 事件，并选择长连接事件投递。
-4. 发布应用版本并确认目标用户可用。
-5. 获取目标用户在同一应用和 tenant 下的 `open_id`，手动写入 `[feishu].allowed_users`。
+操作人仍需确认机器人能力和 registration add-ons 未覆盖的控制台设置，发布应用版本并确认目标用户可用；获取目标用户在同一应用和 tenant 下的 `open_id`，手动写入 `[feishu].allowed_users`。扫码完成不会自动填入 bridge 白名单，Feishu 语音消息仍需要 `ffmpeg` 在 PATH 中。
 
 完成上面步骤后，把 bootstrap 配置中的空数组改成包含真实身份的配置（下面的值只是位置说明，不能原样复制）：
 
@@ -120,7 +116,7 @@ kimi-bridge feishu login
 allowed_users = ["<同一应用和 tenant 下的真实 open_id>"]
 ```
 
-不要假设扫码用户已经被自动加入 `allowed_users`，也不要假设权限、事件或发布已经完成。Feishu 语音消息还需要 `ffmpeg` 在 PATH 中。
+不要假设扫码用户已经被自动加入 `allowed_users`，也不要因为 QR 流程成功就跳过应用发布或真实消息往返验证。
 
 检查并验证：
 
