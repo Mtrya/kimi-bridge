@@ -5,6 +5,7 @@ These paths supplement the stable setup contract in [INSTALL_AI.md](../../INSTAL
 ## Available paths
 
 - [QQ C2C over WebSocket](qq.md)
+- [WeChat iLink private chat](wechat.md)
 
 ## Freshness and use
 

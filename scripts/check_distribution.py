@@ -34,7 +34,9 @@ REQUIRED_SOURCE_FILES = {
     "docs/kimi-bridge.service",
     "docs/setup-paths/README.md",
     "docs/setup-paths/qq.md",
+    "docs/setup-paths/wechat.md",
 }
+FORBIDDEN_SOURCE_PREFIXES = (".agents/", "references/", "roadmap/")
 PROJECT_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
     "project"
 ]["version"]
@@ -91,6 +93,16 @@ def _check_source(path: Path) -> None:
     with tarfile.open(path, "r:gz") as archive:
         names = archive.getnames()
         root = names[0].split("/", 1)[0]
+        leaked = sorted(
+            name
+            for name in names
+            if any(
+                name.startswith(f"{root}/{prefix}")
+                for prefix in FORBIDDEN_SOURCE_PREFIXES
+            )
+        )
+        if leaked:
+            raise RuntimeError(f"source distribution contains private files: {leaked}")
         expected = {f"{root}/src/{name}" for name in REQUIRED_PACKAGE_FILES}
         expected.update(f"{root}/{name}" for name in REQUIRED_SOURCE_FILES)
         missing = expected - set(names)
@@ -108,7 +120,7 @@ def _check_metadata(metadata: str) -> None:
     expected = {
         "Name": "kimi-bridge",
         "Version": PROJECT_VERSION,
-        "Summary": "Control a local Kimi Code agent from Feishu, QQ, or Telegram",
+        "Summary": "Control a local Kimi Code agent from Feishu, QQ, Telegram, or WeChat",
         "Requires-Python": ">=3.11",
         "License-Expression": "MIT",
         "Description-Content-Type": "text/markdown",
@@ -123,7 +135,10 @@ def _check_metadata(metadata: str) -> None:
     if parsed.get_all("License-File") != ["LICENSE"]:
         raise RuntimeError("distribution metadata does not identify LICENSE")
     if parsed.get_all("Provides-Extra"):
-        raise RuntimeError("distribution metadata declares unexpected extras")
+        raise RuntimeError("distribution metadata must not declare optional extras")
+    requirements = parsed.get_all("Requires-Dist", [])
+    if not any(requirement == "cryptography>=46" for requirement in requirements):
+        raise RuntimeError("distribution metadata is missing the WeChat dependency")
 
     project_urls = set(parsed.get_all("Project-URL", []))
     required_urls = {
@@ -186,6 +201,10 @@ def _check_tool_install(artifact: Path) -> None:
             raise RuntimeError(
                 f"unexpected installed version: {version.stdout.strip()}"
             )
+        _run(
+            [str(executable), "compat", "--kimi-code", "0.34.0"],
+            environment,
+        )
         doctor_environment = dict(environment)
         doctor_environment["PATH"] = "/usr/bin:/bin"
         doctor = subprocess.run(
@@ -199,6 +218,43 @@ def _check_tool_install(artifact: Path) -> None:
             raise RuntimeError("doctor unexpectedly passed in an empty home")
         if "managed kimi server ready" in (doctor.stdout + doctor.stderr).lower():
             raise RuntimeError("doctor started a managed service")
+        wechat_config = home / "wechat.toml"
+        wechat_config.write_text(
+            'platform = "wechat"\n[wechat]\nallowed_users = ["test-user"]\n',
+            encoding="utf-8",
+        )
+        wechat_config.chmod(0o600)
+        wechat_status = subprocess.run(
+            [str(executable), "--config", str(wechat_config), "wechat", "status"],
+            env=doctor_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        status_output = wechat_status.stdout + wechat_status.stderr
+        if (
+            wechat_status.returncode != 1
+            or "Authorization: not authorized locally." not in status_output
+        ):
+            raise RuntimeError("isolated install reported unexpected WeChat status")
+        if "managed kimi server ready" in status_output.lower():
+            raise RuntimeError("WeChat status started a managed service")
+        wechat_doctor = subprocess.run(
+            [str(executable), "--config", str(wechat_config), "doctor"],
+            env=doctor_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        media_lines = [
+            line
+            for line in (wechat_doctor.stdout + wechat_doctor.stderr).splitlines()
+            if "wechat media:" in line
+        ]
+        if len(media_lines) != 1:
+            raise RuntimeError("doctor did not report the WeChat media dependency")
+        if media_lines[0].split(maxsplit=1)[0] != "OK":
+            raise RuntimeError("isolated install is missing the WeChat dependency")
         _run(["uv", "tool", "uninstall", "kimi-bridge"], environment)
         if executable.exists():
             raise RuntimeError("uv tool uninstall left the console command behind")

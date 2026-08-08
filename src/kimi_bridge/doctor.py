@@ -120,6 +120,9 @@ def diagnose(
         checks.append(_check_selected_adapter(config))
         if config.platform == "feishu":
             _check_ffmpeg(runner, which, checks)
+        elif config.platform == "wechat":
+            checks.append(_check_wechat_media_dependency())
+            checks.extend(_check_wechat_storage(config, platform_name))
         checks.append(_check_directory_target("workspace", config.default_workspace))
         checks.append(_check_state(resolved_state))
 
@@ -229,6 +232,13 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
     elif config.platform == "qq":
         credentials_present = bool(config.qq.app_id and config.qq.app_secret)
         allowlist_size = len(config.qq.allowed_users)
+    elif config.platform == "wechat":
+        from .platforms.wechat import WeChatStorage
+
+        credentials_present = WeChatStorage(
+            config.wechat.storage_path
+        ).has_credential()
+        allowlist_size = len(config.wechat.allowed_users)
     else:
         credentials_present = bool(config.telegram.bot_token)
         allowlist_size = len(config.telegram.allowed_users)
@@ -249,6 +259,88 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
         f"{allowlist_size} allowlisted user(s)"
     )
     return DoctorCheck("adapter", CheckStatus.OK, detail)
+
+
+def _check_wechat_storage(
+    config: Config, platform_name: str
+) -> tuple[DoctorCheck, DoctorCheck, DoctorCheck]:
+    from .platforms.wechat import WeChatStorage
+    from .platforms.wechat.storage import redact_bot_id
+
+    storage = WeChatStorage(config.wechat.storage_path)
+    inspection = storage.inspect(platform_name=platform_name)
+    if inspection.directory_error is not None:
+        directory_check = DoctorCheck(
+            "wechat storage", CheckStatus.ERROR, inspection.directory_error
+        )
+    elif inspection.directory_exists:
+        directory_check = DoctorCheck(
+            "wechat storage",
+            CheckStatus.OK,
+            f"private local directory is usable: {storage.path}",
+        )
+    else:
+        target = _check_directory_target("wechat storage", storage.path)
+        directory_check = DoctorCheck(
+            "wechat storage", target.status, target.detail
+        )
+
+    if inspection.credential_error is not None:
+        authorization_check = DoctorCheck(
+            "wechat authorization",
+            CheckStatus.ERROR,
+            inspection.credential_error,
+        )
+    elif inspection.credential is None:
+        authorization_check = DoctorCheck(
+            "wechat authorization",
+            CheckStatus.ERROR,
+            "not authorized locally; run kimi-bridge wechat login",
+        )
+    else:
+        authorization_check = DoctorCheck(
+            "wechat authorization",
+            CheckStatus.OK,
+            "stored authorization is locally valid for bot "
+            f"{redact_bot_id(inspection.credential.bot_id)}; only a live inbound "
+            "round trip proves it is active",
+        )
+
+    if inspection.runtime_state_error is not None:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.ERROR,
+            inspection.runtime_state_error,
+        )
+    elif inspection.runtime_state_exists:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.OK,
+            "private cursor, context, and dedupe state is locally valid",
+        )
+    else:
+        runtime_state_check = DoctorCheck(
+            "wechat runtime state",
+            CheckStatus.OK,
+            "not created; the selected adapter will initialize it locally",
+        )
+    return directory_check, authorization_check, runtime_state_check
+
+
+def _check_wechat_media_dependency() -> DoctorCheck:
+    from .platforms.wechat import cryptography_available
+
+    if not cryptography_available():
+        return DoctorCheck(
+            "wechat media",
+            CheckStatus.ERROR,
+            "encrypted media dependency is missing; reinstall kimi-bridge",
+        )
+    return DoctorCheck(
+        "wechat media",
+        CheckStatus.OK,
+        "encrypted media dependency is available",
+    )
 
 
 def _check_ffmpeg(

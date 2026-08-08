@@ -20,7 +20,7 @@ Minimize user-only work. An official link is a source for you to research, not a
 Additional rules:
 
 - Detect before asking. Do not ask for information available from commands, files you may safely inspect, or platform APIs.
-- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input. 
+- Never recommend the user to paste credentials into chat. Prefer a private local editor, keychain, secret manager, or masked console input.
 - Preserve existing installations, configuration, state, workspaces, bot settings, webhooks, and event consumers unless the user explicitly approves changing them.
 - Do not report success after `doctor`. Setup is complete only after a real allowlisted inbound message and a real completed reply on the selected platform.
 - Before researching platform setup from scratch, inspect the [verified setup paths](docs/setup-paths/README.md). Use one only when its preconditions match and its `reverify_after` date has not passed. A stale path is evidence, not instructions: research current official sources before asking the user to perform platform-side actions.
@@ -59,7 +59,7 @@ Run:
 uv --version
 ```
 
-The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step does not involve user actions, if not user approval.
+The tested installation path uses `uv`. If it is missing, research the current official [uv installation instructions](https://docs.astral.sh/uv/getting-started/installation/) for the host and guide the user through only the identity- or privilege-bound step; perform and verify everything else yourself. Normally this step involves no user action beyond approval.
 
 Installing kimi-bridge without `uv` is feasible but is not tested by this project. If the user chooses another Python installation method, assist using your own packaging knowledge, state that the route is untested, and validate the resulting `kimi-bridge` executable and dependencies.
 
@@ -137,6 +137,7 @@ Explain the relevant choices:
 
 - **Feishu:** supported and live-validated. Provides interactive approvals and questions, optional thinking output, file transfer, and inbound voice transcription. Requires FFmpeg on `PATH` plus a published custom app, permissions, event subscriptions, and long-connection delivery.
 - **QQ:** supported and live-validated for C2C messaging. It has no interactive approvals, questions, or separate thinking stream, so sessions are forced into `auto` permission mode. Obtain explicit acceptance of this security posture.
+- **WeChat:** supported and live-validated for private chats. It uses QR authorization and immutable replies, forces `auto`, and has no approvals, questions, or separate thinking stream. It supports inbound image/voice/file/video and outbound image/video/file; outbound audio is a generic file. Obtain explicit acceptance of the autonomous security posture and single-poller ownership.
 - **Telegram:** experimental and not project-live-validated. It supports private chats only. Startup uses long polling and takes over any existing webhook.
 
 Before configuring the selected platform, establish:
@@ -146,7 +147,7 @@ Before configuring the selected platform, establish:
 3. If so, is it dedicated to kimi-bridge, and may its configuration or event consumer be changed?
 4. If not, are they willing and authorized to create and publish one?
 
-Do not encourage reuse merely because a bot exists. Prefer a dedicated bot when kimi-bridge would displace another webhook, long poller, gateway connection, or event consumer.
+Do not encourage reuse merely because a bot exists. Prefer a dedicated bot when kimi-bridge would displace another webhook, long poller, gateway connection, or event consumer. For WeChat, the scanning human account need not be dedicated, but the resulting iLink bot authorization must be polled exclusively by one process.
 
 If `lark-cli` is already installed, it may be used during Feishu setup as described below. If it is absent, do not mention, recommend, or install it.
 
@@ -169,7 +170,7 @@ On POSIX systems:
 chmod 600 ~/.kimi-bridge/config.toml
 ```
 
-Do not start with a fabricated allowlist identity and call it configured. Use the selected platform's identity-discovery procedure below, then write the real identity.
+Do not start with a fabricated allowlist identity and call it configured. Use the selected platform's identity-discovery procedure below, then write the real identity. WeChat is the explicit bootstrap exception: its config may use an empty allowlist only while `wechat login` obtains the stable scanner identity, and runtime must not start until the real value is written.
 
 ## 5. Feishu bootstrap
 
@@ -314,7 +315,52 @@ Reconfirm that QQ runs in forced `auto` mode and cannot present approvals or que
 
 Do not change a working API origin solely because current documentation names a newer host. Verify the exact endpoint behavior before proposing a code or configuration change.
 
-## 7. Telegram bootstrap
+## 7. WeChat bootstrap
+
+Use the [verified WeChat private-chat path](docs/setup-paths/wechat.md) when its preconditions and freshness metadata permit it. The adapter contract is pinned to Tencent source tag `v2.4.6`; if the path is stale or live behavior diverges, verify the current upstream tag and observed service behavior before proceeding.
+
+### 7.1 Establish bot ownership
+
+Determine whether the scanning WeChat account already has a Clawbot binding and whether OpenClaw or another iLink consumer polls it. The human account need not be dedicated, but one bot authorization cannot have competing pollers. Reusing an active binding may interrupt the other consumer, so obtain explicit cutover approval before stopping or replacing it.
+
+Use isolated `wechat.storage_path`, `state_path`, and workspace values for each configuration. Never copy the QR credential into TOML, environment variables, command arguments, chat, or reports.
+
+### 7.2 Bootstrap local authorization and allowlisting
+
+Create the protected config with `platform = "wechat"`, an empty `wechat.allowed_users`, and a private `wechat.storage_path`. Then run:
+
+```bash
+kimi-bridge wechat login
+```
+
+The command starts neither Kimi Code nor message polling. Have the user open the printed WeChat authorization URL, scan or approve it in WeChat, and enter a verification number only if the flow explicitly requests one. On success, copy the printed stable scanner identity privately into `wechat.allowed_users`; do not expose the full identity in chat or an issue.
+
+Run `kimi-bridge wechat status` to inspect local storage and redacted authorization metadata without a network request. Then run `kimi-bridge doctor`. Resolve missing authorization, an empty allowlist, unsafe storage permissions, or a missing `cryptography` dependency before startup.
+
+### 7.3 Validate WeChat
+
+Start one foreground bridge and validate serially with the allowlisted scanner:
+
+1. send `/status` and confirm forced `auto` with separate thinking rendering off;
+2. send a short normal prompt and confirm one complete immutable answer;
+3. test multiline Chinese/English text, Markdown, a link, fenced code, and a reply crossing the 4,000-character boundary;
+4. steer a long-running turn with a second normal message, remembering that steering cannot interrupt an already-running tool call;
+5. restart after a committed cursor and confirm no ordinary replay or reordering;
+6. send inbound image, voice, generic file, and video messages and confirm the agent receives each semantic type;
+7. use `/send` for an image, video, and generic file, then send an audio file and confirm it remains a downloadable file rather than a native voice message;
+8. stop cleanly and confirm the best-effort typing indicator disappears.
+
+Image/video routing depends on the selected model's `image_in`/`video_in` capabilities; capability absence must produce the documented workspace-inbox fallback rather than a false native-media claim. Native ASR quality is best-effort. A refreshed `typing...` indication may appear intermittently while a turn or tool call remains active, but it must clear after the final response or shutdown.
+
+The verified path covers one allowlisted scanner. The router keeps one live Kimi response stream and rejects an overlapping model prompt from another sender with retry guidance instead of cancelling the active response. Do not report two-sender interleaving as live-validated unless it was actually exercised. WeChat delivery is at-least-once across the narrow crash window, not exactly-once, and outbound delivery is reactive to an inbound context token rather than proactive.
+
+### 7.4 Replace, recover, or remove authorization
+
+If runtime reports expired authorization, stop it and run `kimi-bridge wechat login --replace`. Replacement preserves the prior credential until a new authorization is confirmed; Tencent may instead reopen the already-bound bot and retain the existing credential. Do not manufacture token expiry, account bans, or an unsafe replacement to force this branch.
+
+Run `kimi-bridge wechat logout` only when the user explicitly wants the local adapter-owned credential and receive state removed. It does not remotely delete the WeChat bot binding.
+
+## 8. Telegram bootstrap
 
 Official starting points:
 
@@ -324,7 +370,7 @@ Official starting points:
 
 Telegram is experimental. State that before the user invests in setup.
 
-### 7.1 Inspect takeover risk
+### 8.1 Inspect takeover risk
 
 Prefer a new dedicated bot. For an existing bot, use `getMe` and `getWebhookInfo` without exposing the token. Establish whether it has:
 
@@ -335,7 +381,7 @@ Prefer a new dedicated bot. For an existing bot, use `getMe` and `getWebhookInfo
 
 kimi-bridge deletes the existing webhook with `drop_pending_updates=true` and then starts long polling. Removing a webhook, discarding queued updates, or displacing another consumer requires explicit approval. If the bot cannot be dedicated to kimi-bridge, stop this path.
 
-### 7.2 Create and configure
+### 8.2 Create and configure
 
 Bot creation and token issuance through BotFather are user-only. Research the current BotFather flow and guide the user through the minimum actions. Have the user put the token directly into the protected local config.
 
@@ -343,7 +389,7 @@ Telegram authorization uses a positive numeric user ID. Prefer discovery from an
 
 The current adapter accepts private user chats only. Groups, channels, topics, and messages from bots are unsupported.
 
-### 7.3 Validate Telegram
+### 8.3 Validate Telegram
 
 After takeover approval where applicable:
 
@@ -358,7 +404,7 @@ After takeover approval where applicable:
 
 Report that this installation passed its own live check, while retaining the project's experimental label.
 
-## 8. Doctor and startup diagnosis
+## 9. Doctor and startup diagnosis
 
 Run:
 
@@ -366,7 +412,7 @@ Run:
 kimi-bridge doctor
 ```
 
-`doctor` validates local configuration, configuration-file permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, or Telegram, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
+`doctor` validates local configuration, configuration-file permissions, paths, the selected Feishu adapter's FFmpeg prerequisite, WeChat's required encrypted-media dependency and private local authorization storage, Kimi Code identity, compatibility, and Kimi's non-starting configuration. It does not connect to Feishu, QQ, Telegram, or WeChat, validate platform credentials, inspect console permissions, prove event delivery, or send a message.
 
 Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platform ready. Common branches:
 
@@ -375,6 +421,7 @@ Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platfo
 - unsafe config permissions: restrict the file;
 - missing credentials or allowlist: return to the selected platform bootstrap;
 - missing or unusable FFmpeg with Feishu selected: install or repair FFmpeg, confirm it is on `PATH`, and re-run `doctor`;
+- missing WeChat authorization or encrypted-media dependency: return to WeChat bootstrap or repair the kimi-bridge installation without starting runtime;
 - unusable workspace or state path: distinguish setup-created paths from pre-existing user data before changing anything;
 - legacy or missing `kimi`: return to Kimi Code preflight;
 - Kimi configuration failure: run `kimi doctor config` directly and prove a real prompt;
@@ -382,7 +429,7 @@ Resolve every `ERROR`. Investigate every `WARN`; warnings do not make the platfo
 
 Start in the foreground before creating a persistent service. Route a clean `kimi-bridge: ...` startup error back to the relevant configuration or platform step. Preserve the traceback for unexpected implementation defects.
 
-## 9. Persistence
+## 10. Persistence
 
 After the foreground live test passes, ask whether the user wants the bridge to run persistently.
 
@@ -399,9 +446,9 @@ If yes, inspect the host's native service mechanism. On Linux with systemd, adap
 
 Treat `loginctl enable-linger` as a separate host-lifecycle decision requiring explicit approval.
 
-For multiple platforms, use one process, config, state path, workspace, service, and bot account per instance. Never let instances share a state file, workspace, or bot consumer.
+For multiple platforms, use one process, config, state path, workspace, service, and bot account per instance. WeChat instances also require separate `wechat.storage_path` values. Never let instances share a state file, workspace, bot authorization, or bot consumer.
 
-## 10. Final report and safe abort
+## 11. Final report and safe abort
 
 For a completed setup, report:
 
@@ -418,7 +465,7 @@ Do not include credentials or full allowlist identities.
 
 On abort, inventory changes made during this setup. Offer to reverse only those changes. Uninstalling the executable or removing a newly created service must preserve existing config, state, workspaces, inbound files, Kimi sessions, and platform apps by default. Any deletion of user data or platform-side resources requires separate approval naming the exact targets.
 
-## 11. Contribute setup evidence
+## 12. Contribute setup evidence
 
 After reaching a completion outcome, offer once to contribute only if the attempt revalidated a stale path, exposed a checkpoint divergence or useful recovery, or covered an environment without a verified path. An unchanged run through a current path needs no report.
 

@@ -18,6 +18,7 @@ from kimi_bridge.config import (
     FeishuConfig,
     QQConfig,
     TelegramConfig,
+    WechatConfig,
 )
 from kimi_bridge.kimi_server import KimiServerAuthenticationError
 
@@ -203,7 +204,7 @@ def test_builds_qq_adapter_with_wired_transport(
     )
 
 
-def test_selected_platform_requires_its_own_credentials() -> None:
+def test_selected_platform_requires_its_own_credentials(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Telegram bot token"):
         main_module._build_adapter(Config(platform="telegram"))
 
@@ -218,6 +219,103 @@ def test_selected_platform_requires_its_own_credentials() -> None:
             Config(
                 platform="qq",
                 qq=QQConfig(app_id="app-1", app_secret="secret-1"),
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="wechat.allowed_users"):
+        main_module._build_adapter(Config(platform="wechat"))
+
+    with pytest.raises(RuntimeError, match="local authorization/state"):
+        main_module._build_adapter(
+            Config(
+                platform="wechat",
+                wechat=WechatConfig(
+                    allowed_users=frozenset({"user-one"}),
+                    storage_path=tmp_path / "empty-wechat",
+                ),
+            )
+        )
+
+
+def test_builds_selected_wechat_adapter_from_private_storage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    storage_path = tmp_path / "wechat"
+    storage = wechat_module.WeChatStorage(storage_path)
+    credential = wechat_module.WeChatCredential(
+        bot_token="WECHAT_TOKEN_SECRET",
+        bot_id="bot-one@im.bot",
+        base_url="https://ilinkai.weixin.qq.com",
+        authorized_at="2026-08-08T12:00:00+00:00",
+    )
+    storage.save_credential(credential)
+    calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+    api = object()
+
+    def api_factory(received: object) -> object:
+        calls.append(("api", (received,), {}))
+        return api
+
+    def adapter_factory(*args: Any, **kwargs: Any) -> _Adapter:
+        calls.append(("adapter", args, kwargs))
+        return _Adapter()
+
+    def forbidden_factory(*_args: Any, **_kwargs: Any) -> _Adapter:
+        raise AssertionError("unselected adapter was constructed")
+
+    monkeypatch.setattr(wechat_module, "WeChatAPI", api_factory)
+    monkeypatch.setattr(wechat_module, "WeChatAdapter", adapter_factory)
+    monkeypatch.setattr(main_module, "TelegramAdapter", forbidden_factory)
+    monkeypatch.setattr(main_module, "FeishuAdapter", forbidden_factory)
+    monkeypatch.setattr(main_module, "QQAdapter", forbidden_factory)
+
+    adapter = main_module._build_adapter(
+        Config(
+            platform="wechat",
+            wechat=WechatConfig(
+                allowed_users=frozenset({"user-one"}),
+                storage_path=storage_path,
+            ),
+        )
+    )
+
+    assert isinstance(adapter, _Adapter)
+    assert calls[0] == ("api", (credential,), {})
+    assert calls[1][0:2] == (
+        "adapter",
+        (credential.bot_id, frozenset({"user-one"})),
+    )
+    assert calls[1][2]["api"] is api
+    assert isinstance(calls[1][2]["storage"], wechat_module.WeChatStorage)
+    assert calls[1][2]["runtime_state"] == wechat_module.WeChatRuntimeState()
+
+
+def test_selected_wechat_requires_media_dependency_before_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    def missing_dependency() -> None:
+        raise wechat_module.WeChatMediaDependencyError(
+            "reinstall kimi-bridge"
+        )
+
+    monkeypatch.setattr(
+        wechat_module,
+        "require_wechat_media_dependency",
+        missing_dependency,
+    )
+
+    with pytest.raises(RuntimeError, match="reinstall kimi-bridge"):
+        main_module._build_adapter(
+            Config(
+                platform="wechat",
+                wechat=WechatConfig(
+                    allowed_users=frozenset({"user-one"}),
+                    storage_path=tmp_path / "wechat",
+                ),
             )
         )
 
@@ -312,6 +410,83 @@ def test_config_argument_reaches_runtime(
     assert received == [custom]
 
 
+def test_wechat_controls_do_not_start_runtime_or_build_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'platform = "wechat"\n[wechat]\nallowed_users = []\n',
+        encoding="utf-8",
+    )
+    runtime_started = False
+    adapter_built = False
+    calls: list[tuple[str, bool]] = []
+
+    async def forbidden_run(_config_path: object) -> None:
+        nonlocal runtime_started
+        runtime_started = True
+
+    def forbidden_adapter(_config: Config) -> _Adapter:
+        nonlocal adapter_built
+        adapter_built = True
+        return _Adapter()
+
+    def fake_login(_config: WechatConfig, *, replace: bool = False) -> int:
+        calls.append(("login", replace))
+        return 0
+
+    def fake_status(_config: WechatConfig) -> int:
+        calls.append(("status", False))
+        return 0
+
+    def fake_logout(_config: WechatConfig) -> int:
+        calls.append(("logout", False))
+        return 0
+
+    monkeypatch.setattr(main_module, "run", forbidden_run)
+    monkeypatch.setattr(main_module, "_build_adapter", forbidden_adapter)
+    monkeypatch.setattr(wechat_module, "run_login", fake_login)
+    monkeypatch.setattr(wechat_module, "run_status", fake_status)
+    monkeypatch.setattr(wechat_module, "run_logout", fake_logout)
+
+    assert (
+        main_module.main(
+            ["--config", str(config_path), "wechat", "login", "--replace"]
+        )
+        == 0
+    )
+    assert main_module.main(["wechat", "--config", str(config_path), "status"]) == 0
+    assert main_module.main(["wechat", "logout", "--config", str(config_path)]) == 0
+    assert calls == [("login", True), ("status", False), ("logout", False)]
+    assert not runtime_started
+    assert not adapter_built
+
+
+def test_wechat_controls_require_selected_wechat_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kimi_bridge.platforms import wechat as wechat_module
+
+    called = False
+
+    def forbidden_status(_config: WechatConfig) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(wechat_module, "run_status", forbidden_status)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "qq"\n', encoding="utf-8")
+
+    assert main_module.main(["--config", str(config_path), "wechat", "status"]) == 1
+    assert not called
+    assert "selected platform must be" in capsys.readouterr().err
+
+
 def test_startup_authentication_failure_is_one_stderr_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -327,6 +502,23 @@ def test_startup_authentication_failure_is_one_stderr_line(
     assert captured.out == ""
     assert captured.err.strip().splitlines() == [
         "kimi-bridge: kimi-code is not authenticated; authenticate via /login"
+    ]
+
+
+def test_stale_wechat_authorization_is_one_stderr_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def failing_run(_config_path: object) -> None:
+        raise main_module.WeChatAuthenticationExpired("getUpdates")
+
+    monkeypatch.setattr(main_module, "run", failing_run)
+
+    assert main_module.main([]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip().splitlines() == [
+        "kimi-bridge: getUpdates reported expired WeChat authorization; run "
+        "kimi-bridge wechat login --replace"
     ]
 
 

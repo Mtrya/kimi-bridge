@@ -740,10 +740,11 @@ class _CommandMixin:
 
         progress = await adapter.send_text(conversation, "Compacting...")
         if binding.session_id in self._compaction_waiters:
-            await adapter.edit_text(
-                progress,
-                "Compaction failed: another compaction is already being tracked.",
-            )
+            text = "Compaction failed: another compaction is already being tracked."
+            if adapter.supports_edits:
+                await adapter.edit_text(progress, text)
+            else:
+                await self._send_chunked(adapter, conversation, text)
             return
         future = asyncio.get_running_loop().create_future()
         waiter = _CompactionWaiter(future=future)
@@ -777,7 +778,10 @@ class _CommandMixin:
                 self._compaction_waiters.pop(binding.session_id)
             if future.done() and not future.cancelled():
                 future.exception()
-        await adapter.edit_text(progress, text)
+        if adapter.supports_edits:
+            await adapter.edit_text(progress, text)
+        else:
+            await self._send_chunked(adapter, conversation, text)
 
     async def _handle_undo(
         self,
