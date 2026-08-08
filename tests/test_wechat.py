@@ -729,7 +729,6 @@ def test_status_is_local_redacted_and_reports_permissions(tmp_path: Path) -> Non
         run_status(
             WechatConfig(storage_path=storage.path),
             stream=output,
-            platform_name="linux",
         )
         == 0
     )
