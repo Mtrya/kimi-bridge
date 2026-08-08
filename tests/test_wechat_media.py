@@ -494,6 +494,29 @@ async def test_download_content_length_bound_fails_before_body_read() -> None:
     assert stream.closed
 
 
+async def test_encrypted_image_size_hint_need_not_equal_ciphertext_length() -> None:
+    plaintext = b"\x89PNG\r\n\x1a\nlive-size-hint"
+    ciphertext = encrypt_aes_ecb(plaintext, FIXED_KEY)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=ciphertext)
+
+    api = UploadAPI(WeChatUploadTarget(upload_param="unused"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        media = WeChatMediaClient(api, client, max_bytes=1024)
+        inbound = await media.download_item(
+            WeChatMessageItem(
+                type=MESSAGE_ITEM_TYPE_IMAGE,
+                image=WeChatImageItem(
+                    media=_reference("image", key=_raw_key_base64()),
+                    mid_size=len(plaintext),
+                ),
+            )
+        )
+
+    assert inbound == InboundImage(plaintext, "image/png", "image.png")
+
+
 async def test_declared_and_outbound_bounds_fail_before_transfer() -> None:
     requests: list[httpx.Request] = []
 

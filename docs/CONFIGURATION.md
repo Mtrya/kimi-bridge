@@ -1,12 +1,12 @@
 # Configuration
 
-kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` selects another file, and the `KIMI_BRIDGE_CONFIG` environment variable provides an override when the flag is absent. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu, QQ and Telegram tables may coexist while one process runs exactly one of them.
+kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` selects another file, and the `KIMI_BRIDGE_CONFIG` environment variable provides an override when the flag is absent. It does not read adapter credentials from environment variables. Only the selected adapter is constructed, so Feishu, QQ, Telegram, and WeChat tables may coexist while one process runs exactly one of them.
 
 ## Complete schema
 
 | Key | Type | Default | Rules |
 | --- | --- | --- | --- |
-| `platform` | string | `"feishu"` | Exactly `"feishu"`, `"telegram"`, or `"qq"`. |
+| `platform` | string | `"feishu"` | Exactly `"feishu"`, `"telegram"`, `"qq"`, or `"wechat"`. |
 | `log_level` | string | `"INFO"` | Case-insensitive `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `default_workspace` | string path | `"~/.kimi-bridge/workspace"` | Non-empty; `~` is expanded and the result is resolved. |
 | `state_path` | string path | `"~/.kimi-bridge/state.json"` | Non-empty; `~` is expanded and the result is resolved. |
@@ -24,6 +24,8 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `qq.app_id` | string | empty | Required with `app_secret` when QQ is selected. |
 | `qq.app_secret` | string | empty | Required with `app_id` when QQ is selected. |
 | `qq.allowed_users` | array of strings | empty | At least one non-empty QQ C2C `user_openid` is required at runtime. |
+| `wechat.allowed_users` | array of strings | empty | May be empty only during QR bootstrap; runtime requires at least one stable scanner identity. |
+| `wechat.storage_path` | string path | `"~/.kimi-bridge/wechat"` | Private adapter-owned credentials and receive state; `~` is expanded and the result is resolved. |
 | `voice.asr.base_url` | string | table omitted | Required non-empty when `[voice.asr]` is present; base URL before `/audio/transcriptions`. |
 | `voice.asr.model` | string | table omitted | Required non-empty when `[voice.asr]` is present. |
 | `voice.asr.api_key` | string | empty | Optional Bearer token; may stay empty for local servers that do not check one. |
@@ -31,7 +33,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config <path>` sel
 | `voice.asr.request_format` | `"multipart"` or `"json"` | `"multipart"` | `multipart` sends an OpenAI/Whisper-compatible file upload; `json` sends base64 in `input_audio`. |
 | `voice.asr.language` | string | empty | Optional language hint forwarded to the external service. |
 
-Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields. QQ forces every session into `auto` permission mode because it cannot present interactive prompts (see [Commands](COMMANDS.md)).
+Only the keys above have an effect. New sessions start in `manual` permission mode, and separate thinking rendering starts off; these are per-conversation state controlled with `/mode` and `/render-thinking`, not global config fields. QQ and WeChat force every session into `auto` permission mode because they cannot present interactive prompts (see [Commands](COMMANDS.md)).
 
 ## Feishu example
 
@@ -81,7 +83,7 @@ bot_token = "replace-me"
 allowed_users = [123456789]
 ```
 
-Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered in the [Telegram bootstrap](../INSTALL_AI.md#7-telegram-bootstrap). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
+Bot creation through Telegram's BotFather and numeric user-ID discovery via the bridge's own rejection log are covered in the [Telegram bootstrap](../INSTALL_AI.md#8-telegram-bootstrap). Usernames are mutable and are never accepted for authorization. The adapter uses private-chat long polling, ignores groups, channels, topics, bots, and non-allowlisted users, and drops the startup backlog so instructions sent while it was offline are not replayed. When a non-allowlisted user messages the bot, the bridge logs their numeric user ID with copy-paste configuration guidance. See the official [Telegram Bot API](https://core.telegram.org/bots/api).
 
 The Telegram adapter is experimental and covered by fake Bot API tests, not project live validation. A local installation must complete its own private-chat checks before reporting it as working.
 
@@ -112,15 +114,41 @@ The supported QQ adapter is C2C (private-chat) only and its core lifecycle is li
 
 QQ has no interactive approvals, questions, or separate thinking stream: every session runs in `auto` permission mode, `/mode` and `/render-thinking on` are rejected with an explanatory reply, and an unexpected interactive prompt is replaced by a short notice. `/send` delivers PNG/JPEG images and MP4 video as native media and every other file type as a file card (QQ's `file_type=4`, 200 MB hard limit). Inbound attachments must use HTTPS and are downloaded with a 20 MB limit. Sandbox accepted ordinary external Markdown links without returning `304003`; the adapter still retries once with defanged URLs if another deployment enforces that error. See the official [QQ bot documentation](https://bot.q.qq.com/wiki/) for full protocol detail.
 
+## WeChat example (experimental)
+
+```toml
+platform = "wechat"
+log_level = "INFO"
+default_workspace = "~/.kimi-bridge/workspace"
+state_path = "~/.kimi-bridge/state.json"
+inbox_subdir = ".kimi-bridge-inbox"
+
+[kimi_server]
+# port = 58628
+
+[wechat]
+# Leave empty only for the first QR login, then replace it with the scanner ID.
+allowed_users = []
+storage_path = "~/.kimi-bridge/wechat"
+```
+
+WeChat authorization is local and separate from chat commands. With the protected config above, run `kimi-bridge wechat login`, open the printed WeChat URL, complete any verification-code step shown by WeChat, and copy the returned stable scanner identity into `wechat.allowed_users`. Then run `kimi-bridge wechat status` and `kimi-bridge doctor` before foreground startup. `status` inspects only local files and never tests the network.
+
+`kimi-bridge wechat login --replace` starts a new QR flow while preserving the prior credential until Tencent confirms a replacement. If Tencent reports the already-bound bot, the existing local credential is retained. An expired runtime authorization terminates with the same `login --replace` recovery instruction instead of retrying indefinitely. `kimi-bridge wechat logout` removes only the adapter-owned local credential and receive-state files; it does not remotely delete the WeChat bot binding.
+
+The storage directory must remain private and its adapter-owned JSON files are written with mode `600` on POSIX systems. Exactly one process may poll a bot authorization. Multiple configurations must use distinct `storage_path`, `state_path`, and workspace values as well as distinct bot authorizations. Do not run OpenClaw or another iLink consumer against the same bot while kimi-bridge is active.
+
+The WeChat adapter is experimental, private-chat only, QR-authorized, and was live-validated on 2026-08-08 against Tencent source tag `v2.4.6`. It forces `auto`, emits immutable replies in chunks of at most 4,000 characters, and provides no approvals, questions, separate thinking stream, editable messages, group chat, or proactive delivery. Live validation covered one allowlisted scanner; isolation between two simultaneous allowlisted senders remains contract-tested rather than project-live-validated.
+
 ## Inbound media
 
-Feishu and QQ native image/video messages become model input when the bound session model advertises `image_in`/`video_in`: the bridge uploads the bytes through Kimi `/files` and submits a file-backed media prompt part. If the corresponding capability is absent, the media is saved under `<session workspace>/<inbox_subdir>/` and its path is included in prompt text.
+Feishu, QQ, and WeChat native image/video messages become model input when the bound session model advertises `image_in`/`video_in`: the bridge uploads the bytes through Kimi `/files` and submits a file-backed media prompt part. If the corresponding capability is absent, the media is saved under `<session workspace>/<inbox_subdir>/` and its path is included in prompt text.
 
 Generic file messages always use the workspace inbox, even when the filename or media type indicates image or video content. The platform adapter's native classification is authoritative; the router does not sniff or reclassify generic files. Upload failures are reported as `Prompt failed` and do not silently select the inbox fallback. See [Inbound media policy](ARCHITECTURE.md#inbound-media-policy) for the decision table.
 
 ## Voice messages
 
-Feishu audio messages and QQ voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` HTTP endpoint is tried first when present, and the selected adapter's native transcription method is called only when the external endpoint yields no transcript. QQ uses `asr_refer_text`; Feishu converts the downloaded Opus resource to 16 kHz mono signed 16-bit PCM with FFmpeg and calls `speech_to_text` file recognition. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音转写]` to mark it explicitly as machine-transcribed speech.
+Feishu audio messages and QQ/WeChat voice attachments are transcribed to text rather than delivered as files. Transcription resolves in layers: the configured `[voice.asr]` HTTP endpoint is tried first when present, and the selected adapter's native transcription method is called only when the external endpoint yields no transcript. QQ uses `asr_refer_text`, WeChat uses its native voice transcript, and Feishu converts the downloaded Opus resource to 16 kHz mono signed 16-bit PCM with FFmpeg and calls `speech_to_text` file recognition. When no layer yields text, a system notice inside the prompt tells the agent a voice message could not be transcribed; the user is never sent an error reply. The transcript enters the prompt prefixed with `[语音转写]` to mark it explicitly as machine-transcribed speech.
 
 Speech recognition is best-effort text, not an exact command channel: native services may normalize punctuation, casing, abbreviations, or unfamiliar tokens even when the audio conversion and request succeed.
 
@@ -134,7 +162,7 @@ request_format = "multipart"
 # language = "en"
 ```
 
-For a JSON/base64 endpoint, use `request_format = "json"`; the bridge derives `input_audio.format` from the inbound filename or media type and sends `model`, `input_audio`, and the optional `language` field. Feishu audio is identified as Opus and QQ uses its WAV conversion when available. For example:
+For a JSON/base64 endpoint, use `request_format = "json"`; the bridge derives `input_audio.format` from the inbound filename or media type and sends `model`, `input_audio`, and the optional `language` field. Feishu audio is identified as Opus, QQ uses its WAV conversion when available, and WeChat preserves the native encoding identified by the event. For example:
 
 ```toml
 [voice.asr]
@@ -145,14 +173,15 @@ request_format = "json"
 language = "en"
 ```
 
-`api_key_env` resolves the external ASR token when the configuration is loaded and fails startup if the named variable is absent or empty. It does not change the rule that adapter credentials are read from the protected TOML file.
+`api_key_env` resolves the external ASR token when the configuration is loaded and fails startup if the named variable is absent or empty. Feishu, Telegram, and QQ credentials remain in the protected TOML file; WeChat QR credentials remain in its private adapter storage.
 
 Selecting Feishu requires a working `ffmpeg` executable on `PATH`; startup fails and `doctor` reports an error when it is missing. Feishu-native recognition also requires the exact tenant scope `speech_to_text:speech`. Without that scope the bridge logs a warning and relies on `[voice.asr]` when configured, or reports the message as untranscribable. See the [Feishu bootstrap](../INSTALL_AI.md#5-feishu-bootstrap) for prerequisite, permission, and live-validation steps. QQ voice attachments download the platform-provided WAV conversion (`voice_wav_url`) when available, otherwise the original encoding.
 
 ## Files and state
 
-- `~/.kimi-bridge/config.toml` contains adapter credentials and should be mode `600` on Linux and macOS. `--config` or `KIMI_BRIDGE_CONFIG` selects a different file.
+- `~/.kimi-bridge/config.toml` contains adapter configuration plus Feishu, Telegram, or QQ credentials and should be mode `600` on Linux and macOS. WeChat credentials are stored separately. `--config` or `KIMI_BRIDGE_CONFIG` selects a different file.
 - `~/.kimi-bridge/state.json` is an atomically replaced, versioned bridge state file. It stores conversation-to-session bindings, workspaces, permission modes, and thinking-rendering preferences, but no adapter credentials. The `state_path` config key selects a different file.
+- `~/.kimi-bridge/wechat/` is the default WeChat credential and durable receive-state directory. `wechat.storage_path` relocates it; do not share it between bot consumers.
 - `~/.kimi-bridge/workspace/` is the default scratch workspace. Use `/new <absolute-or-relative-path>` to bind real project work to another directory.
 - `<session workspace>/<inbox_subdir>/` receives generic inbound files and native images/videos unsupported by the bound model. The configured subdirectory cannot escape its workspace.
 - Kimi Code owns its sessions and model/profile state in its own home directory. kimi-bridge does not copy that data into `state.json`.
@@ -161,7 +190,7 @@ Relative `default_workspace` values resolve from the bridge process's working di
 
 ## Secret handling
 
-Create the parent directory with mode `700` and the file with mode `600`. Never commit the file, paste real values into issue reports, or put credentials on command lines. Feishu's SDK and low-level HTTP/WebSocket protocol loggers can include connection credentials, so the bridge suppresses those dependency loggers below warnings even when bridge-owned DEBUG logging is enabled. Signed inbound attachment URLs are also omitted from bridge logs. Credential diagnostics report only credential presence and allowlist counts; allowlist rejection warnings separately log stable sender identities so the operator can add the intended user.
+Create the parent directory with mode `700` and the file with mode `600`. Never commit the file, paste real values into issue reports, or put credentials on command lines. WeChat QR credentials stay in `wechat.storage_path`, not in TOML or environment variables. Feishu's SDK and low-level HTTP/WebSocket protocol loggers can include connection credentials, so the bridge suppresses those dependency loggers below warnings even when bridge-owned DEBUG logging is enabled. Signed inbound attachment URLs and WeChat context/CDN tokens are also omitted from bridge logs. Credential diagnostics report only credential presence and allowlist counts; allowlist rejection warnings separately log stable sender identities so the operator can add the intended user.
 
 ```bash
 install -d -m 700 ~/.kimi-bridge
@@ -171,6 +200,6 @@ kimi-bridge doctor
 
 ## Validation and failures
 
-`kimi-bridge doctor` does not start `kimi web` or connect either adapter. It fails for a missing or malformed config, missing selected credentials or allowlist, unusable workspace/state paths, an unrecognized or legacy `kimi` executable, executable/config failures, or another blocking prerequisite. Group/other-readable config permissions, unknown configuration keys (silently ignored at runtime), and an unlisted official Kimi Code version are warnings.
+`kimi-bridge doctor` does not start `kimi web` or connect any adapter. It fails for a missing or malformed config, missing selected credentials or allowlist, unusable workspace/state paths, unusable WeChat storage or required media dependency, an unrecognized or legacy `kimi` executable, executable/config failures, or another blocking prerequisite. Group/other-readable config permissions, unknown configuration keys (silently ignored at runtime), and an unlisted official Kimi Code version are warnings.
 
 TOML type, range, and containment violations raise explicit startup errors. A future unknown `state.json` schema fails loudly rather than discarding bindings. An official but unlisted Kimi Code version receives a warning and a live protocol attempt; an executable/server version mismatch is fatal. Run `kimi doctor config` and ensure Kimi Code has an authenticated provider and `default_model` before starting the bridge.

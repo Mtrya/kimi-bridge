@@ -10,17 +10,20 @@ kimi-bridge connects one local Kimi Code installation to one supported chat bot.
 | --- | --- | --- |
 | Feishu | Supported and live-validated | Requires FFmpeg plus a published custom app, long-connection events, permissions, and an allowlist |
 | QQ | Supported and live-validated for C2C | Forced `auto` permission mode; no approval prompts, questions, or separate thinking stream |
+| WeChat | Experimental and live-validated for private chats | QR authorization, one exclusive poller, forced `auto`, immutable replies, and no approval/question/separate-thinking surface |
 | Telegram | Experimental | Private chats only; startup replaces any webhook and drops pending updates |
 | Lark International | Unsupported | The current adapter uses Feishu API and WebSocket domains |
 
 One kimi-bridge process runs one platform adapter. Use separate processes, configs, state files, workspaces, services, and bot accounts for multiple platforms.
+
+WeChat's promoted experimental surface was live-validated on 2026-08-08 against Tencent tag `v2.4.6` with one allowlisted scanner. Two-sender context isolation remains contract-tested rather than project-live-validated.
 
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - Python 3.11 or newer, supplied or selected by uv
 - authenticated official [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
-- a dedicated bot application on the selected platform
+- a dedicated bot application or exclusive WeChat iLink bot authorization on the selected platform
 - [FFmpeg](https://ffmpeg.org/download.html) on `PATH` when Feishu is selected
 
 The older Python `kimi-cli` product is incompatible even though it also installs a `kimi` command. Official Kimi Code's help includes `web`, `doctor`, and `migrate`.
@@ -65,9 +68,12 @@ Platform setup requires more than credentials:
 
 - Feishu needs FFmpeg on `PATH`, the bot capability, exact message/resource permissions including `speech_to_text:speech`, long-connection message and card events, a published app version, and the intended user's `open_id`. FFmpeg converts Feishu Opus voice resources to the 16 kHz mono PCM required by native speech recognition.
 - QQ needs AppID/AppSecret, access for the intended sandbox tester when applicable, and the intended user's app-specific `user_openid`.
+- WeChat needs a QR authorization stored outside the TOML file, the scanning account's stable identity in `wechat.allowed_users`, and exclusive ownership of the bot's message poller.
 - Telegram needs a bot token, the intended user's numeric ID, and a dedicated bot whose existing webhook or update consumer may safely be replaced.
 
 The setup agent guide contains the platform-specific bootstrap and verification procedures. Official platform references are linked from there for manual operators.
+
+For WeChat, begin with an empty `wechat.allowed_users`, run `kimi-bridge wechat login`, complete the printed QR URL in WeChat, then privately replace the empty list with the returned scanner identity. `kimi-bridge wechat status` is local-only. Use `login --replace` for reported expiry; it preserves the previous credential until confirmation. `kimi-bridge wechat logout` removes only local adapter-owned authorization files. Follow the dated [verified WeChat path](docs/setup-paths/wechat.md) one checkpoint at a time.
 
 ## Validate
 
@@ -77,7 +83,7 @@ Run the non-starting diagnostic:
 kimi-bridge doctor
 ```
 
-Resolve every error before startup. `doctor` checks local configuration, paths, Kimi Code, credential presence, and FFmpeg when Feishu is selected. It does not connect to the chat platform, validate bot permissions, receive an event, or send a message.
+Resolve every error before startup. `doctor` checks local configuration, paths, Kimi Code, credential presence, FFmpeg when Feishu is selected, and the encrypted-media dependency and private local authorization storage when WeChat is selected. It does not connect to the chat platform, validate bot permissions, receive an event, or send a message.
 
 Start in the foreground:
 
@@ -90,8 +96,10 @@ From the allowlisted chat account:
 1. send `/status` and confirm a reply;
 2. send a normal prompt and confirm the streamed response completes;
 3. on Feishu or Telegram, exercise an approval or question;
-4. on Feishu or QQ, send a voice message and confirm its transcript reaches the agent;
+4. on Feishu, QQ, or WeChat, send a voice message and confirm its transcript reaches the agent;
 5. test any file types your installation depends on.
+
+For WeChat, include inbound image/voice/file/video and outbound image/video/file when those capabilities matter. Confirm separately that an outbound audio file arrives as a generic file rather than a native voice message.
 
 Do not consider setup complete until this live round trip passes.
 

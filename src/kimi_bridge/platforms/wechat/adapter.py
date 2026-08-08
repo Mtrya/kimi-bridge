@@ -603,7 +603,9 @@ class WeChatAdapter:
     def _start_typing(
         self, conversation: ConversationRef, context_token: str
     ) -> None:
-        self._finish_typing(conversation)
+        previous = self._typing_tasks.pop(conversation, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
         task = asyncio.create_task(
             self._typing_loop(conversation, context_token),
             name="wechat-typing-indicator",
@@ -619,15 +621,27 @@ class WeChatAdapter:
         task = self._typing_tasks.pop(conversation, None)
         if task is not None and not task.done():
             task.cancel()
-        ticket = self._typing_tickets.get(conversation)
-        if ticket is None:
+        if task is None and conversation not in self._typing_tickets:
             return
         cleanup = asyncio.create_task(
-            self._cancel_typing_best_effort(conversation, ticket.value),
+            self._finish_typing_best_effort(conversation, task),
             name="wechat-typing-cancel",
         )
         self._typing_cleanup_tasks.add(cleanup)
         cleanup.add_done_callback(self._typing_cleanup_done)
+
+    async def _finish_typing_best_effort(
+        self,
+        conversation: ConversationRef,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        if conversation in self._typing_tasks:
+            return
+        ticket = self._typing_tickets.get(conversation)
+        if ticket is not None:
+            await self._cancel_typing_best_effort(conversation, ticket.value)
 
     async def _typing_loop(
         self, conversation: ConversationRef, context_token: str

@@ -10,17 +10,20 @@ kimi-bridge 把一份本地的 Kimi Code 安装连接到一个受支持的聊天
 | --- | --- | --- |
 | 飞书 | 已支持并经过真实环境验证 | 需要 FFmpeg、已发布的自建应用、长连接事件、相应权限和白名单 |
 | QQ | 已支持，C2C 场景经过真实环境验证 | 强制 `auto` 权限模式；没有审批提示、提问和独立的思考流 |
+| 微信 | 实验性，私聊场景经过真实环境验证 | 扫码授权、独占轮询、强制 `auto`、不可编辑回复，且没有审批、提问和独立思考流 |
 | Telegram | 实验性 | 仅限私聊；启动时会替换已有的 webhook 并丢弃待处理的更新 |
 | Lark 国际版 | 不支持 | 当前适配器使用飞书的 API 和 WebSocket 域名 |
 
 一个 kimi-bridge 进程只运行一个平台适配器。如需接入多个平台，请使用各自独立的进程、配置、状态文件、工作区、服务和机器人账号。
+
+微信的实验性能力已于 2026-08-08 基于腾讯 `v2.4.6` 标签使用一个白名单扫码账号完成真实验证。双发送者上下文隔离仅经过契约测试，尚未完成项目级真实验证。
 
 ## 前置条件
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - Python 3.11 或更高版本，由 uv 提供或选择
 - 已完成认证的官方 [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
-- 所选平台上的一个专用机器人应用
+- 所选平台上的专用机器人应用，或独占的微信 iLink 机器人授权
 - 选择飞书时，需要在 `PATH` 中提供 [FFmpeg](https://ffmpeg.org/download.html)
 
 旧的 Python `kimi-cli` 产品虽然也安装 `kimi` 命令，但并不兼容。官方 Kimi Code 的帮助信息中包含 `web`、`doctor` 和 `migrate`。
@@ -63,9 +66,12 @@ chmod 600 ~/.kimi-bridge/config.toml
 
 - 飞书需要在 `PATH` 中提供 FFmpeg、启用机器人能力、授予包含 `speech_to_text:speech` 的精确消息/资源权限、配置长连接的消息和卡片事件、发布应用版本，并取得目标用户的 `open_id`。FFmpeg 会把飞书语音资源的 Opus 音频转换为原生语音识别要求的 16 kHz 单声道 PCM。
 - QQ 需要 AppID/AppSecret、在适用时为目标沙箱测试用户开通权限，以及目标用户在该应用下的 `user_openid`。
+- 微信需要把扫码授权保存在 TOML 之外，将扫码账号的稳定身份写入 `wechat.allowed_users`，并确保只有一个进程轮询该机器人。
 - Telegram 需要 bot token、目标用户的数字 ID，以及一个专用机器人——它已有的 webhook 或更新消费者必须可以被安全替换。
 
 智能体安装指南包含各平台具体的初始化与验证流程。手动操作者可以从该指南中找到官方平台文档的链接。
+
+微信首次配置时，先保留空的 `wechat.allowed_users`，运行 `kimi-bridge wechat login`，在微信中完成命令打印的扫码链接，再通过本地私有编辑器把返回的扫码身份写入白名单。`kimi-bridge wechat status` 只检查本地状态；授权过期时使用 `login --replace`，旧凭据会保留到新授权确认；`kimi-bridge wechat logout` 只删除本地适配器授权文件。请逐项遵循带日期的[微信验证路径](docs/setup-paths/wechat.md)。
 
 ## 验证
 
@@ -75,7 +81,7 @@ chmod 600 ~/.kimi-bridge/config.toml
 kimi-bridge doctor
 ```
 
-启动前解决所有报错。`doctor` 检查本地配置、路径、Kimi Code、凭据是否存在，并在选择飞书时检查 FFmpeg。它不会连接聊天平台、验证机器人权限、接收事件或发送消息。
+启动前解决所有报错。`doctor` 检查本地配置、路径、Kimi Code、凭据是否存在；选择飞书时检查 FFmpeg，选择微信时检查加密媒体依赖和私有本地授权目录。它不会连接聊天平台、验证机器人权限、接收事件或发送消息。
 
 前台启动：
 
@@ -88,8 +94,10 @@ kimi-bridge
 1. 发送 `/status`，确认收到回复；
 2. 发送一条普通提示，确认流式回复完整结束；
 3. 在飞书或 Telegram 上，实际操作一次审批或提问；
-4. 在飞书或 QQ 上发送一条语音消息，确认智能体收到正确的转写；
+4. 在飞书、QQ 或微信上发送一条语音消息，确认智能体收到转写；
 5. 测试你的使用场景所依赖的文件类型。
+
+微信应按需测试接收图片、语音、文件、视频以及外发图片、视频、文件，并单独确认外发音频表现为普通文件而不是原生语音消息。
 
 以上真实链路全部通过之前，不要认为安装已完成。
 

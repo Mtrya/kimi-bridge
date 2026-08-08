@@ -289,14 +289,14 @@ def test_builds_selected_wechat_adapter_from_private_storage(
     assert calls[1][2]["runtime_state"] == wechat_module.WeChatRuntimeState()
 
 
-def test_selected_wechat_requires_media_extra_before_construction(
+def test_selected_wechat_requires_media_dependency_before_construction(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from kimi_bridge.platforms import wechat as wechat_module
 
     def missing_dependency() -> None:
         raise wechat_module.WeChatMediaDependencyError(
-            "install kimi-bridge[wechat]"
+            "reinstall kimi-bridge"
         )
 
     monkeypatch.setattr(
@@ -305,7 +305,7 @@ def test_selected_wechat_requires_media_extra_before_construction(
         missing_dependency,
     )
 
-    with pytest.raises(RuntimeError, match=r"kimi-bridge\[wechat\]"):
+    with pytest.raises(RuntimeError, match="reinstall kimi-bridge"):
         main_module._build_adapter(
             Config(
                 platform="wechat",

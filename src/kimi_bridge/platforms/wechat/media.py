@@ -63,7 +63,7 @@ class WeChatMediaTooLarge(WeChatMediaError):
 
 
 class WeChatMediaDependencyError(RuntimeError):
-    """The selected WeChat installation omitted its required media extra."""
+    """The installation is missing WeChat's required media dependency."""
 
 
 class WeChatMediaAPI(Protocol):
@@ -80,7 +80,7 @@ class WeChatOutboundClassification:
 
 
 def cryptography_available() -> bool:
-    """Return whether the optional WeChat media primitive can be imported."""
+    """Return whether the required WeChat media primitive can be imported."""
 
     try:
         from cryptography.hazmat.primitives import padding as _padding  # noqa: F401
@@ -95,8 +95,7 @@ def cryptography_available() -> bool:
 def require_wechat_media_dependency() -> None:
     if not cryptography_available():
         raise WeChatMediaDependencyError(
-            "WeChat requires its encrypted-media dependency; install "
-            "kimi-bridge[wechat]"
+            "WeChat requires its encrypted-media dependency; reinstall kimi-bridge"
         )
 
 
@@ -338,8 +337,6 @@ class WeChatMediaClient:
             raise WeChatMediaTooLarge("inbound WeChat media exceeds the size limit")
         url = self._download_url(reference)
         payload = await self._download(url, maximum=maximum)
-        if declared_size is not None and len(payload) != declared_size:
-            raise WeChatMediaError("inbound WeChat media size does not match")
         data = decrypt_aes_ecb(payload, key) if key is not None else payload
         if len(data) > self._max_bytes:
             raise WeChatMediaTooLarge("inbound WeChat media exceeds the size limit")
@@ -448,8 +445,7 @@ def _crypto_components():
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     except ImportError as exc:
         raise WeChatMediaDependencyError(
-            "WeChat requires its encrypted-media dependency; install "
-            "kimi-bridge[wechat]"
+            "WeChat requires its encrypted-media dependency; reinstall kimi-bridge"
         ) from exc
     return Cipher, algorithms, modes, padding
 

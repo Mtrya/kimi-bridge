@@ -312,7 +312,7 @@ def test_wechat_media_dependency_is_blocking_without_starting_network(
 
     assert report.exit_code == 1
     assert _status(report, "wechat media") is CheckStatus.ERROR
-    assert "kimi-bridge[wechat]" in _detail(report, "wechat media")
+    assert "reinstall kimi-bridge" in _detail(report, "wechat media")
 
 
 def test_missing_ffmpeg_is_blocking_only_for_feishu(tmp_path: Path) -> None:

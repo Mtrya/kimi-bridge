@@ -36,7 +36,7 @@ class _SessionMixin:
     def _coerce_binding_capabilities(
         self, conversation_key: str, adapter: PlatformAdapter
     ) -> None:
-        """Force interaction-less adapters into auto mode with thinking off."""
+        """Force interaction-less adapters into auto mode and hide thinking output."""
 
         if adapter.supports_interactions:
             return

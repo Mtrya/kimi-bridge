@@ -1955,6 +1955,80 @@ async def test_typing_fetch_refresh_cancel_and_safe_retries(
     assert storage.load_runtime_state().get_updates_buf == "TYPING_CURSOR"
 
 
+async def test_typing_cancel_follows_an_inflight_active_request(
+    tmp_path: Path,
+) -> None:
+    class TypingRaceAPI(RuntimeAPIStub):
+        def __init__(self) -> None:
+            super().__init__()
+            self.typing_ticket = "TYPING_TICKET_SECRET"
+            self.active_started = asyncio.Event()
+            self.active_cancelled = asyncio.Event()
+            self.release_active = asyncio.Event()
+            self.cancel_started = asyncio.Event()
+            self.completed_statuses: list[int] = []
+
+        async def send_typing(
+            self,
+            *,
+            ilink_user_id: str,
+            typing_ticket: str,
+            status: int,
+        ) -> None:
+            self.typing_calls.append((ilink_user_id, typing_ticket, status))
+            if status == TYPING_STATUS_CANCEL:
+                self.cancel_started.set()
+                self.completed_statuses.append(status)
+                return
+            self.active_started.set()
+            try:
+                await self.release_active.wait()
+            except asyncio.CancelledError:
+                self.active_cancelled.set()
+                await self.release_active.wait()
+                self.completed_statuses.append(status)
+                raise
+            self.completed_statuses.append(status)
+
+    api = TypingRaceAPI()
+
+    async def handler(adapter: WeChatAdapter, message: InboundMessage) -> None:
+        await api.active_started.wait()
+        await adapter.send_final_text(message.conversation, "done")
+
+    adapter, _runtime_api, _storage = await _start_runtime_adapter(
+        tmp_path,
+        handler,
+        api=api,
+    )
+    work = asyncio.create_task(
+        adapter.handle_poll_result(
+            WeChatPollResult(
+                messages=(_runtime_event(message_id=904),),
+                get_updates_buf="CURSOR",
+            )
+        )
+    )
+    try:
+        await api.active_cancelled.wait()
+        await work
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not api.cancel_started.is_set()
+        api.release_active.set()
+        await _wait_until(lambda: len(api.completed_statuses) == 2)
+    finally:
+        api.release_active.set()
+        if not work.done():
+            await work
+        await adapter.stop()
+
+    assert api.completed_statuses == [
+        TYPING_STATUS_ACTIVE,
+        TYPING_STATUS_CANCEL,
+    ]
+
+
 async def test_typing_failure_never_blocks_handler_or_cursor_commit(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

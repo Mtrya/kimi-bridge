@@ -4071,6 +4071,7 @@ async def test_deferred_rendering_batches_by_step_boundary_without_edits(
         "step one",
         "step two",
     ]
+    assert adapter.final_texts == [adapter.sent[-1]]
     assert adapter.edits == []
 
 
@@ -4384,7 +4385,10 @@ async def test_new_session_forces_auto_mode_for_interaction_less_adapter(
     finally:
         await router.close()
 
-    assert client.created[0][2]["permission_mode"] == "auto"
+    assert client.created[0][2] == {
+        "model": "kimi-code/k3",
+        "permission_mode": "auto",
+    }
     binding = router._state.bindings["feishu:cli_bot:ou_user"]
     assert binding.permission_mode == "auto"
     assert binding.render_thinking is False
@@ -4404,6 +4408,7 @@ async def test_existing_binding_is_coerced_to_auto_for_interaction_less_adapter(
             "metadata": {"cwd": str(tmp_path / "workspace")},
             "agent_config": {
                 "model": "kimi-code/k3",
+                "thinking": "xhigh",
                 "permission_mode": "manual",
             },
         }
@@ -4438,6 +4443,7 @@ async def test_existing_binding_is_coerced_to_auto_for_interaction_less_adapter(
     assert client.profile_updates == [
         ("session-existing", {"permission_mode": "auto"})
     ]
+    assert client.sessions[0]["agent_config"]["thinking"] == "xhigh"
     reloaded = StateStore(tmp_path / "state.json").load()
     assert reloaded.bindings["feishu:cli_bot:ou_user"].permission_mode == "auto"
 

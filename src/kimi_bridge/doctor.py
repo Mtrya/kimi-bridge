@@ -334,7 +334,7 @@ def _check_wechat_media_dependency() -> DoctorCheck:
         return DoctorCheck(
             "wechat media",
             CheckStatus.ERROR,
-            "encrypted media dependency is missing; install kimi-bridge[wechat]",
+            "encrypted media dependency is missing; reinstall kimi-bridge",
         )
     return DoctorCheck(
         "wechat media",

@@ -261,11 +261,17 @@ class _RenderingMixin:
             if render.delayed_flush is asyncio.current_task():
                 render.delayed_flush = None
 
-    async def _flush(self, active: _ActiveStream, render: _RenderState) -> None:
+    async def _flush(
+        self,
+        active: _ActiveStream,
+        render: _RenderState,
+        *,
+        final: bool = False,
+    ) -> None:
         if not render.text:
             return
         if not active.adapter.supports_edits:
-            await self._flush_deferred(active, render)
+            await self._flush_deferred(active, render, final=final)
             return
         async with render.lock:
             chunks = _chunk_text(
@@ -341,7 +347,11 @@ class _RenderingMixin:
         )
 
     async def _flush_deferred(
-        self, active: _ActiveStream, render: _RenderState
+        self,
+        active: _ActiveStream,
+        render: _RenderState,
+        *,
+        final: bool,
     ) -> None:
         """Send the unsent tail of the buffer; never edit prior messages."""
 
@@ -352,11 +362,17 @@ class _RenderingMixin:
             pending = output[len(render.emitted_text) :]
             if not pending:
                 return
-            for chunk in _chunk_text(pending, active.adapter.message_limit):
+            chunks = _chunk_text(pending, active.adapter.message_limit)
+            for index, chunk in enumerate(chunks):
                 try:
-                    message = await active.adapter.send_text(
-                        active.conversation, chunk
-                    )
+                    if final and index == len(chunks) - 1:
+                        message = await active.adapter.send_final_text(
+                            active.conversation, chunk
+                        )
+                    else:
+                        message = await active.adapter.send_text(
+                            active.conversation, chunk
+                        )
                 except Exception:
                     LOGGER.exception(
                         "%s deferred message send failed; keeping the Kimi event stream active",
@@ -471,23 +487,44 @@ class _RenderingMixin:
                 continue
             if answer_text is not None:
                 pending.answer.text = answer_text
-                await self._flush(active, pending.answer)
-            if self._thinking_enabled(active):
+            thinking_enabled = self._thinking_enabled(active)
+            if thinking_enabled:
                 thinking_text = _persisted_thinking_text(
                     snapshot, prompt_id=prompt_id
                 )
                 if thinking_text is not None:
                     pending.thinking.text = thinking_text
-                await self._flush(active, pending.thinking)
+            has_thinking_output = thinking_enabled and bool(pending.thinking.text)
+            await self._flush(
+                active,
+                pending.answer,
+                final=not has_thinking_output,
+            )
+            if thinking_enabled:
+                await self._flush(
+                    active,
+                    pending.thinking,
+                    final=has_thinking_output,
+                )
             active.pending_finalization = None
             return
 
         if not active.adapter.supports_edits:
             # Deferred rendering held the last step back for the reconciled
             # text; emit the provisional buffer rather than losing it.
-            await self._flush(active, pending.answer)
-            if self._thinking_enabled(active):
-                await self._flush(active, pending.thinking)
+            thinking_enabled = self._thinking_enabled(active)
+            has_thinking_output = thinking_enabled and bool(pending.thinking.text)
+            await self._flush(
+                active,
+                pending.answer,
+                final=not has_thinking_output,
+            )
+            if thinking_enabled:
+                await self._flush(
+                    active,
+                    pending.thinking,
+                    final=has_thinking_output,
+                )
         LOGGER.warning(
             "final snapshot did not catch up for session %s prompt %s; "
             "keeping provisional output",
@@ -542,16 +579,29 @@ class _RenderingMixin:
         if not active.render.turn_active and not active.thinking.turn_active:
             return
         answer_text = _persisted_assistant_text(snapshot)
+        thinking_enabled = self._thinking_enabled(active)
+        thinking_text = (
+            _persisted_thinking_text(snapshot) if thinking_enabled else None
+        )
         if answer_text is not None:
             active.render.text = answer_text
-            await self._flush(active, active.render)
         active.render.turn_active = False
-        if self._thinking_enabled(active):
-            thinking_text = _persisted_thinking_text(snapshot)
+        if thinking_enabled:
             if thinking_text is not None:
                 active.thinking.text = thinking_text
-            await self._flush(active, active.thinking)
         active.thinking.turn_active = False
+        has_thinking_output = thinking_enabled and bool(active.thinking.text)
+        await self._flush(
+            active,
+            active.render,
+            final=not has_thinking_output,
+        )
+        if thinking_enabled:
+            await self._flush(
+                active,
+                active.thinking,
+                final=has_thinking_output,
+            )
 
     async def _send_chunked(
         self, adapter: PlatformAdapter, conversation: ConversationRef, text: str

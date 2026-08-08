@@ -43,6 +43,19 @@ Model aliases and thinking efforts come from the live Kimi catalog. A model chan
 
 Goal replacement and goal queues are not exposed. A blocked goal remains blocked until `/goal resume`; an ordinary follow-up does not reactivate it. Global MCP mutation is not exposed.
 
+## Local WeChat authorization commands
+
+These are terminal commands, not chat commands, and never start Kimi Code or message polling:
+
+| Command | Behavior |
+| --- | --- |
+| `kimi-bridge wechat login` | Print a short-lived WeChat authorization URL and save a confirmed QR authorization locally. Refuses to overwrite an existing credential. |
+| `kimi-bridge wechat login --replace` | Start a replacement QR flow while retaining the prior credential until confirmation; an already-bound redirect retains the existing credential. |
+| `kimi-bridge wechat status` | Inspect local storage permissions and redacted authorization metadata without network access. |
+| `kimi-bridge wechat logout` | Remove only adapter-owned local credential and receive-state files; it does not remotely delete the bot binding. |
+
+Use `--config <path>` when the WeChat config is not at the default path. After a first login, copy the printed stable scanner identity into `wechat.allowed_users` before running `doctor` or starting the bridge. An expired runtime authorization stops with a `login --replace` instruction.
+
 ## Busy-session matrix
 
 | While a turn is busy | Commands |
@@ -69,13 +82,13 @@ Feishu renders approvals and questions as interactive cards. Telegram renders ap
 
 Each request uses `interaction_timeout_seconds`. An unanswered approval is rejected and an unanswered question is dismissed. The existing card or keyboard is moved to a terminal state. In-memory interaction handles intentionally do not survive restart, so a later callback is reported as stale instead of being applied to a new turn.
 
-QQ cannot present approvals or questions at all: every session is forced into `auto` mode. `/mode <anything>` replies "This platform can't present approval or question prompts, so permission mode stays fixed at auto." and `/render-thinking on` replies "This platform doesn't offer a separate thinking stream, so thinking rendering stays off." If Kimi still raises an unexpected interactive prompt, the QQ adapter replies with a short notice ("Interactive prompt not supported on QQ; it will expire — steer with a normal message.") and lets the request time out normally.
+QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode. `/mode <anything>` explains that permission mode remains fixed, and `/render-thinking on` explains that separate thinking rendering remains off. This affects only presentation; the selected model's thinking support and configured effort are unchanged. If Kimi still raises an unexpected interactive prompt, the adapter sends a short unsupported notice and lets the request time out normally.
 
 ## Streaming and thinking
 
 Answers stream into editable messages at the configured throttle and are split by the router at the selected platform's text limit. Bridge-generated command, status, validation, and error replies are final messages and bypass streaming finalization. For Feishu, the first 15 scheduled edits use the base throttle and the final five use progressively longer intervals targeting `max_output_seconds`; platform or event-loop latency can delay delivery, while final reconciliation can use the remaining edit budget sooner. The router stops editing a message after Feishu's 20-edit limit without stopping the Kimi event stream. Text separated by an interleaved tool-call boundary starts a new visible message instead of overwriting earlier answer text.
 
-`/render-thinking on` creates a separately labelled thinking stream with independent buffering, edits, chunking, resynchronization, and finalization. Enabling it during a live turn backfills the current thinking snapshot. Disabling it freezes the visible thinking while the answer continues. The preference persists per conversation. Tool-call and transcript rendering are intentionally absent. QQ streams complete lines and closed fenced blocks through one compact, prefix-extending `stream_messages` rendering strategy and finalizes each bubble before opening the next. Revisions confined to the buffered tail remain in the same stream. A correction to the rendered frontier withdraws the partial response before sending the corrected final response; failure to withdraw does not suppress the correction. QQ never offers a separate thinking stream.
+`/render-thinking on` creates a separately labelled thinking stream with independent buffering, edits, chunking, resynchronization, and finalization. Enabling it during a live turn backfills the current thinking snapshot. Disabling it freezes the visible thinking while the answer continues. The preference persists per conversation. Tool-call and transcript rendering are intentionally absent. QQ streams complete lines and closed fenced blocks through one compact, prefix-extending `stream_messages` rendering strategy and finalizes each bubble before opening the next. Revisions confined to the buffered tail remain in the same stream. A correction to the rendered frontier withdraws the partial response before sending the corrected final response; failure to withdraw does not suppress the correction. WeChat has no edit API: it preserves complete step-boundary output as immutable messages, uses a 4,000-character message limit, and marks only the last chunk final so best-effort typing cancellation follows the completed answer. QQ and WeChat never offer a separate thinking stream.
 
 ## Inbound and outbound media
 
@@ -85,11 +98,14 @@ The experimental Telegram adapter accepts plain text, one photo, or one document
 
 The supported QQ adapter accepts direct C2C text and HTTPS-hosted attachments up to 20 MB. QQ-declared image and video attachments follow the same capability-aware native-media route as Feishu; voice attachments (`content_type` `voice` or `audio/*`) are transcribed — the configured `[voice.asr]` endpoint first, QQ's own `asr_refer_text` transcript as fallback — and submitted as `[语音转写]`-prefixed prompt text; every other attachment is a generic file and always uses the workspace inbox. Upload failures are reported in chat without terminating the bridge. Only C2C (private) messages are handled; group chat is not implemented.
 
-`/send <path>` accepts a relative path resolved from the bound workspace or an absolute path whose resolved target remains inside it. Missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG images natively, MP4 as native media with a neutral cover, and other files as native files. Telegram sends JPEG/PNG through `sendPhoto` and every other type, including MP4, through `sendDocument`. QQ uploads JPEG/PNG images and MP4 video and sends them as native media; every other file type uploads as an arbitrary file (`file_type=4`, up to QQ's 200 MB hard limit) and arrives as a downloadable file card.
+The experimental WeChat adapter accepts private-chat text, native images, voice messages, generic files, and video. Images and videos use the capability-aware model-input route; generic files always use the workspace inbox. Voice uses the configured `[voice.asr]` endpoint first and Tencent's native transcript as fallback. Encrypted CDN downloads are bounded to 100 MiB and validate their cryptography and content integrity where the protocol supplies a digest. The adapter durably advances its opaque receive cursor only after each handled message, so ordinary restarts avoid replay; a crash after Kimi accepted a prompt but before local completion recording can still replay it under the documented at-least-once contract.
+
+`/send <path>` accepts a relative path resolved from the bound workspace or an absolute path whose resolved target remains inside it. Missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG images natively, MP4 as native media with a neutral cover, and other files as native files. Telegram sends JPEG/PNG through `sendPhoto` and every other type, including MP4, through `sendDocument`. QQ uploads JPEG/PNG images and MP4 video and sends them as native media; every other file type uploads as an arbitrary file (`file_type=4`, up to QQ's 200 MB hard limit) and arrives as a downloadable file card. WeChat encrypts and uploads image and video types as native items and sends every other type as a generic file, with a 100 MiB plaintext bound. Audio therefore arrives as a downloadable file, not a native WeChat voice message. WeChat sends require the latest inbound context token and are never proactive.
 
 ## Current operating limits
 
 - One selected adapter per process and one trusted-operator security model.
-- Feishu direct messages only; Telegram private chats only; QQ C2C (private chats) only.
-- Telegram remains experimental and has not been project live-validated; QQ is supported and live-validated in sandbox.
+- Feishu direct messages only; Telegram private chats only; QQ C2C and WeChat private chats only.
+- Telegram remains experimental and has not been project live-validated; QQ is supported and live-validated in sandbox; WeChat is experimental and was live-validated on 2026-08-08 against Tencent tag `v2.4.6` with one allowlisted scanner.
+- WeChat two-sender context isolation is contract-tested but was not project-live-validated, and the adapter provides no group chat or proactive delivery.
 - No tool-call or transcript rendering, multi-tenant isolation, generic plugin/UI framework, webhooks, Telegram groups/topics/albums, QQ group chat, or remote Kimi server mode.
