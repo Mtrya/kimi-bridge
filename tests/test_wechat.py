@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
-from kimi_bridge.config import WechatConfig
+from kimi_bridge.config import WechatConfig, load_config
 from kimi_bridge.interactions import (
     ApprovalPrompt,
     ApprovalRequest,
@@ -46,6 +46,7 @@ from kimi_bridge.platforms.wechat import (
     WeChatTypingConfig,
     WeChatUnsupportedOperation,
     authorize_with_qr,
+    run_login,
     run_logout,
     run_status,
 )
@@ -62,6 +63,7 @@ from kimi_bridge.platforms.wechat.storage import (
 from kimi_bridge.platforms.wechat.types import (
     DEFAULT_LONG_POLL_TIMEOUT_SECONDS,
     ILINK_APP_CLIENT_VERSION,
+    LoginResult,
     MESSAGE_ITEM_TYPE_TEXT,
     MESSAGE_TYPE_BOT,
     MESSAGE_TYPE_USER,
@@ -237,6 +239,71 @@ async def test_wait_scan_and_confirm_persists_only_typed_credentials(
         "authorized_at",
     }
     assert "scanner-user" not in storage.credential_path.read_text(encoding="utf-8")
+
+
+def test_run_login_adds_scanner_identity_to_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.wechat import auth as auth_module
+
+    async def fake_authorize(*_args: Any, **_kwargs: Any) -> LoginResult:
+        return LoginResult(
+            credential=_credential(),
+            scanner_user_id="scanner-user@im.wechat",
+        )
+
+    monkeypatch.setattr(auth_module, "authorize_with_qr", fake_authorize)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'platform = "wechat"\n[wechat]\nallowed_users = ["existing-user"]\n',
+        encoding="utf-8",
+    )
+
+    assert (
+        run_login(
+            WechatConfig(storage_path=tmp_path / "wechat"),
+            stream=StringIO(),
+            config_path=config_path,
+        )
+        == 0
+    )
+
+    assert load_config(config_path).wechat.allowed_users == frozenset(
+        {"existing-user", "scanner-user@im.wechat"}
+    )
+
+
+def test_run_login_creates_missing_wechat_config_after_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.wechat import auth as auth_module
+
+    async def fake_authorize(*_args: Any, **_kwargs: Any) -> LoginResult:
+        return LoginResult(
+            credential=_credential(),
+            scanner_user_id="scanner-user@im.wechat",
+        )
+
+    monkeypatch.setattr(auth_module, "authorize_with_qr", fake_authorize)
+    config_path = tmp_path / "nested" / "config.toml"
+
+    assert (
+        run_login(
+            WechatConfig(storage_path=tmp_path / "wechat"),
+            stream=StringIO(),
+            config_path=config_path,
+            create_config=True,
+        )
+        == 0
+    )
+
+    config = load_config(config_path)
+    assert config.platform == "wechat"
+    assert config.wechat.allowed_users == frozenset(
+        {"scanner-user@im.wechat"}
+    )
 
 
 async def test_verification_code_retry_is_carried_only_in_status_query(

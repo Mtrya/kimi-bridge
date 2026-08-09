@@ -32,7 +32,7 @@ import httpx
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from ...config_mutation import merge_allowed_user
+from ...config_mutation import update_config_after_login
 from ..auth_formatting import write_qr_url
 from .storage import (
     QQControlError,
@@ -410,6 +410,7 @@ def run_login(
     http_client: httpx.AsyncClient | None = None,
     key_factory: KeyFactory = generate_qr_key,
     config_path: str | Path | None = None,
+    create_config: bool = False,
 ) -> int:
     """Run the networked QR flow without starting Kimi Code or message polling."""
 
@@ -423,12 +424,13 @@ def run_login(
         )
     )
     allowlist_added = False
-    if result.user_openid is not None and config_path is not None:
+    if config_path is not None:
         try:
-            allowlist_added = merge_allowed_user(
+            allowlist_added = update_config_after_login(
                 config_path,
                 "qq",
                 result.user_openid,
+                create=create_config,
             )
         except (OSError, TypeError, ValueError) as exc:
             raise QQControlError(

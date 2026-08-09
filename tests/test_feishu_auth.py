@@ -196,6 +196,56 @@ def test_run_login_adds_operator_open_id_to_allowlist(
     )
 
 
+def test_run_login_creates_missing_feishu_config_after_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as auth_module
+
+    async def fake_authorize(*_args: Any, **_kwargs: Any) -> RegistrationResult:
+        return RegistrationResult(_credential(), replaced=False)
+
+    monkeypatch.setattr(auth_module, "authorize_with_qr", fake_authorize)
+    config_path = tmp_path / "nested" / "config.toml"
+
+    assert (
+        run_login(
+            FeishuConfig(storage_path=tmp_path / "feishu"),
+            stream=StringIO(),
+            config_path=config_path,
+            create_config=True,
+        )
+        == 0
+    )
+
+    config = load_config(config_path)
+    assert config.platform == "feishu"
+    assert config.feishu.allowed_users == frozenset({"ou_operator_12345"})
+
+
+def test_failed_feishu_registration_leaves_missing_config_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as auth_module
+
+    async def failing_authorize(*_args: Any, **_kwargs: Any) -> RegistrationResult:
+        raise FeishuControlError("registration failed")
+
+    monkeypatch.setattr(auth_module, "authorize_with_qr", failing_authorize)
+    config_path = tmp_path / "config.toml"
+
+    with pytest.raises(FeishuControlError, match="registration failed"):
+        run_login(
+            FeishuConfig(storage_path=tmp_path / "feishu"),
+            stream=StringIO(),
+            config_path=config_path,
+            create_config=True,
+        )
+
+    assert not config_path.exists()
+
+
 async def test_registration_lark_tenant_uses_lark_domain(tmp_path: Path) -> None:
     storage = FeishuStorage(tmp_path / "feishu")
 

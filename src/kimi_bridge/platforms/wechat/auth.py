@@ -7,12 +7,14 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TextIO
 from urllib.parse import urlsplit
 
 import httpx
 
 from ...config import WechatConfig
+from ...config_mutation import update_config_after_login
 from ..auth_formatting import write_qr_url
 from .api import (
     WeChatAuthAPI,
@@ -204,6 +206,8 @@ def run_login(
     *,
     replace: bool = False,
     stream: TextIO = sys.stdout,
+    config_path: str | Path | None = None,
+    create_config: bool = False,
 ) -> int:
     """Run the networked QR flow without starting Kimi Code or message polling."""
 
@@ -220,6 +224,19 @@ def run_login(
         result = asyncio.run(login())
     except (httpx.TransportError, WeChatRetryableError) as exc:
         raise WeChatControlError("WeChat QR authorization request failed") from exc
+    allowlist_added = False
+    if config_path is not None:
+        try:
+            allowlist_added = update_config_after_login(
+                config_path,
+                "wechat",
+                result.scanner_user_id,
+                create=create_config,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise WeChatControlError(
+                "WeChat authorization was saved, but wechat.allowed_users could not be updated"
+            ) from exc
     stream.write("\nWeChat authorization complete\n\n")
     if result.reused_existing:
         stream.write("  Existing local authorization: retained\n")
@@ -230,7 +247,14 @@ def run_login(
         assert result.scanner_user_id is not None
         stream.write("\nAllowlist\n\n")
         stream.write(f"  Scanner user identity: {result.scanner_user_id}\n")
-        stream.write("  Add the scanner identity to wechat.allowed_users.\n")
+        if config_path is None:
+            stream.write("  Add the scanner identity to wechat.allowed_users.\n")
+        elif allowlist_added:
+            stream.write("  Added the scanner identity to wechat.allowed_users.\n")
+        else:
+            stream.write(
+                "  The scanner identity is already in wechat.allowed_users.\n"
+            )
     stream.write("\n")
     stream.flush()
     return 0

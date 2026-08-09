@@ -4,11 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from kimi_bridge import config_mutation
 from kimi_bridge.config import load_config
 from kimi_bridge.config_mutation import (
     ConfigMutationError,
     merge_allowed_user,
     set_platform,
+    update_config_after_login,
 )
 
 
@@ -109,6 +111,58 @@ def test_merge_allowed_user_creates_missing_config(tmp_path: Path) -> None:
     merge_allowed_user(path, "qq", "OPENID-1")
 
     assert load_config(path).qq.allowed_users == frozenset({"OPENID-1"})
+
+
+@pytest.mark.parametrize(
+    ("platform", "user_id"),
+    [
+        ("feishu", "ou_one"),
+        ("qq", "OPENID-1"),
+        ("wechat", "scanner-user@im.wechat"),
+    ],
+)
+def test_update_config_after_login_creates_selected_platform_and_allowlist(
+    tmp_path: Path,
+    platform: str,
+    user_id: str,
+) -> None:
+    path = tmp_path / "nested" / "config.toml"
+
+    assert update_config_after_login(path, platform, user_id, create=True) is True
+
+    config = load_config(path)
+    assert config.platform == platform
+    assert getattr(config, platform).allowed_users == frozenset({user_id})
+
+
+def test_update_config_after_login_creates_config_without_returned_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+
+    assert update_config_after_login(path, "qq", None, create=True) is False
+
+    assert path.read_text(encoding="utf-8") == 'platform = "qq"\n'
+
+
+def test_update_config_after_login_does_not_overwrite_a_concurrent_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    original = 'platform = "feishu"\n'
+    real_link = config_mutation.os.link
+
+    def create_competing_config(source: Path, target: Path) -> None:
+        path.write_text(original, encoding="utf-8")
+        real_link(source, target)
+
+    monkeypatch.setattr(config_mutation.os, "link", create_competing_config)
+
+    with pytest.raises(ConfigMutationError, match="created while login was running"):
+        update_config_after_login(path, "wechat", "scanner", create=True)
+
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_mutations_reject_invalid_toml_without_overwriting(tmp_path: Path) -> None:

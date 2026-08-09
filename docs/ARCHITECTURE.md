@@ -48,26 +48,7 @@ Adapters separately expose whether text can be edited and whether interactive pr
 
 ## Authorization and storage lifecycle
 
-Terminal controls are separate from runtime startup. They apply only to the Feishu, QQ, and WeChat QR flows; Telegram is configured manually in TOML. The platform match/switch policy is in [Commands](COMMANDS.md).
-
-```text
-kimi-bridge feishu|qq|wechat login|status|logout
-                         │
-                         ├─ operate only the selected adapter's control/storage path
-                         └─ never start Kimi Code or message polling
-```
-
-The default managed files are:
-
-```text
-~/.kimi-bridge/feishu/credentials.json
-~/.kimi-bridge/qq/credentials.json
-~/.kimi-bridge/wechat/credentials.json
-```
-
-Each directory can be relocated with its platform's `storage_path`. Feishu managed registration stores an application ID/secret, tenant brand, and API domain. QQ managed bootstrap stores the bot app ID and the AppSecret after local decryption; its temporary QR key, task, and encrypted blob are discarded. WeChat managed authorization stores the iLink bot credential and adapter receive state outside TOML. Telegram has no adapter-owned managed credential directory: its bot token and numeric allowlist remain in `[telegram]` in `config.toml`.
-
-Feishu and QQ have a complete TOML fallback: `[feishu] app_id` plus `app_secret`, or `[qq] app_id` plus `app_secret`. A valid managed credential takes precedence. The fallback is considered only when the managed file is absent. If a managed file exists but is malformed, unsafe, or unreadable, startup fails instead of silently falling back. `logout` deletes only adapter-owned managed files; it leaves TOML fallback values and remote platform resources unchanged. WeChat has no TOML credential fallback.
+Terminal authorization controls are architecturally separate from runtime startup: they operate only the selected adapter's credential control and storage path and never start Kimi Code or message polling. They exist for the Feishu, QQ, and WeChat QR flows; Telegram is configured manually in TOML. Command semantics — platform match/switch, `login --replace`, `status`, `logout` — are defined in [Commands](COMMANDS.md); managed file paths, TOML fallback precedence, and `storage_path` relocation are defined in [Configuration](CONFIGURATION.md).
 
 Managed files and configuration are protected local data. On POSIX systems the bridge creates storage directories with mode `700` and JSON files with mode `600`; Windows relies on the current user's ACL. Adapter credentials are not copied into bridge state, logs, command arguments, or environment variables; the voice ASR API key may use the supported `[voice.asr].api_key_env` setting. Diagnostic output reports presence and redacted metadata only.
 
@@ -113,4 +94,4 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 
 `src/kimi_bridge/compatibility-map.json` records Kimi Code versions associated with bridge releases. `kimi-bridge compat` reports whether the installed or requested version is supported by the current bridge, another recorded bridge release, or not established by the map. Startup and `doctor` distinguish official Kimi Code from the incompatible legacy Python `kimi-cli`; an executable/server version mismatch is fatal, while an unlisted official version is warned about and subjected to a live contract attempt.
 
-See [Configuration](CONFIGURATION.md), [Commands](COMMANDS.md), [QR onboarding](QR_ONBOARDING.md), and the [installation guide](../INSTALL.en_US.md) for operator-facing behavior.
+See [Configuration](CONFIGURATION.md), [Commands](COMMANDS.md), and the [installation guide](../INSTALL.en_US.md) for operator-facing behavior.
