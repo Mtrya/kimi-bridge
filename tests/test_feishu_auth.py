@@ -489,6 +489,7 @@ def test_storage_rejects_non_regular_credential_file(tmp_path: Path) -> None:
         storage.load_credential()
 
 
+@requires_posix_modes
 def test_inspect_is_secret_safe(tmp_path: Path) -> None:
     storage = FeishuStorage(tmp_path / "feishu")
     inspection = storage.inspect(platform_name="linux")

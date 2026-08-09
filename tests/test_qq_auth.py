@@ -709,6 +709,7 @@ def test_clear_owned_files_unlinks_symlink_without_touching_target(
     assert not os.path.lexists(storage.credential_path)
 
 
+@requires_posix_modes
 def test_inspect_is_secret_safe(tmp_path: Path) -> None:
     storage = QQStorage(tmp_path / "qq")
     inspection = storage.inspect(platform_name="linux")

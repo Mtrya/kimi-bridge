@@ -107,7 +107,7 @@ def test_loads_feishu_and_qq_storage_paths_and_resolves_them(
                 "[feishu]",
                 'storage_path = "~/feishu"',
                 "[qq]",
-                'storage_path = "' + str(qq_path) + '"',
+                'storage_path = "' + qq_path.as_posix() + '"',
             ]
         ),
         encoding="utf-8",
