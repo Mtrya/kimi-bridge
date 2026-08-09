@@ -182,7 +182,7 @@ def update_config_after_login(
             + f"[{platform}]{newline}"
             + f"allowed_users = {_serialize_string_array([user_id])}{newline}"
         )
-    _validate_and_write(config_path, updated)
+    _validate_and_write(config_path, updated, replace=False)
     return user_id is not None
 
 
@@ -209,7 +209,7 @@ def _parse_toml(text: str, path: Path) -> dict[str, object]:
     return payload
 
 
-def _validate_and_write(path: Path, text: str) -> None:
+def _validate_and_write(path: Path, text: str, *, replace: bool = True) -> None:
     _parse_toml(text, path)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -230,7 +230,15 @@ def _validate_and_write(path: Path, text: str) -> None:
             config_file.write(text)
             config_file.flush()
             os.fsync(config_file.fileno())
-        os.replace(temporary_path, path)
+        if replace:
+            os.replace(temporary_path, path)
+        else:
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError as exc:
+                raise ConfigMutationError(
+                    f"configuration file {path} was created while login was running"
+                ) from exc
         if os.name == "posix":
             path.chmod(mode)
     finally:
