@@ -560,6 +560,7 @@ def _confirm_platform_switch(
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _argument_parser().parse_args(argv)
     config_path = resolve_config_path(arguments.config)
+    config_missing = not config_path.exists()
     if arguments.command == "doctor":
         from .doctor import run_doctor
 
@@ -577,7 +578,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = load_config(config_path)
             if arguments.feishu_command == "login":
-                if config.platform != "feishu":
+                if not config_missing and config.platform != "feishu":
                     switched = _confirm_platform_switch(config_path, config, "feishu")
                     if switched is None:
                         raise FeishuControlError(
@@ -588,6 +589,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     config.feishu,
                     replace=arguments.replace,
                     config_path=config_path,
+                    create_config=config_missing,
                 )
             if config.platform != "feishu":
                 raise FeishuControlError(
@@ -621,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = load_config(config_path)
             if arguments.qq_command == "login":
-                if config.platform != "qq":
+                if not config_missing and config.platform != "qq":
                     switched = _confirm_platform_switch(config_path, config, "qq")
                     if switched is None:
                         raise QQControlError(
@@ -632,6 +634,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     config.qq,
                     replace=arguments.replace,
                     config_path=config_path,
+                    create_config=config_missing,
                 )
             if config.platform != "qq":
                 raise QQControlError('selected platform must be "qq" for QQ controls')
@@ -657,14 +660,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             config = load_config(config_path)
             if arguments.wechat_command == "login":
-                if config.platform != "wechat":
+                if not config_missing and config.platform != "wechat":
                     switched = _confirm_platform_switch(config_path, config, "wechat")
                     if switched is None:
                         raise WeChatControlError(
                             'selected platform must be "wechat" for WeChat controls'
                         )
                     config = switched
-                return run_login(config.wechat, replace=arguments.replace)
+                return run_login(
+                    config.wechat,
+                    replace=arguments.replace,
+                    config_path=config_path,
+                    create_config=config_missing,
+                )
             if config.platform != "wechat":
                 raise WeChatControlError(
                     'selected platform must be "wechat" for WeChat controls'

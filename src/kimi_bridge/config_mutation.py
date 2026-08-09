@@ -150,6 +150,42 @@ def merge_allowed_user(
     return True
 
 
+def update_config_after_login(
+    path: str | Path,
+    platform: str,
+    user_id: str | None,
+    *,
+    create: bool,
+) -> bool:
+    """Create a missing login config or merge its returned user identity."""
+
+    _require_platform(platform)
+    if not create:
+        if user_id is None:
+            return False
+        return merge_allowed_user(path, platform, user_id)
+
+    config_path = Path(path).expanduser()
+    if config_path.exists():
+        raise ConfigMutationError(
+            f"configuration file {config_path} was created while login was running"
+        )
+
+    newline = "\n"
+    updated = f'platform = "{platform}"{newline}'
+    if user_id is not None:
+        user_id = user_id.strip()
+        if not user_id:
+            raise ValueError("allowed user identity must be non-empty")
+        updated += (
+            newline
+            + f"[{platform}]{newline}"
+            + f"allowed_users = {_serialize_string_array([user_id])}{newline}"
+        )
+    _validate_and_write(config_path, updated)
+    return user_id is not None
+
+
 def _require_platform(platform: str) -> None:
     if platform not in _SUPPORTED_PLATFORMS:
         choices = ", ".join(sorted(_SUPPORTED_PLATFORMS))
@@ -270,4 +306,9 @@ def _array_end(text: str, start: int) -> int:
     raise ConfigMutationError("allowed_users must be a complete TOML array")
 
 
-__all__ = ["ConfigMutationError", "merge_allowed_user", "set_platform"]
+__all__ = [
+    "ConfigMutationError",
+    "merge_allowed_user",
+    "set_platform",
+    "update_config_after_login",
+]

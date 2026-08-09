@@ -637,7 +637,15 @@ def test_wechat_controls_do_not_start_runtime_or_build_adapter(
         adapter_built = True
         return _Adapter()
 
-    def fake_login(_config: WechatConfig, *, replace: bool = False) -> int:
+    def fake_login(
+        _config: WechatConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+        create_config: bool = False,
+    ) -> int:
+        assert config_path == tmp_path / "config.toml"
+        assert create_config is False
         calls.append(("login", replace))
         return 0
 
@@ -681,8 +689,10 @@ def test_feishu_and_qq_controls_dispatch_without_starting_runtime(
         *,
         replace: bool = False,
         config_path: Path | None = None,
+        create_config: bool = False,
     ) -> int:
         assert config_path is not None
+        assert create_config is False
         calls.append(("feishu-login", replace))
         return 0
 
@@ -699,8 +709,10 @@ def test_feishu_and_qq_controls_dispatch_without_starting_runtime(
         *,
         replace: bool = False,
         config_path: Path | None = None,
+        create_config: bool = False,
     ) -> int:
         assert config_path is not None
+        assert create_config is False
         calls.append(("qq-login", replace))
         return 0
 
@@ -787,9 +799,11 @@ def test_login_offers_to_switch_selected_platform(
         *,
         replace: bool = False,
         config_path: Path | None = None,
+        create_config: bool = False,
     ) -> int:
         assert replace is False
         assert config_path is not None
+        assert create_config is False
         calls.append(config_path)
         return 0
 
@@ -801,6 +815,52 @@ def test_login_offers_to_switch_selected_platform(
     assert main_module.main(["--config", str(config_path), "feishu", "login"]) == 0
     assert load_config(config_path).platform == "feishu"
     assert calls == [config_path]
+
+
+@pytest.mark.parametrize("platform", ["feishu", "qq", "wechat"])
+def test_missing_config_login_skips_platform_switch_and_defers_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform: str,
+) -> None:
+    if platform == "feishu":
+        from kimi_bridge.platforms.feishu import auth as auth_module
+    elif platform == "qq":
+        from kimi_bridge.platforms.qq import auth as auth_module
+    else:
+        from kimi_bridge.platforms import wechat as auth_module
+
+    config_path = tmp_path / platform / "config.toml"
+    calls: list[Path] = []
+
+    def fake_login(
+        _config: Any,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+        create_config: bool = False,
+    ) -> int:
+        assert replace is False
+        assert config_path is not None
+        assert not config_path.exists()
+        assert create_config is True
+        calls.append(config_path)
+        return 0
+
+    def forbidden_input() -> str:
+        raise AssertionError("a missing config must not prompt for a platform switch")
+
+    monkeypatch.setattr(auth_module, "run_login", fake_login)
+    monkeypatch.setattr("builtins.input", forbidden_input)
+    monkeypatch.setattr(
+        main_module,
+        "resolve_config_path",
+        lambda explicit=None: config_path if explicit is None else Path(explicit),
+    )
+
+    assert main_module.main([platform, "login"]) == 0
+    assert calls == [config_path]
+    assert not config_path.exists()
 
 
 def test_declined_login_platform_switch_preserves_config(

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ...config import FeishuConfig
-from ...config_mutation import merge_allowed_user
+from ...config_mutation import update_config_after_login
 from ..auth_formatting import write_qr_url
 from .storage import (
     FEISHU_API_DOMAIN,
@@ -208,6 +208,7 @@ def run_login(
     replace: bool = False,
     stream: TextIO = sys.stdout,
     config_path: str | Path | None = None,
+    create_config: bool = False,
 ) -> int:
     """Run QR application registration without starting bridge services."""
 
@@ -221,11 +222,12 @@ def run_login(
         )
         operator_open_id = result.credential.operator_open_id
         allowlist_added = False
-        if operator_open_id is not None and config_path is not None:
-            allowlist_added = merge_allowed_user(
+        if config_path is not None:
+            allowlist_added = update_config_after_login(
                 config_path,
                 "feishu",
                 operator_open_id,
+                create=create_config,
             )
     except FeishuControlError:
         raise

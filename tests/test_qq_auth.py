@@ -778,6 +778,32 @@ def test_run_login_prints_next_steps_without_leaking_secrets(
     assert QQStorage(config.storage_path).load_credential().app_secret == APP_SECRET
 
 
+def test_run_login_creates_missing_qq_config_after_authorization(
+    tmp_path: Path,
+) -> None:
+    config = QQAuthConfigStub(tmp_path / "qq")
+    config_path = tmp_path / "nested" / "config.toml"
+    client = httpx.AsyncClient(transport=httpx.MockTransport(BindServer([_completed()])))
+    try:
+        assert (
+            run_login(
+                config,
+                stream=StringIO(),
+                http_client=client,
+                key_factory=lambda: KEY,
+                config_path=config_path,
+                create_config=True,
+            )
+            == 0
+        )
+    finally:
+        asyncio.run(client.aclose())
+
+    loaded = load_config(config_path)
+    assert loaded.platform == "qq"
+    assert loaded.qq.allowed_users == frozenset({SCANNER_OPENID})
+
+
 def test_run_status_is_local_redacted_and_reports_permissions(
     tmp_path: Path,
 ) -> None:
