@@ -78,6 +78,29 @@ class FakeGatewaySocket:
         self.sent.append(json.loads(message))
 
 
+class HangingGatewaySocket(FakeGatewaySocket):
+    def __init__(
+        self,
+        frames: list[Any],
+        *,
+        hang_recv: bool = False,
+        hang_send: bool = False,
+    ) -> None:
+        super().__init__(frames)
+        self._hang_recv = hang_recv
+        self._hang_send = hang_send
+
+    async def recv(self) -> str:
+        if self._hang_recv:
+            await asyncio.Event().wait()
+        return await super().recv()
+
+    async def send(self, message: str) -> None:
+        if self._hang_send:
+            await asyncio.Event().wait()
+        await super().send(message)
+
+
 class FakeGatewayConnect:
     def __init__(self, sockets: list[FakeGatewaySocket]) -> None:
         self._sockets = list(sockets)
@@ -307,8 +330,11 @@ def _api_pair(
     return api, manager, http
 
 
-async def test_bot_api_sends_passive_text_message() -> None:
+async def test_bot_api_sends_passive_text_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     requests: list[httpx.Request] = []
+    caplog.set_level(logging.INFO, logger="kimi_bridge.platforms.qq")
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -332,6 +358,21 @@ async def test_bot_api_sends_passive_text_message() -> None:
         await http.aclose()
 
     assert result["id"] == "SENT_MSG_ID"
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("QQ C2C outbound message:")
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert records[0].args == (
+        0,
+        "SENT_MSG_ID",
+        "ROBOT1.0_inbound!",
+        1,
+        5,
+        "hello",
+    )
     request = requests[0]
     assert request.method == "POST"
     assert str(request.url) == f"{QQ_API_BASE_URL}/v2/users/OPENID-USER/messages"
@@ -342,6 +383,52 @@ async def test_bot_api_sends_passive_text_message() -> None:
         "msg_id": "ROBOT1.0_inbound!",
         "msg_seq": 1,
     }
+
+
+async def test_bot_api_logs_c2c_stream_frame(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"id": "STREAM_MSG_ID", "remain_msg_len": 23},
+        )
+
+    caplog.set_level(logging.INFO, logger="kimi_bridge.platforms.qq")
+    api, manager, http = _api_pair(handler)
+    try:
+        result = await api.send_c2c_stream_message(
+            "OPENID-USER",
+            input_state=STREAM_INPUT_STATE_GENERATING,
+            content_raw="line one\nline two",
+            msg_id="ROBOT1.0_inbound!",
+            msg_seq=2,
+            index=3,
+            stream_msg_id="STREAM_MSG_ID",
+        )
+    finally:
+        await api.close()
+        await manager.close()
+        await http.aclose()
+
+    assert result["id"] == "STREAM_MSG_ID"
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("QQ C2C outbound stream frame:")
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert records[0].args == (
+        STREAM_INPUT_STATE_GENERATING,
+        3,
+        2,
+        "STREAM_MSG_ID",
+        "STREAM_MSG_ID",
+        23,
+        "line one\\nline two",
+    )
+    assert "\n" not in records[0].message
 
 
 async def test_bot_api_withdraws_c2c_message() -> None:
@@ -693,6 +780,49 @@ async def test_gateway_reconnect_request_resumes_with_kept_session() -> None:
     }
 
 
+async def test_gateway_reconnects_when_hello_setup_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(qq_module, "QQ_GATEWAY_SETUP_TIMEOUT_SECONDS", 0.01)
+    first = HangingGatewaySocket([], hang_recv=True)
+    second = FakeGatewaySocket([_hello()])
+    connect = FakeGatewayConnect([first, second])
+    events: list[QQGatewayEvent] = []
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
+    client = await _start_gateway(connect, events)
+    try:
+        await _wait_for(lambda: len(second.sent) >= 1)
+    finally:
+        await client.stop()
+
+    assert len(connect.urls) == 2
+    assert "connection setup timed out" in caplog.text
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_gateway_reconnects_when_setup_send_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+) -> None:
+    monkeypatch.setattr(qq_module, "QQ_GATEWAY_SETUP_TIMEOUT_SECONDS", 0.01)
+    first = HangingGatewaySocket([_hello()], hang_send=True)
+    second = FakeGatewaySocket([_hello()])
+    connect = FakeGatewayConnect([first, second])
+    events: list[QQGatewayEvent] = []
+    client = await _start_gateway(connect, events)
+    if resume:
+        client._session_id = "sess-1"
+        client._last_seq = 7
+    try:
+        await _wait_for(lambda: len(second.sent) >= 1)
+    finally:
+        await client.stop()
+
+    expected_op = 6 if resume else 2
+    assert second.sent[0]["op"] == expected_op
+
+
 async def test_gateway_requires_hello_first() -> None:
     socket = FakeGatewaySocket([_ready()])
     connect = FakeGatewayConnect([socket])
@@ -996,6 +1126,23 @@ def test_qq_adapter_declares_streaming_capabilities() -> None:
 # --- sanitizer ---------------------------------------------------------
 
 
+def test_content_preview_is_single_line_and_bounded() -> None:
+    preview = qq_module._content_preview("a\\b\n" + "x" * 100)
+
+    assert "\n" not in preview
+    assert "\\n" in preview
+    assert "\\\\b" in preview
+    assert len(preview) == qq_module.QQ_LOG_PREVIEW_LIMIT
+    assert preview.endswith("…")
+
+
+def test_content_preview_escapes_non_printable_characters() -> None:
+    preview = qq_module._content_preview("tab\tansi\x1bseparator\u2028")
+
+    assert preview == "tab\\tansi\\x1bseparator\\u2028"
+    assert all(character.isprintable() for character in preview)
+
+
 def test_sanitize_markdown_flattens_fenced_code() -> None:
     result = sanitize_markdown("```python\ndef f():\n    return 1\n```")
     assert "```" not in result
@@ -1046,11 +1193,14 @@ def test_defang_urls_strips_scheme_and_brackets_dots() -> None:
 # --- inbound pipeline ----------------------------------------------------
 
 
-async def test_adapter_delivers_authorized_message() -> None:
+async def test_adapter_delivers_authorized_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     api = FakeQQBotAPI()
     gateway = FakeQQGateway()
     adapter = _make_qq_adapter(api, gateway)
     delivered: list[Any] = []
+    caplog.set_level(logging.INFO, logger="kimi_bridge.platforms.qq")
 
     async def on_message(_sender: Any, message: Any) -> None:
         delivered.append(message)
@@ -1060,7 +1210,7 @@ async def test_adapter_delivers_authorized_message() -> None:
         await gateway.emit(
             QQGatewayEvent(
                 type="C2C_MESSAGE_CREATE",
-                data=_c2c_payload("MSGID-1", "hello there"),
+                data=_c2c_payload("MSGID-1", "hello\nthere"),
                 seq=1,
                 event_id="evt-1",
             )
@@ -1070,13 +1220,22 @@ async def test_adapter_delivers_authorized_message() -> None:
 
     assert len(delivered) == 1
     message = delivered[0]
-    assert message.text == "hello there"
+    assert message.text == "hello\nthere"
     assert message.message_id == "MSGID-1"
     assert message.actor.id == "OPENID-USER"
     assert message.conversation == ConversationRef("qq", "app-1", "OPENID-USER")
     assert message.timestamp == pytest.approx(
         datetime.fromisoformat("2026-07-25T13:37:18+08:00").timestamp()
     )
+    records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("QQ C2C inbound message:")
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert records[0].args == ("MSGID-1", 11, "hello\\nthere")
+    assert "\n" not in records[0].message
 
 
 async def test_adapter_drops_unauthorized_sender(
@@ -1090,7 +1249,7 @@ async def test_adapter_drops_unauthorized_sender(
     async def on_message(_sender: Any, message: Any) -> None:
         delivered.append(message)
 
-    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
+    caplog.set_level(logging.INFO, logger="kimi_bridge.platforms.qq")
     await adapter.start(on_message, _noop_on_interaction)
     try:
         await gateway.emit(
@@ -1106,6 +1265,7 @@ async def test_adapter_drops_unauthorized_sender(
 
     assert not delivered
     assert "unauthorized sender openid: OPENID-USER" in caplog.text
+    assert "QQ C2C inbound message:" not in caplog.text
 
 
 async def test_adapter_dedupes_by_message_id() -> None:
