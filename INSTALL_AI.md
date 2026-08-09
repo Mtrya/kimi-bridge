@@ -1,6 +1,6 @@
 # kimi-bridge setup-agent guide
 
-This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a replacement for the human [installation guide](INSTALL.en_US.md), [configuration reference](docs/CONFIGURATION.md), or [QR onboarding](docs/QR_ONBOARDING.md).
+This guide is an execution contract for an agent installing and configuring kimi-bridge with a user. It is not a script to recite and not a replacement for the human [installation guide](INSTALL.en_US.md), [configuration reference](docs/CONFIGURATION.md), or [command reference](docs/COMMANDS.md).
 
 ## Operating contract
 
@@ -107,6 +107,8 @@ Prefer a dedicated platform bot when another service, webhook, gateway connectio
 
 ## 4. Prepare private local configuration
 
+For Feishu, QQ, and WeChat, do not pre-create a config: run the platform's `login` directly. When `config.toml` does not exist, `login` creates it and writes the selected platform; when the flow returns a user identity (Feishu `open_id`, QQ `user_openid`), `login` merges it into `allowed_users`. WeChat is the exception: its returned stable scanner identity must be written into `wechat.allowed_users` by hand. Create or edit the file by hand only to select a non-default path, pre-set `storage_path`, write a Telegram config, or supply a Feishu/QQ TOML fallback pair.
+
 The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `KIMI_BRIDGE_CONFIG` select another file. Before writing:
 
 - inspect the existing file without displaying secrets;
@@ -115,7 +117,7 @@ The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `
 - use the selected platform's `storage_path`, `state_path`, and workspace consistently;
 - do not invent a real allowlist identity.
 
-On Linux/macOS:
+When creating files or directories by hand on Linux/macOS:
 
 ```bash
 install -d -m 700 ~/.kimi-bridge
@@ -165,7 +167,13 @@ Do not call a QR flow complete until its platform-specific manual follow-up is d
 
 ### 6.1 Recommended QR branch: application registration
 
-Use this branch first when the user can complete the Feishu/Lark identity-bound approval in a browser or mobile device. During bootstrap, keep the allowlist empty:
+Use this branch first when the user can complete the Feishu/Lark identity-bound approval in a browser or mobile device. Run `login` directly; it creates the config if none exists:
+
+```bash
+kimi-bridge feishu login
+```
+
+Pre-creating a config is needed only for a non-default path or a pre-set `storage_path`; if you create one, keep the allowlist empty for the flow:
 
 ```toml
 platform = "feishu"
@@ -173,12 +181,6 @@ platform = "feishu"
 [feishu]
 storage_path = "~/.kimi-bridge/feishu"
 allowed_users = []
-```
-
-Run:
-
-```bash
-kimi-bridge feishu login
 ```
 
 Have the user open the URL printed by the command in a browser. The page lets the user create a new application or select an existing one and pre-fills kimi-bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. Have the user confirm those requested settings in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records the Feishu or Lark tenant brand, API domain, and, when returned, the registration user's `open_id`. When registration returns the operator's `open_id`, `login` adds it to `feishu.allowed_users`; check that it is the intended sender. If no identity is returned, or a different sender should be authorized, obtain the real identity in the same app/tenant context and add it to the array. The QR flow still does not publish the app.
@@ -232,7 +234,13 @@ Then have the real allowlisted user send `/status`, a normal prompt, and any req
 
 ### 7.1 Recommended QR branch: bot credential bootstrap
 
-Configure an empty allowlist for the bootstrap only:
+Run `login` directly; it creates the config if none exists:
+
+```bash
+kimi-bridge qq login
+```
+
+Pre-creating a config is needed only for a non-default path or a pre-set `storage_path`; if you create one, keep the allowlist empty for the flow:
 
 ```toml
 platform = "qq"
@@ -240,12 +248,6 @@ platform = "qq"
 [qq]
 storage_path = "~/.kimi-bridge/qq"
 allowed_users = []
-```
-
-Run:
-
-```bash
-kimi-bridge qq login
 ```
 
 Have the user open the printed URL, scan it, and approve the official bot bind. The completed result returns `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary AES key, task ID/QR URL, and encrypted secret blob are not persisted. Runtime still uses the existing REST/token/WebSocket transport.
@@ -285,21 +287,20 @@ Determine whether another process polls the intended bot authorization. One bot 
 
 ### 8.2 QR authorization and allowlisting
 
-Create:
+Run `login` directly; it creates the config if none exists:
+
+```bash
+kimi-bridge wechat login
+```
+
+Pre-creating a config is needed only for a non-default path or a pre-set `storage_path`; if you create one, keep the allowlist empty for the flow:
 
 ```toml
 platform = "wechat"
-state_path = "~/.kimi-bridge/state.json"
 
 [wechat]
 storage_path = "~/.kimi-bridge/wechat"
 allowed_users = []
-```
-
-Run:
-
-```bash
-kimi-bridge wechat login
 ```
 
 Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, copy the returned stable scanner identity privately into `wechat.allowed_users`; do not use a nickname, guessed account identifier, or bot identity.

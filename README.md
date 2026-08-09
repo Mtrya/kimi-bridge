@@ -13,80 +13,57 @@ kimi-bridge 连接本地 Kimi Code 服务器与一个聊天平台，保持聊天
 | 飞书、QQ、微信私聊 | 已支持 |
 | Telegram 私聊 | 实验性 |
 | Linux、macOS 和 Windows | 已支持 |
-| 语音消息 | 飞书、QQ 和微信支持 |
-
-每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信都支持本地 QR 授权，三种 QR 的含义不同，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。微信支持扫码授权的私聊机器人，但强制使用 `auto`，不提供审批、提问、独立思考流、群聊或主动推送；它支持接收图片、语音、文件和视频，以及发送图片、视频和文件。
+| 语音消息接收 | 飞书、QQ 和微信支持 |
+| 审批和提问卡片 | 仅飞书支持 |
 
 ## 快速开始
 
-第一步先确认你使用的是官方 Kimi Code，而不是同名的旧版 Python `kimi-cli`：
+第一步先安装官方 [Kimi Code](https://www.kimi.com/code/docs/kimi-code-cli/guides/getting-started.html)（注意不是同名的旧版 Python `kimi-cli`），然后确认 Kimi Code 配置正常，且能够完成问答：
 
 ```bash
 kimi --version
-kimi --help
 kimi doctor config
-kimi -p "Reply with OK only."
+kimi -p "Hello there"
 ```
 
-确认 Kimi Code 能完成真实回答后，安装 bridge。安装完成后不要直接运行 `doctor`：先按 [INSTALL.md](INSTALL.md) 的“选择平台并准备配置”创建 `~/.kimi-bridge/config.toml`，并在其中选择一个平台。
+确认 Kimi Code 可用后，安装 kimi-bridge：
 
 ```bash
 uv tool install kimi-bridge
 kimi-bridge --version
 ```
 
-然后按所选平台完成授权和配置：
-
-- 飞书、QQ 或微信：先填写对应的 bootstrap 配置，运行对应的 `login`，按页面提示确认平台设置，再完成剩余平台端设置并检查或补充 `allowed_users` 白名单；
-- Telegram：按安装指南中的手工 Bot API 流程，将 bot token 和数值用户 ID 写入 `[telegram]`。
-
-配置完成后再运行本地诊断并前台启动：
+然后选择你最常用的平台登录：
 
 ```bash
-kimi-bridge doctor
+kimi-bridge {feishu, qq, wechat} login
+```
+
+在配置过程中可能需要点击网页链接或扫描二维码完成授权。配置成功后启动 `kimi-bridge`：
+
+```bash
 kimi-bridge
 ```
 
-一个进程只运行一个平台。首次启动请完成一次真实的消息往返（例如发送 `/status` 和一条普通提示），确认平台权限、事件投递、白名单和回复链路都正常，再配置常驻运行。
+就可以在聊天平台中和 Kimi 对话啦！
 
-### 二维码登录
+也可以让 AI 助手全程代办：打开任意 CLI 智能体，对它说：
 
-前三个平台有 QR 控制命令；它们不是同一种“登录”：
-
-```bash
-kimi-bridge feishu login       # 飞书/Lark 应用注册二维码
-kimi-bridge feishu status      # 检查本地托管凭据目录
-kimi-bridge feishu logout      # 删除适配器拥有的本地托管文件
-
-kimi-bridge qq login           # QQ 官方机器人凭据绑定二维码
-kimi-bridge qq status          # 检查本地托管凭据目录
-kimi-bridge qq logout          # 删除适配器拥有的本地托管文件
-
-kimi-bridge wechat login       # 微信 iLink 机器人授权二维码
-kimi-bridge wechat status      # 检查本地托管凭据目录
-kimi-bridge wechat logout      # 删除适配器拥有的本地托管文件
+```text
+阅读 https://github.com/Mtrya/kimi-bridge/blob/main/INSTALL_AI.md 并帮我配置 kimi-bridge。
 ```
 
-三组 QR 命令的 `login` 都支持 `--replace`。`status` 只检查本地托管凭据，不做网络验证；`logout` 只删除本地托管文件，不影响平台侧的机器人绑定。这些命令只操作授权，不会启动 Kimi Code 或消息轮询。Telegram 没有这组命令，必须手工配置 Bot API token 和 `allowed_users`。
+它会向你提问并跑完整个安装流程。
 
-默认托管凭据目录为：
-
-- Feishu：`~/.kimi-bridge/feishu/credentials.json`
-- QQ：`~/.kimi-bridge/qq/credentials.json`
-- WeChat：`~/.kimi-bridge/wechat/credentials.json`
-
-可在各自的 `[feishu]`、`[qq]` 或 `[wechat]` 表中设置 `storage_path`。Feishu 和 QQ 优先使用有效的托管凭据（managed credential）；只有在托管文件不存在时，才使用 TOML 中成对填写的 `app_id` 与 `app_secret`。托管文件存在但损坏时会直接报错，不会静默回退。WeChat 的 QR 凭据不写入 TOML。
-
-完整的人类安装步骤见 [安装与运维](INSTALL.md)，QR 细节见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。配置、聊天命令和架构参考目前以英文提供： [Configuration](docs/CONFIGURATION.md)、[Commands](docs/COMMANDS.md)、[Architecture](docs/ARCHITECTURE.md)。
+需要更详细的安装步骤、平台侧设置或定制化配置时，参考 [安装与运维](INSTALL.md)。配置、聊天命令和架构参考为英文文档：[Configuration](docs/CONFIGURATION.md)、[Commands](docs/COMMANDS.md)、[Architecture](docs/ARCHITECTURE.md)。
 
 ## 功能特性
 
 - 持久的 Kimi 会话管理：创建、列表、切换、重命名、查看、压缩和撤销。
-- 原地编辑的答案流式输出、路由侧分块，以及在平台支持时提供独立思考输出。
-- 在平台支持时提供交互式审批与提问。
+- 原地编辑的流式回复与路由侧分块；平台支持时另有独立思考流、交互式审批与提问。
 - 忙碌回合中的提示引导、取消、权限模式、模型、推理强度、计划、目标、任务、技能和 MCP 查看。
 - 接收图片、视频、文件和语音转写，以及 `/send` 文件外发。
-- 私聊白名单、仅监听回环地址的 Kimi 服务器监管，以及不启动服务的本地 `doctor` 诊断。
+- 私聊白名单、仅监听回环地址的 Kimi 服务器监管，以及本地 `doctor` 诊断。
 
 ## 命令
 
@@ -97,7 +74,7 @@ kimi-bridge wechat logout      # 删除适配器拥有的本地托管文件
 - 任务与工具：`/tasks`、`/skills`、`/mcp`；
 - 输出：`/send`、`/render-thinking`。
 
-在聊天中输入 `/help`，或阅读[命令参考](docs/COMMANDS.md)了解确切语法和平台限制。发送 `/<command> ?` 可查看详细的聊天内用法。
+在聊天中输入 `/help` 或 `/<command> ?` 查看用法；确切语法和平台限制见[命令参考](docs/COMMANDS.md)。
 
 ## 架构与安全
 

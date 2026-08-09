@@ -52,7 +52,7 @@ Feishu and QQ support either the QR-managed credential or a complete TOML pair. 
 2. Managed credential exists and is valid: use it in preference to TOML. Feishu also uses its stored tenant brand and API domain.
 3. Managed credential exists but is unreadable, unsafe, malformed, or invalid: fail startup; repair the storage or run the matching `login --replace`.
 
-`feishu logout` and `qq logout` remove only adapter-owned files in their configured `storage_path`; they do not remove `[feishu]` or `[qq]` TOML values. WeChat has no TOML credential fallback. See [QR onboarding](QR_ONBOARDING.md) for the human flow and command semantics.
+`feishu logout` and `qq logout` remove only adapter-owned files in their configured `storage_path`; they do not remove `[feishu]` or `[qq]` TOML values. WeChat has no TOML credential fallback. See the [installation guide](../INSTALL.en_US.md) for the human flow and [Commands](COMMANDS.md) for command semantics.
 
 ## Feishu examples
 
@@ -69,11 +69,9 @@ storage_path = "~/.kimi-bridge/feishu"
 allowed_users = []
 ```
 
-Run `kimi-bridge feishu login` and open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. The result is an application credential, not a user OAuth token.
+Run `kimi-bridge feishu login`; the authorization flow and its platform-side follow-ups are in the [installation guide](../INSTALL.en_US.md). The result is an application credential, not a user OAuth token.
 
-The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; edit or remove it afterward if the registering user should not be authorized. If no identity is returned, obtain the target user's `open_id` in the same app/tenant context manually.
-
-After those steps, review the generated array or replace it with the intended identity:
+When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; edit or remove it afterward if the registering user should not be authorized. If no identity is returned, obtain the target user's `open_id` in the same app/tenant context manually and set:
 
 ```toml
 [feishu]
@@ -111,16 +109,16 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = []
 ```
 
-Run `kimi-bridge qq login`, scan and approve the official bot bind URL. When the flow returns a scanner `user_openid`, login merges it into `qq.allowed_users`. The QR result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary key, bind task, QR URL, and encrypted blob are not persisted. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
+Run `kimi-bridge qq login`; the authorization flow and its console follow-ups are in the [installation guide](../INSTALL.en_US.md). When the flow returns a scanner `user_openid`, login merges it into `qq.allowed_users`. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
 
-If the flow does not return an identity, configure `qq.allowed_users` manually. QR completion does not automatically provide all sandbox/review/event/gateway prerequisites. Confirm current QQ platform requirements separately before starting the foreground bridge.
-
-After the flow succeeds, review the generated array or replace it with the returned identity:
+If the flow does not return an identity, configure `qq.allowed_users` manually:
 
 ```toml
 [qq]
 allowed_users = ["<real user_openid returned by this flow>"]
 ```
+
+QR completion does not establish sandbox tester access, production review, or event Intents; confirm current QQ console requirements before starting the foreground bridge.
 
 ### Complete TOML fallback
 
@@ -170,11 +168,9 @@ storage_path = "~/.kimi-bridge/wechat"
 allowed_users = []
 ```
 
-Leave the allowlist empty only while running `kimi-bridge wechat login`. Open the printed URL in WeChat, scan and approve the iLink bot authorization, enter a verification code only if requested, and then put the returned stable scanner identity in `wechat.allowed_users`. The credential is stored at `wechat.storage_path`, not in TOML.
+Leave the allowlist empty only while running `kimi-bridge wechat login`; the authorization flow is in the [installation guide](../INSTALL.en_US.md). Afterward put the returned stable scanner identity in `wechat.allowed_users` — not a nickname or guessed account identifier. The credential is stored under `wechat.storage_path`, never in TOML.
 
-Run `kimi-bridge wechat status` to inspect local storage; it does not perform a network check. Then run `kimi-bridge doctor` and start the bridge in the foreground. The runtime requires at least one allowlisted identity and one polling process per bot authorization. WeChat is private-chat only, emits immutable replies, and supports inbound image/voice/file/video plus outbound image/video/file; it has no group chat, proactive delivery, or separate thinking stream.
-
-`kimi-bridge wechat login --replace` preserves the existing credential until a replacement is confirmed. `kimi-bridge wechat logout` removes only adapter-owned credential and receive-state files; it does not remove the remote bot binding.
+The runtime requires at least one allowlisted identity, and one bot authorization can be polled by exactly one process; do not point a second iLink process at the same authorization.
 
 ## Voice messages
 
@@ -207,4 +203,4 @@ Never commit adapter credentials or paste them into chat or issue reports. Adapt
 
 After every local check, run `kimi-bridge` in the foreground and verify a real allowlisted `/status` plus a normal prompt with a complete answer. Configure a persistent service only after this succeeds.
 
-See [Commands](COMMANDS.md), [QR onboarding](QR_ONBOARDING.md), and [Architecture](ARCHITECTURE.md) for the related operator contracts.
+See [Commands](COMMANDS.md), the [installation guide](../INSTALL.en_US.md), and [Architecture](ARCHITECTURE.md) for the related operator contracts.

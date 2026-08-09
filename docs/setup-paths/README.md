@@ -7,27 +7,11 @@ These files are agent/automation-oriented operational paths that supplement [INS
 - [QQ C2C over WebSocket](qq.md)
 - [WeChat iLink private chat](wechat.md)
 
-Feishu's recommended QR application-registration path and its complete TOML fallback are documented in [QR onboarding](../QR_ONBOARDING.md) and [the Feishu setup-agent branch](../../INSTALL_AI.md#6-feishu-bootstrap). There is no separate dated Feishu path in this directory.
+Feishu's recommended QR application-registration path is walked through in the [installation guide](../../INSTALL.en_US.md#feishu) and the [Feishu setup-agent branch](../../INSTALL_AI.md#6-feishu-bootstrap); its complete TOML fallback is defined in [Configuration](../CONFIGURATION.md). There is no separate dated Feishu path in this directory.
 
 ## Current control-plane facts
 
-All three supported QR controls load config first:
-
-```bash
-kimi-bridge feishu login|status|logout
-kimi-bridge qq login|status|logout
-kimi-bridge wechat login|status|logout
-```
-
-Every `login` supports `--replace`. `status` is local-only and never proves that platform authorization or message delivery is active. `logout` removes only adapter-owned local files; it does not remotely delete a bot or binding. Feishu/QQ TOML fallback remains after logout.
-
-QR semantics per platform:
-
-- Feishu performs official application registration and stores application credentials plus the Feishu/Lark API domain. It is not user OAuth.
-- QQ performs official bot credential bootstrap and stores the final bot AppID/AppSecret after local decryption. It is not QQ user login or OAuth.
-- WeChat performs supported iLink bot authorization and stores the credential outside TOML.
-
-Default managed files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`. Each platform table may set `storage_path`. For Feishu/QQ, valid managed credentials take precedence over a complete TOML pair; a present but invalid managed file is an error and does not silently fall back. WeChat has no TOML credential fallback.
+The terminal authorization commands (`login`, `status`, `logout`, `--replace`) and their semantics are authoritative in [Commands](../COMMANDS.md); managed paths and TOML fallback precedence are authoritative in [Configuration](../CONFIGURATION.md). A local `status` pass never proves that platform authorization or message delivery is active.
 
 ## Freshness and use
 
