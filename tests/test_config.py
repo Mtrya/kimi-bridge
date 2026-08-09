@@ -98,6 +98,7 @@ def test_loads_feishu_and_qq_storage_paths_and_resolves_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     path = tmp_path / "config.toml"
     qq_path = tmp_path / "qq"
     path.write_text(
