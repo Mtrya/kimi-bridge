@@ -50,7 +50,7 @@ from kimi_bridge.platforms.feishu import (
     _convert_opus_to_pcm,
     _load_video_cover,
 )
-from kimi_bridge.platforms.feishu_cards import (
+from kimi_bridge.platforms.feishu.cards import (
     decode_interaction_response,
     render_interaction,
     render_outcome,
