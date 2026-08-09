@@ -22,6 +22,7 @@ from .compatibility import (
     normalize_kimi_code_version,
 )
 from .config import CONFIG_PATH_ENV, Config, load_config, resolve_config_path
+from .config_mutation import set_platform
 from .kimi_server import KimiServerClient, KimiServerError, KimiServerSupervisor
 from .platforms.base import PlatformAdapter
 from .platforms.feishu import FEISHU_API_DOMAIN, FeishuAdapter
@@ -526,6 +527,36 @@ def _run_compat(kimi_code: str | None) -> int:
     return 1
 
 
+def _confirm_platform_switch(
+    config_path: Path,
+    config: Config,
+    requested_platform: str,
+) -> Config | None:
+    """Offer to switch the selected platform for an interactive login."""
+
+    print(
+        "\nPlatform mismatch\n\n"
+        f"  Configured platform: {config.platform}\n"
+        f"  Requested login:     {requested_platform}\n\n"
+        f'Switch platform to "{requested_platform}" and continue? [y/N] ',
+        end="",
+        flush=True,
+    )
+    try:
+        answer = input().strip().lower()
+    except EOFError:
+        print()
+        return None
+    if answer not in {"y", "yes"}:
+        print("\nLogin cancelled; the selected platform was not changed.\n")
+        return None
+
+    set_platform(config_path, requested_platform)
+    updated = load_config(config_path)
+    print(f'\nSelected platform changed to "{updated.platform}".\n')
+    return updated
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _argument_parser().parse_args(argv)
     config_path = resolve_config_path(arguments.config)
@@ -545,12 +576,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             config = load_config(config_path)
+            if arguments.feishu_command == "login":
+                if config.platform != "feishu":
+                    switched = _confirm_platform_switch(config_path, config, "feishu")
+                    if switched is None:
+                        raise FeishuControlError(
+                            'selected platform must be "feishu" for Feishu controls'
+                        )
+                    config = switched
+                return run_login(
+                    config.feishu,
+                    replace=arguments.replace,
+                    config_path=config_path,
+                )
             if config.platform != "feishu":
                 raise FeishuControlError(
                     'selected platform must be "feishu" for Feishu controls'
                 )
-            if arguments.feishu_command == "login":
-                return run_login(config.feishu, replace=arguments.replace)
             if arguments.feishu_command == "status":
                 return run_status(config.feishu)
             if arguments.feishu_command == "logout":
@@ -578,12 +620,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             config = load_config(config_path)
-            if config.platform != "qq":
-                raise QQControlError(
-                    'selected platform must be "qq" for QQ controls'
-                )
             if arguments.qq_command == "login":
-                return run_login(config.qq, replace=arguments.replace)
+                if config.platform != "qq":
+                    switched = _confirm_platform_switch(config_path, config, "qq")
+                    if switched is None:
+                        raise QQControlError(
+                            'selected platform must be "qq" for QQ controls'
+                        )
+                    config = switched
+                return run_login(
+                    config.qq,
+                    replace=arguments.replace,
+                    config_path=config_path,
+                )
+            if config.platform != "qq":
+                raise QQControlError('selected platform must be "qq" for QQ controls')
             if arguments.qq_command == "status":
                 return run_status(config.qq)
             if arguments.qq_command == "logout":
@@ -605,12 +656,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         try:
             config = load_config(config_path)
+            if arguments.wechat_command == "login":
+                if config.platform != "wechat":
+                    switched = _confirm_platform_switch(config_path, config, "wechat")
+                    if switched is None:
+                        raise WeChatControlError(
+                            'selected platform must be "wechat" for WeChat controls'
+                        )
+                    config = switched
+                return run_login(config.wechat, replace=arguments.replace)
             if config.platform != "wechat":
                 raise WeChatControlError(
                     'selected platform must be "wechat" for WeChat controls'
                 )
-            if arguments.wechat_command == "login":
-                return run_login(config.wechat, replace=arguments.replace)
             if arguments.wechat_command == "status":
                 return run_status(config.wechat)
             if arguments.wechat_command == "logout":

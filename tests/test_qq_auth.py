@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
+from kimi_bridge.config import load_config
 from kimi_bridge.platforms.qq.auth import (
     QQ_BIND_TASK_URL,
     QQ_POLL_BIND_URL,
@@ -214,11 +215,12 @@ async def test_create_bind_task_request_and_qr_url(tmp_path: Path) -> None:
     assert result.credential == storage.load_credential()
 
     rendered = output.getvalue()
-    assert "QQ authorization URL:\n" in rendered
+    assert "\nQQ authorization URL\n\n" in rendered
     assert (
-        "https://q.qq.com/qqbot/openclaw/connect.html?task_id=TASK-1"
-        "&source=kimi-bridge&_wv=2" in rendered
+        "  https://q.qq.com/qqbot/openclaw/connect.html?task_id=TASK-1"
+        "&source=kimi-bridge&_wv=2\n" in rendered
     )
+    assert "Waiting for QQ authorization to complete." in rendered
     assert KEY not in rendered
     assert APP_SECRET not in rendered
 
@@ -431,10 +433,11 @@ async def test_expired_refreshes_qr_then_completes(tmp_path: Path) -> None:
         max_qr_attempts=2,
     )
 
+    rendered = output.getvalue()
     assert result.credential.app_id == APP_ID
-    assert "QR code expired; refreshing." in output.getvalue()
-    assert "Refreshed QQ authorization URL:\n" in output.getvalue()
-    assert output.getvalue().count("QQ authorization URL") == 2
+    assert "QQ QR code expired. Requesting a fresh URL..." in rendered
+    assert "\nRefreshed QQ authorization URL\n\n" in rendered
+    assert rendered.count("QQ authorization URL") == 2
 
 
 async def test_expired_stops_after_repeated_refreshes(tmp_path: Path) -> None:
@@ -743,18 +746,30 @@ def test_run_login_prints_next_steps_without_leaking_secrets(
     tmp_path: Path,
 ) -> None:
     config = QQAuthConfigStub(tmp_path / "qq")
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'platform = "qq"\n[qq]\nallowed_users = []\n',
+        encoding="utf-8",
+    )
     output = StringIO()
     client = httpx.AsyncClient(transport=httpx.MockTransport(BindServer([_completed()])))
     try:
-        run_login(config, stream=output, http_client=client, key_factory=lambda: KEY)
+        run_login(
+            config,
+            stream=output,
+            http_client=client,
+            key_factory=lambda: KEY,
+            config_path=config_path,
+        )
     finally:
         asyncio.run(client.aclose())
 
     rendered = output.getvalue()
-    assert "QQ authorization saved locally." in rendered
+    assert "QQ authorization complete" in rendered
     assert "Bot app_id: 1234…7890" in rendered
     assert f"Scanner user openid: {SCANNER_OPENID}" in rendered
-    assert "Add the scanner openid to qq.allowed_users." in rendered
+    assert "Added the scanner openid to qq.allowed_users." in rendered
+    assert load_config(config_path).qq.allowed_users == frozenset({SCANNER_OPENID})
     assert APP_SECRET not in rendered
     assert KEY not in rendered
     assert ENCRYPTED_SECRET not in rendered

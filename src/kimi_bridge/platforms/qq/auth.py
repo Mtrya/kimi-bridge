@@ -32,6 +32,8 @@ import httpx
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from ...config_mutation import merge_allowed_user
+from ..auth_formatting import write_qr_url
 from .storage import (
     QQControlError,
     QQManagedCredential,
@@ -296,9 +298,17 @@ def _optional_openid(data: dict[str, Any]) -> str | None:
 
 
 def _show_qr_url(stream: TextIO, url: str, *, refreshed: bool = False) -> None:
-    prefix = "Refreshed QQ authorization URL" if refreshed else "QQ authorization URL"
-    stream.write(f"{prefix}:\n{url}\n")
-    stream.flush()
+    title = "Refreshed QQ authorization URL" if refreshed else "QQ authorization URL"
+    write_qr_url(
+        stream,
+        title,
+        url,
+        instructions=(
+            "Open the URL in a browser and scan the QR code.",
+            "Approve the official QQ bot bind and keep this terminal open.",
+            "Waiting for QQ authorization to complete.",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +388,7 @@ async def authorize_with_qr(
                     raise QQControlError(
                         "QQ QR authorization stopped after repeated refreshes"
                     )
-                stream.write("QR code expired; refreshing.\n")
+                stream.write("\nQQ QR code expired. Requesting a fresh URL...\n")
                 stream.flush()
                 continue
             credential = _completed_credential(data, key, authorized_at=authorized_at)
@@ -399,6 +409,7 @@ def run_login(
     stream: TextIO = sys.stdout,
     http_client: httpx.AsyncClient | None = None,
     key_factory: KeyFactory = generate_qr_key,
+    config_path: str | Path | None = None,
 ) -> int:
     """Run the networked QR flow without starting Kimi Code or message polling."""
 
@@ -411,12 +422,38 @@ def run_login(
             key_factory=key_factory,
         )
     )
-    stream.write("QQ authorization saved locally.\n")
-    stream.write(f"Bot app_id: {redact_app_id(result.credential.app_id)}\n")
-    stream.write(f"Authorized at: {result.credential.authorized_at}\n")
+    allowlist_added = False
+    if result.user_openid is not None and config_path is not None:
+        try:
+            allowlist_added = merge_allowed_user(
+                config_path,
+                "qq",
+                result.user_openid,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise QQControlError(
+                "QQ authorization was saved, but qq.allowed_users could not be updated"
+            ) from exc
+
+    stream.write("\nQQ authorization complete\n\n")
+    stream.write("  Credentials: saved in private local storage\n")
+    stream.write(f"  Bot app_id: {redact_app_id(result.credential.app_id)}\n")
+    stream.write(f"  Authorized at: {result.credential.authorized_at}\n\n")
+    stream.write("Allowlist\n\n")
     if result.user_openid is not None:
-        stream.write(f"Scanner user openid: {result.user_openid}\n")
-        stream.write("Add the scanner openid to qq.allowed_users.\n")
+        stream.write(f"  Scanner user openid: {result.user_openid}\n")
+        if config_path is None:
+            stream.write("  Add the scanner openid to qq.allowed_users.\n")
+        elif allowlist_added:
+            stream.write("  Added the scanner openid to qq.allowed_users.\n")
+        else:
+            stream.write("  The scanner openid is already in qq.allowed_users.\n")
+    else:
+        stream.write(
+            "  QQ did not return a scanner user openid; edit "
+            "qq.allowed_users manually.\n"
+        )
+    stream.write("\n")
     stream.flush()
     return 0
 

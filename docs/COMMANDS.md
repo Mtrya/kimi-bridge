@@ -42,7 +42,7 @@ Model aliases and thinking efforts come from the live Kimi catalog. Plan usage a
 
 ## Terminal platform authorization commands
 
-These are terminal commands, not chat commands. They do not start Kimi Code or message polling. Every command loads the config first and requires its `platform` value to match the command platform. Use `--config PATH` at the top level, on the platform command, or on the subcommand when the config is not at the default path.
+These are terminal commands, not chat commands. They do not start Kimi Code or message polling. Every command loads the config first. A `login` offers to update a mismatched `platform` value and continue after confirmation; `status` and `logout` still require an exact match. Use `--config PATH` at the top level, on the platform command, or on the subcommand when the config is not at the default path.
 
 The three QR groups below are not three versions of the same “login”: Feishu registers an application, QQ binds an official bot credential, and WeChat authorizes an iLink bot. Telegram has no QR or terminal authorization command; configure its Bot API token and numeric user allowlist in TOML.
 
@@ -74,7 +74,7 @@ kimi-bridge wechat logout
 
 Default managed credential files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`; each platform's `storage_path` can relocate its directory. Feishu and QQ use a complete TOML `[feishu]`/`[qq]` `app_id` + `app_secret` pair only when the managed file is absent. A present but invalid managed file is a startup error, not a reason to use TOML silently. WeChat credentials never go into TOML.
 
-After Feishu login, approve the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback on the confirmation page; then confirm bot capability and any remaining console settings, publish the app, and populate the bridge-side `feishu.allowed_users` list yourself. After QQ binding, put the returned scanner `user_openid` into `qq.allowed_users` manually; it is not a QQ number or nickname. After WeChat authorization, put the returned stable scanner identity into `wechat.allowed_users` manually. If the running WeChat adapter reports expired authorization, stop it and run `kimi-bridge wechat login --replace`; QR completion never automatically adds an allowlist entry.
+After Feishu login, approve the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback on the confirmation page; then confirm bot capability and any remaining console settings and publish the app. When registration returns `user_info.open_id`, login merges it into `feishu.allowed_users`; review or remove that entry if finer control is needed. After QQ binding, a returned scanner `user_openid` is merged into `qq.allowed_users`; it is not a QQ number or nickname. If either QR flow returns no identity, configure its allowlist manually. After WeChat authorization, put the returned stable scanner identity into `wechat.allowed_users` manually. If the running WeChat adapter reports expired authorization, stop it and run `kimi-bridge wechat login --replace`; WeChat QR completion does not automatically add an allowlist entry.
 
 ## Busy-session matrix
 

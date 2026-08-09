@@ -15,7 +15,7 @@ kimi-bridge 连接本地 Kimi Code 服务器与一个聊天平台，保持聊天
 | Linux、macOS 和 Windows | 已支持 |
 | 语音消息 | 飞书、QQ 和微信支持 |
 
-每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信都支持本地 QR 授权；三种 QR 的含义不同，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。微信正式支持扫码授权的私聊机器人，但强制使用 `auto`，不提供审批、提问、独立思考流、群聊或主动推送；它支持接收图片、语音、文件和视频，以及发送图片、视频和文件。
+每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信支持二维码授权，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。
 
 ## 快速开始
 
@@ -37,7 +37,7 @@ kimi-bridge --version
 
 然后按所选平台完成授权和配置：
 
-- 飞书、QQ 或微信：先填写对应的 bootstrap 配置，运行对应的 `login`，按页面提示确认平台设置，再完成剩余平台端设置和 `allowed_users` 白名单；
+- 飞书、QQ 或微信：先填写对应的 bootstrap 配置，运行对应的 `login`，按页面提示确认平台设置，再完成剩余平台端设置并检查或补充 `allowed_users` 白名单；
 - Telegram：按安装指南中的手工 Bot API 流程，将 bot token 和数值用户 ID 写入 `[telegram]`。
 
 配置完成后再运行本地诊断并前台启动：
@@ -47,27 +47,25 @@ kimi-bridge doctor
 kimi-bridge
 ```
 
-一个进程只运行一个平台。首次启动请完成一次真实的消息往返（例如发送 `/status` 和一条普通提示），确认平台权限、事件投递、白名单和回复链路都正常，再配置常驻运行。
-
-### QR 控制命令索引
+### 二维码登录
 
 前三个平台有 QR 控制命令；它们不是同一种“登录”：
 
 ```bash
-kimi-bridge feishu login       # 飞书/Lark 应用注册 QR
+kimi-bridge feishu login       # 飞书/Lark 应用注册二维码
 kimi-bridge feishu status      # 检查本地托管凭据目录
 kimi-bridge feishu logout      # 删除适配器拥有的本地托管文件
 
-kimi-bridge qq login           # QQ 官方机器人凭据绑定 QR
+kimi-bridge qq login           # QQ 官方机器人凭据绑定二维码
 kimi-bridge qq status          # 检查本地托管凭据目录
 kimi-bridge qq logout          # 删除适配器拥有的本地托管文件
 
-kimi-bridge wechat login       # 微信 iLink 机器人授权 QR
+kimi-bridge wechat login       # 微信 iLink 机器人授权二维码
 kimi-bridge wechat status      # 检查本地托管凭据目录
 kimi-bridge wechat logout      # 删除适配器拥有的本地托管文件
 ```
 
-三组 QR 命令都支持登录时使用 `--replace`。对应的 `status` 只检查本地托管凭据目录，不做网络验证；`logout` 只删除适配器拥有的托管文件，不会删除平台侧机器人绑定。控制命令不会启动 Kimi Code，也不会开始消息轮询；命令要求配置中的 `platform` 与命令平台一致。Telegram 没有本项目的 QR、`login`、`status` 或 `logout` 控制命令，必须手工配置 Bot API token 和 `allowed_users`。
+三组 QR 命令都支持登录时使用 `--replace`。对应的 `status` 只检查本地托管凭据目录，不做网络验证；`logout` 只删除适配器拥有的托管文件，不会删除平台侧机器人绑定。控制命令不会启动 Kimi Code，也不会开始消息轮询；`login` 检测到平台不一致时会在确认后提供切换，`status` 和 `logout` 仍要求平台严格一致。Telegram 没有本项目的 QR、`login`、`status` 或 `logout` 控制命令，必须手工配置 Bot API token 和 `allowed_users`。
 
 默认托管凭据目录为：
 

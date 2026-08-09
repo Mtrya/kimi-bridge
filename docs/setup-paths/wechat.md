@@ -39,7 +39,7 @@ WeChat credentials never belong in TOML.
 kimi-bridge wechat login
 ```
 
-The command requires `platform = "wechat"` and starts neither Kimi Code nor message polling. It prints a short-lived authorization URL.
+The command starts neither Kimi Code nor message polling. If the config selects another platform, `login` offers to switch it after confirmation. It prints a short-lived authorization URL.
 
 3. Have the user open the URL in WeChat, scan and approve the iLink bot authorization, and enter a verification code only when the flow explicitly asks for one.
 

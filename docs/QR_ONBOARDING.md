@@ -13,7 +13,7 @@ kimi doctor config
 kimi -p "Reply with OK only."
 ```
 
-Create a config whose `platform` names the platform you are onboarding. A bridge process runs one selected platform only. The terminal controls below do not start Kimi Code or message polling, and they refuse to run when the config's selected platform does not match the command platform. These controls cover the three QR platforms only; Telegram has no QR or terminal authorization command and is configured manually with a Bot API token and numeric user ID.
+Create a config whose `platform` names the platform you are onboarding. A bridge process runs one selected platform only. The terminal controls below do not start Kimi Code or message polling. A `login` command offers to switch the selected platform when it does not match; `status` and `logout` continue to refuse mismatched platforms. These controls cover the three QR platforms only; Telegram has no QR or terminal authorization command and is configured manually with a Bot API token and numeric user ID.
 
 The three QR control groups are:
 
@@ -29,8 +29,8 @@ kimi-bridge wechat login|status|logout [--replace on login]
 
 | Platform | QR meaning | Successful local result | What QR does not do |
 | --- | --- | --- | --- |
-| Feishu/Lark | Official application registration or existing-application selection | `client_id`/`client_secret`, plus the tenant brand and API domain | It is not user OAuth; publication, target-user availability, and `feishu.allowed_users` still require follow-up |
-| QQ | Official bot credential bootstrap/bind | `bot_appid` and the AppSecret decrypted locally from `bot_encrypt_secret` | It is not QQ user login or OAuth; it does not establish every sandbox/review/event/message prerequisite or configure `qq.allowed_users` |
+| Feishu/Lark | Official application registration or existing-application selection | `client_id`/`client_secret`, tenant brand/API domain, and when returned the operator `open_id` merged into `feishu.allowed_users` | It is not user OAuth; publication, target-user availability, and any desired allowlist edits still require follow-up |
+| QQ | Official bot credential bootstrap/bind | `bot_appid`, the AppSecret decrypted locally from `bot_encrypt_secret`, and when returned the scanner `user_openid` merged into `qq.allowed_users` | It is not QQ user login or OAuth; it does not establish every sandbox/review/event/message prerequisite |
 | WeChat | WeChat iLink bot authorization | A bot credential and a stable scanner identity stored locally | It does not write credentials to TOML, add an arbitrary user to the allowlist, or permit a second polling process |
 
 The default managed files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`. Set each platform's `storage_path` to relocate its directory. The files are adapter-owned and private.
@@ -67,9 +67,9 @@ The registration confirmation applies the pre-filled bridge permissions, event s
 
 - confirm bot capability and any console settings not represented by the registration add-ons;
 - publish an application version and make it available to the intended tenant/user;
-- obtain the intended sender's `open_id` for the same application and tenant, then manually add it to `feishu.allowed_users`.
+- review the generated `feishu.allowed_users` entry and edit or remove it if the registration operator should not be an authorized sender; obtain a different sender's `open_id` manually when needed.
 
-QR completion does not publish the application or populate the bridge allowlist. Do not add the scanner to the bridge allowlist merely because they approved registration.
+When the registration result includes `user_info.open_id`, QR completion adds that identity to `feishu.allowed_users`. If the result omits it, the command reports that the allowlist still needs manual configuration. QR completion does not publish the application.
 
 Check and test:
 
@@ -107,7 +107,7 @@ Run:
 kimi-bridge qq login
 ```
 
-Open the printed URL, scan it, and approve the official bot bind. If a scanner `user_openid` is printed, manually copy that exact value into `qq.allowed_users`:
+Open the printed URL, scan it, and approve the official bot bind. When QQ returns a scanner `user_openid`, the command merges that exact app-scoped value into `qq.allowed_users` for you. Existing entries are preserved. Review or edit the generated TOML entry if you want finer access control:
 
 ```toml
 [qq]
@@ -115,7 +115,7 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = ["user_openid_returned_by_the_flow"]
 ```
 
-Never replace it with a QQ number or a nickname. If the flow does not return an identity for the intended sender, discover the app-scoped `user_openid` through the normal QQ message/allowlist procedure before starting production use.
+Never replace it with a QQ number or a nickname. If the flow does not return an identity, discover the app-scoped `user_openid` through the normal QQ message/allowlist procedure before starting production use.
 
 QR completion does not by itself prove sandbox tester access, production review, authorization for the required event Intents, gateway readiness, or a complete message path. Confirm the current QQ platform requirements separately and do not share the bot with another polling process.
 

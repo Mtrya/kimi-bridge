@@ -13,13 +13,14 @@ from typing import Any
 
 import pytest
 
-from kimi_bridge.config import FeishuConfig
+from kimi_bridge.config import FeishuConfig, load_config
 from kimi_bridge.platforms.feishu.auth import (
     FEISHU_REGISTRATION_ADDONS,
     FeishuControlError,
     RegistrationResult,
     _register_app,
     authorize_with_qr,
+    run_login,
     run_logout,
     run_status,
 )
@@ -152,12 +153,47 @@ async def test_registration_success_persists_feishu_credential(
     assert credential.operator_open_id == "ou_operator_12345"
 
     rendered = output.getvalue()
-    assert "Feishu application registration URL:" in rendered
-    assert "https://accounts.feishu.cn/qr" in rendered
+    assert "\nFeishu application registration URL\n\n" in rendered
+    assert "  https://accounts.feishu.cn/qr\n" in rendered
     assert "create or select an application" in rendered
     assert "required permissions, message event, and card callback" in rendered
     assert "Application identity: cli_…ef56" in rendered
     assert APP_SECRET not in rendered
+
+
+def test_run_login_adds_operator_open_id_to_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as auth_module
+
+    async def fake_authorize(*_args: Any, **_kwargs: Any) -> RegistrationResult:
+        return RegistrationResult(_credential(), replaced=False)
+
+    monkeypatch.setattr(auth_module, "authorize_with_qr", fake_authorize)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        'platform = "feishu"\n[feishu]\nallowed_users = []\n',
+        encoding="utf-8",
+    )
+    output = StringIO()
+
+    assert (
+        run_login(
+            FeishuConfig(storage_path=tmp_path / "feishu"),
+            stream=output,
+            config_path=config_path,
+        )
+        == 0
+    )
+
+    assert load_config(config_path).feishu.allowed_users == frozenset(
+        {"ou_operator_12345"}
+    )
+    assert (
+        "Added the registration user open_id to feishu.allowed_users."
+        in output.getvalue()
+    )
 
 
 async def test_registration_lark_tenant_uses_lark_domain(tmp_path: Path) -> None:

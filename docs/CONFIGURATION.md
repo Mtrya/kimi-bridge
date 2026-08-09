@@ -24,10 +24,10 @@ Only these keys have an effect. Permission mode and thinking rendering are per-c
 | Table/key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `feishu.app_id` / `feishu.app_secret` | strings | empty | Optional complete TOML fallback when Feishu is selected. If either value is set, both must be set. |
-| `feishu.allowed_users` | string array | empty | At runtime, at least one Feishu `open_id` or `user_id` is required. QR does not populate it automatically. |
+| `feishu.allowed_users` | string array | empty | At runtime, at least one Feishu `open_id` or `user_id` is required. QR merges a returned registration `open_id` automatically; edit the array for finer control. |
 | `feishu.storage_path` | path | `~/.kimi-bridge/feishu` | Managed Feishu credential directory; file is `credentials.json`. |
 | `qq.app_id` / `qq.app_secret` | strings | empty | Optional complete TOML fallback when QQ is selected. If either value is set, both must be set. |
-| `qq.allowed_users` | string array | empty | At runtime, at least one app-scoped QQ C2C `user_openid` is required. It is not a QQ number or nickname. |
+| `qq.allowed_users` | string array | empty | At runtime, at least one app-scoped QQ C2C `user_openid` is required. QR merges a returned scanner identity automatically; it is not a QQ number or nickname. |
 | `qq.storage_path` | path | `~/.kimi-bridge/qq` | Managed QQ credential directory; file is `credentials.json`. |
 | `wechat.allowed_users` | string array | empty | Empty only during QR bootstrap; runtime requires at least one stable scanner identity. |
 | `wechat.storage_path` | path | `~/.kimi-bridge/wechat` | WeChat credential and adapter receive-state directory; credential file is `credentials.json`. |
@@ -71,9 +71,9 @@ allowed_users = []
 
 Run `kimi-bridge feishu login` and open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. The result is an application credential, not a user OAuth token. The managed file records whether the tenant is Feishu or Lark and the corresponding API domain.
 
-The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. Obtain the target user's `open_id` in the same app/tenant context and put it in `feishu.allowed_users` manually. The person who approves application registration is not automatically added to the bridge allowlist.
+The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; edit or remove it afterward if the registering user should not be authorized. If no identity is returned, obtain the target user's `open_id` in the same app/tenant context manually. The registration result is not a user OAuth token.
 
-After those steps, replace the empty array with the real identity (the value below is a location marker, not a value to copy literally):
+After those steps, review the generated array or replace it with the intended identity (the value below is a location marker, not a value to copy literally):
 
 ```toml
 [feishu]
@@ -111,11 +111,11 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = []
 ```
 
-Run `kimi-bridge qq login`, scan and approve the official bot bind URL, then manually put the printed scanner `user_openid` into `qq.allowed_users`. The QR result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary key, bind task, QR URL, and encrypted blob are not persisted. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
+Run `kimi-bridge qq login`, scan and approve the official bot bind URL, and review the generated `qq.allowed_users` entry. When the flow returns a scanner `user_openid`, the bridge merges that exact app-scoped value into the array while preserving existing entries. The QR result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary key, bind task, QR URL, and encrypted blob are not persisted. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
 
-QR completion does not automatically provide all sandbox/review/event/gateway prerequisites or populate the allowlist. Confirm current QQ platform requirements separately before starting the foreground bridge.
+If the flow does not return an identity, configure `qq.allowed_users` manually. QR completion does not automatically provide all sandbox/review/event/gateway prerequisites. Confirm current QQ platform requirements separately before starting the foreground bridge.
 
-After the flow succeeds, replace the empty array with the returned identity (the value below is a location marker, not a value to copy literally):
+After the flow succeeds, review the generated array or replace it with the returned identity (the value below is a location marker, not a value to copy literally):
 
 ```toml
 [qq]

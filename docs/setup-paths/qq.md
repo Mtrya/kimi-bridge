@@ -40,7 +40,7 @@ The command does not start Kimi Code or message polling. It creates a short-live
 
 3. Have the user scan and approve the bot bind. The completed result provides `bot_appid` and encrypted `bot_encrypt_secret`; kimi-bridge decrypts the AppSecret locally and stores only the final managed credential at `~/.kimi-bridge/qq/credentials.json` or the configured `storage_path`. The temporary AES key, task/QR URL, and encrypted blob are not persisted.
 
-4. If the command prints scanner `user_openid`, copy that exact app-scoped value privately into `qq.allowed_users`. It is not a QQ number, nickname, or display name. Do not transform it or automatically merge it into a pre-existing non-empty allowlist without confirming the intended policy.
+4. If the command returns scanner `user_openid`, it automatically merges that exact app-scoped value into `qq.allowed_users` while preserving existing entries. It is not a QQ number, nickname, or display name. Review or remove the generated entry in the TOML if you want finer access control. If no identity is returned, configure the allowlist manually.
 
 5. Confirm current QQ platform prerequisites, including bot availability, sandbox tester access or production status as applicable, and the absence of another gateway consumer. QR completion is not proof that all event/gateway permissions or the message path are ready.
 

@@ -6,9 +6,12 @@ import asyncio
 import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, TextIO
 
 from ...config import FeishuConfig
+from ...config_mutation import merge_allowed_user
+from ..auth_formatting import write_qr_url
 from .storage import (
     FEISHU_API_DOMAIN,
     LARK_API_DOMAIN,
@@ -86,16 +89,21 @@ async def authorize_with_qr(
         url = info.get("url")
         expire_in = info.get("expire_in")
         if not isinstance(url, str) or not url:
-            raise FeishuControlError("Feishu registration did not provide an authorization URL")
-        stream.write("Feishu application registration URL:\n")
-        stream.write(f"{url}\n")
+            raise FeishuControlError(
+                "Feishu registration did not provide an authorization URL"
+            )
+        instructions = [
+            "Open the URL in a browser, create or select an application, and approve",
+            "kimi-bridge's required permissions, message event, and card callback.",
+        ]
         if isinstance(expire_in, int) and expire_in > 0:
-            stream.write(f"This URL expires in about {expire_in} seconds.\n")
-        stream.write(
-            "Open the URL, create or select an application, and approve kimi-bridge's "
-            "required permissions, message event, and card callback.\n"
+            instructions.insert(0, f"This URL expires in about {expire_in} seconds.")
+        write_qr_url(
+            stream,
+            "Feishu application registration URL",
+            url,
+            instructions=instructions,
         )
-        stream.flush()
 
     def on_status_change(info: dict[str, Any]) -> None:
         status = info.get("status")
@@ -125,19 +133,18 @@ async def authorize_with_qr(
 
     credential = _credential_from_registration(result)
     storage.save_credential(credential)
-    stream.write(
-        "Feishu application credentials were saved in private local storage.\n"
-    )
-    stream.write(f"Application identity: {redact_app_id(credential.app_id)}\n")
-    stream.write(f"Tenant brand: {credential.tenant_brand}\n")
+    stream.write("\nFeishu application registration complete\n\n")
+    stream.write("  Credentials: saved in private local storage\n")
+    stream.write(f"  Application identity: {redact_app_id(credential.app_id)}\n")
+    stream.write(f"  Tenant brand: {credential.tenant_brand}\n")
     if credential.operator_open_id:
         stream.write(
-            "Registration user identity: "
+            "  Registration user identity: "
             f"{redact_open_id(credential.operator_open_id)}\n"
         )
-    stream.write(
-        "Configure at least one intended sender in [feishu].allowed_users before startup.\n"
-    )
+    else:
+        stream.write("  Registration user identity: not returned\n")
+    stream.write("\n")
     stream.flush()
     return RegistrationResult(credential, replaced=replaced)
 
@@ -200,15 +207,46 @@ def run_login(
     *,
     replace: bool = False,
     stream: TextIO = sys.stdout,
+    config_path: str | Path | None = None,
 ) -> int:
     """Run QR application registration without starting bridge services."""
 
     try:
-        asyncio.run(authorize_with_qr(FeishuStorage(config.storage_path), replace=replace, stream=stream))
+        result = asyncio.run(
+            authorize_with_qr(
+                FeishuStorage(config.storage_path),
+                replace=replace,
+                stream=stream,
+            )
+        )
+        operator_open_id = result.credential.operator_open_id
+        allowlist_added = False
+        if operator_open_id is not None and config_path is not None:
+            allowlist_added = merge_allowed_user(
+                config_path,
+                "feishu",
+                operator_open_id,
+            )
     except FeishuControlError:
         raise
     except (OSError, TypeError, ValueError, FeishuStorageError) as exc:
         raise FeishuControlError(str(exc)) from exc
+
+    stream.write("Allowlist\n\n")
+    if operator_open_id is None:
+        stream.write(
+            "  No user open_id was returned; edit feishu.allowed_users manually.\n"
+        )
+    elif config_path is None:
+        stream.write("  Add the registration user open_id to feishu.allowed_users.\n")
+    elif allowlist_added:
+        stream.write("  Added the registration user open_id to feishu.allowed_users.\n")
+    else:
+        stream.write(
+            "  The registration user open_id is already in feishu.allowed_users.\n"
+        )
+    stream.write("\n")
+    stream.flush()
     return 0
 
 

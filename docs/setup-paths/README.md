@@ -11,7 +11,7 @@ Feishu's recommended QR application-registration path and its complete TOML fall
 
 ## Current control-plane facts
 
-All three supported QR controls load config first and require its `platform` to match the command platform:
+All three supported QR controls load config first. `login` offers to switch a mismatched `platform` after confirmation; `status` and `logout` require an exact platform match:
 
 ```bash
 kimi-bridge feishu login|status|logout

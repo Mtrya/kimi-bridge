@@ -74,7 +74,7 @@ Windows `doctor` does not run POSIX mode checks, but it still checks that paths 
 
 The first three platforms provide QR control commands, but these are three different authorization flows, not three forms of the same login: Feishu/Lark application registration, QQ official-bot credential binding, and WeChat iLink bot authorization. Telegram has no QR control command in this project and uses manual Bot API configuration.
 
-These terminal controls operate only the selected platform's authorization control plane. They do not start Kimi Code or message polling. `login` connects to the platform authorization service and waits for the QR flow; `status` checks local files only and does not verify the network; `logout` removes only adapter-owned managed files. Each command requires the config's `platform` to match the command platform.
+These terminal controls operate only the selected platform's authorization control plane. They do not start Kimi Code or message polling. `login` connects to the platform authorization service and waits for the QR flow; if the config selects another platform, it offers to switch the setting after confirmation. `status` checks local files only and does not verify the network; `logout` removes only adapter-owned managed files. `status` and `logout` require the config's `platform` to match the command platform.
 
 | Platform | Command | Authorization method |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ If managed authorization already exists, plain `login` refuses to overwrite it. 
 
 ### Feishu: application-registration QR
 
-Start with a bootstrap config that names the selected platform and leaves the sender allowlist empty. QR registration is a separate authorization step and does not silently populate the allowlist.
+Start with a bootstrap config that names the selected platform and leaves the sender allowlist empty. QR registration is a separate authorization step; when Feishu returns `user_info.open_id` or QQ returns `user_openid`, login merges that identity into the corresponding allowlist while preserving existing entries.
 
 ```toml
 platform = "feishu"
@@ -107,9 +107,9 @@ kimi-bridge feishu login
 
 Open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. Scan with or approve in Feishu/Lark and confirm those requested settings. The result is an application `client_id` and `client_secret`, saved to `~/.kimi-bridge/feishu/credentials.json` (or the configured `storage_path`). The managed record also preserves whether the tenant is Feishu or Lark and the API domain to use.
 
-The operator must still confirm bot capability and any console settings not represented by the registration add-ons, publish an app version, and confirm the intended user's availability. Obtain the user's `open_id` in the same app and tenant context and enter it manually in `feishu.allowed_users`. QR completion does not populate the bridge allowlist, and Feishu inbound voice still requires `ffmpeg` on PATH.
+The operator must still confirm bot capability and any console settings not represented by the registration add-ons, publish an app version, and confirm the intended user's availability. When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; review or remove it if the registering user should not be authorized. If no identity is returned, obtain the intended user's `open_id` in the same app and tenant context manually. Feishu inbound voice still requires `ffmpeg` on PATH.
 
-After those steps, replace the empty array with the real identity (the value below is a location marker, not a value to copy literally):
+After those steps, review the generated array or replace it with the real identity (the value below is a location marker, not a value to copy literally):
 
 ```toml
 [feishu]
@@ -148,9 +148,9 @@ kimi-bridge qq login
 
 Open the printed QQ URL and **scan and approve the official-bot bind flow**. The completed result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the secret only in memory and stores the final AppSecret with the app ID at `~/.kimi-bridge/qq/credentials.json` (or the configured `storage_path`). The temporary key, task, QR URL, and encrypted blob are not persisted. Runtime continues to use the existing QQ REST/token/WebSocket transport.
 
-If the flow returns a scanner `user_openid`, manually copy it into `qq.allowed_users`. This is an app-scoped identifier for that bot, not a QQ number, nickname, or display name. Never convert it to one of those values. QR success does not by itself establish sandbox tester access, production review, authorization for the required event Intents, or a complete message path; complete any current QQ platform requirements and ensure no other polling process uses the bot.
+When the flow returns a scanner `user_openid`, login merges that exact app-scoped identity into `qq.allowed_users` while preserving existing entries. Review or remove the generated entry if you want finer access control. This is an app-scoped identifier for that bot, not a QQ number, nickname, or display name. If no identity is returned, configure the allowlist manually. QR success does not by itself establish sandbox tester access, production review, authorization for the required event Intents, or a complete message path; complete any current QQ platform requirements and ensure no other polling process uses the bot.
 
-After the flow succeeds, replace the empty array with the returned identity (the value below is a location marker, not a value to copy literally):
+After the flow succeeds, review the generated array or replace it with the returned identity (the value below is a location marker, not a value to copy literally):
 
 ```toml
 [qq]

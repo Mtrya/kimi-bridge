@@ -53,8 +53,9 @@ Terminal controls are separate from runtime startup. They apply only to the Feis
 ```text
 kimi-bridge feishu|qq|wechat login|status|logout
                          │
-                         ├─ load config and require matching `platform`
+                         ├─ load config; `login` may offer a platform switch
                          ├─ operate only the selected adapter's control/storage path
+                         ├─ `status`/`logout` require matching `platform`
                          └─ never start Kimi Code or message polling
 ```
 
@@ -78,9 +79,9 @@ This section records the authoritative credential flows behind the QR controls. 
 
 ### Feishu/Lark
 
-- Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., addons=...)` without `create_only=True`, so the confirmation page can create or select an application. The fixed add-ons pre-fill the bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. The flow stores only the returned application `client_id`/`client_secret` plus tenant brand and API domain. It is not a user OAuth flow, so no user token is stored.
+- Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., addons=...)` without `create_only=True`, so the confirmation page can create or select an application. The fixed add-ons pre-fill the bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. The flow stores the returned application `client_id`/`client_secret` plus tenant brand, API domain, and optional operator `open_id` metadata. It is not a user OAuth flow, so no user token is stored.
 - Token type: application-level long-lived credentials. The bridge still acts as the application, and `lark-oapi` exchanges them for `tenant_access_token` values server-side.
-- Scopes: the operator must approve the pre-filled application settings on the confirmation page. Bot capability, publication, target-user availability, and `feishu.allowed_users` remain manual platform/bridge steps.
+- Scopes: the operator must approve the pre-filled application settings on the confirmation page. Bot capability, publication, and target-user availability remain manual platform steps; when registration returns `user_info.open_id`, QR onboarding merges it into `feishu.allowed_users`, which can be edited afterward.
 - Refresh: application credentials have no expiry and no refresh token (none is needed without user OAuth).
 - Transport: unchanged REST + WebSocket long connection. Feishu tenants use `https://open.feishu.cn` and Lark tenants `https://open.larksuite.com`; the managed record preserves the returned domain.
 

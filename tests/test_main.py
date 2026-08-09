@@ -18,6 +18,7 @@ from kimi_bridge.config import (
     FeishuConfig,
     QQConfig,
     TelegramConfig,
+    load_config,
     WechatConfig,
 )
 from kimi_bridge.kimi_server import KimiServerAuthenticationError
@@ -360,7 +361,7 @@ def test_selected_feishu_adapter_requires_ffmpeg(
 
 
 def test_builds_qq_adapter_with_wired_transport(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -373,7 +374,10 @@ def test_builds_qq_adapter_with_wired_transport(
     config = Config(
         platform="qq",
         qq=QQConfig(
-            app_id="app-1", app_secret="secret-1", allowed_users=frozenset({"O1"})
+            app_id="app-1",
+            app_secret="secret-1",
+            allowed_users=frozenset({"O1"}),
+            storage_path=tmp_path / "qq",
         ),
     )
 
@@ -396,7 +400,10 @@ def test_selected_platform_requires_its_own_credentials(tmp_path: Path) -> None:
         main_module._build_adapter(
             Config(
                 platform="feishu",
-                feishu=FeishuConfig(allowed_users=frozenset({"ou_one"})),
+                feishu=FeishuConfig(
+                    allowed_users=frozenset({"ou_one"}),
+                    storage_path=tmp_path / "missing-feishu",
+                ),
             )
         )
 
@@ -404,7 +411,10 @@ def test_selected_platform_requires_its_own_credentials(tmp_path: Path) -> None:
         main_module._build_adapter(
             Config(
                 platform="qq",
-                qq=QQConfig(allowed_users=frozenset({"O1"})),
+                qq=QQConfig(
+                    allowed_users=frozenset({"O1"}),
+                    storage_path=tmp_path / "missing-qq",
+                ),
             )
         )
 
@@ -666,7 +676,13 @@ def test_feishu_and_qq_controls_dispatch_without_starting_runtime(
 
     calls: list[tuple[str, bool]] = []
 
-    def feishu_login(_config: FeishuConfig, *, replace: bool = False) -> int:
+    def feishu_login(
+        _config: FeishuConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert config_path is not None
         calls.append(("feishu-login", replace))
         return 0
 
@@ -678,7 +694,13 @@ def test_feishu_and_qq_controls_dispatch_without_starting_runtime(
         calls.append(("feishu-logout", False))
         return 0
 
-    def qq_login(_config: QQConfig, *, replace: bool = False) -> int:
+    def qq_login(
+        _config: QQConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert config_path is not None
         calls.append(("qq-login", replace))
         return 0
 
@@ -750,6 +772,55 @@ def test_feishu_and_qq_controls_require_selected_platform(
     assert main_module.main(["--config", str(feishu_config), "qq", "status"]) == 1
     assert 'selected platform must be "qq"' in capsys.readouterr().err
     assert not called
+
+
+def test_login_offers_to_switch_selected_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as feishu_auth
+
+    calls: list[Path] = []
+
+    def fake_login(
+        _config: FeishuConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert replace is False
+        assert config_path is not None
+        calls.append(config_path)
+        return 0
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "qq"\n', encoding="utf-8")
+    monkeypatch.setattr(feishu_auth, "run_login", fake_login)
+    monkeypatch.setattr("builtins.input", lambda: "yes")
+
+    assert main_module.main(["--config", str(config_path), "feishu", "login"]) == 0
+    assert load_config(config_path).platform == "feishu"
+    assert calls == [config_path]
+
+
+def test_declined_login_platform_switch_preserves_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kimi_bridge.platforms.qq import auth as qq_auth
+
+    def forbidden_login(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("login should not run after declining the switch")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "feishu"\n', encoding="utf-8")
+    monkeypatch.setattr(qq_auth, "run_login", forbidden_login)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    assert main_module.main(["--config", str(config_path), "qq", "login"]) == 1
+    assert load_config(config_path).platform == "feishu"
+    assert 'selected platform must be "qq"' in capsys.readouterr().err
 
 
 def test_wechat_controls_require_selected_wechat_config(

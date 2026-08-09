@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...config import WechatConfig
+from ..auth_formatting import write_qr_url
 from .api import (
     WeChatAuthAPI,
     normalize_https_base_url,
@@ -117,12 +118,13 @@ async def authorize_with_qr(
             continue
 
         if status.status == "need_verifycode":
-            prompt = (
-                "Verification code was not accepted; enter the number again: "
-                if pending_verify_code
-                else "Enter the number shown in WeChat: "
+            if pending_verify_code:
+                stream.write("\nVerification code rejected\n\n")
+            stream.write(
+                "Verification required\n\nEnter the number shown in WeChat.\n\n"
             )
-            code = read_verify_code(prompt).strip()
+            stream.flush()
+            code = read_verify_code("Verification code: ").strip()
             if not code:
                 raise WeChatControlError("WeChat verification code cannot be empty")
             pending_verify_code = code
@@ -218,15 +220,18 @@ def run_login(
         result = asyncio.run(login())
     except (httpx.TransportError, WeChatRetryableError) as exc:
         raise WeChatControlError("WeChat QR authorization request failed") from exc
+    stream.write("\nWeChat authorization complete\n\n")
     if result.reused_existing:
-        stream.write("Existing local WeChat authorization was retained.\n")
-        stream.write(f"Bot identity: {result.credential.bot_id}\n")
+        stream.write("  Existing local authorization: retained\n")
     else:
-        stream.write("WeChat authorization saved locally.\n")
-        stream.write(f"Bot identity: {result.credential.bot_id}\n")
+        stream.write("  Authorization: saved in private local storage\n")
+    stream.write(f"  Bot identity: {result.credential.bot_id}\n")
+    if not result.reused_existing:
         assert result.scanner_user_id is not None
-        stream.write(f"Scanner user identity: {result.scanner_user_id}\n")
-        stream.write("Add the scanner identity to wechat.allowed_users.\n")
+        stream.write("\nAllowlist\n\n")
+        stream.write(f"  Scanner user identity: {result.scanner_user_id}\n")
+        stream.write("  Add the scanner identity to wechat.allowed_users.\n")
+    stream.write("\n")
     stream.flush()
     return 0
 
@@ -283,12 +288,22 @@ def run_logout(
     return 0
 
 
-def _show_qr_url(
-    stream: TextIO, qr_code: QRCode, *, refreshed: bool = False
-) -> None:
-    prefix = "Refreshed WeChat authorization URL" if refreshed else "WeChat authorization URL"
-    stream.write(f"{prefix}:\n{qr_code.authorization_url}\n")
-    stream.flush()
+def _show_qr_url(stream: TextIO, qr_code: QRCode, *, refreshed: bool = False) -> None:
+    title = (
+        "Refreshed WeChat authorization URL"
+        if refreshed
+        else "WeChat authorization URL"
+    )
+    write_qr_url(
+        stream,
+        title,
+        qr_code.authorization_url,
+        instructions=(
+            "Open the URL in WeChat and scan the QR code.",
+            "Approve the iLink bot authorization and keep this terminal open.",
+            "Waiting for WeChat authorization to complete.",
+        ),
+    )
 
 
 def _confirmed_result(
