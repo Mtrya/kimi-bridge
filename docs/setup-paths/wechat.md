@@ -43,7 +43,7 @@ It prints a short-lived authorization URL.
 
 3. Have the user open the URL in WeChat, scan and approve the iLink bot authorization, and enter a verification code only when the flow explicitly asks for one.
 
-4. On success, the command stores the managed credential at `~/.kimi-bridge/wechat/credentials.json` or the configured `storage_path` and prints a stable scanner identity. Copy that identity privately into `wechat.allowed_users`. Do not use a nickname, guessed account identifier, QQ-style identifier, or bot identity; additional entries must be real stable identities.
+4. On success, the command stores the managed credential at `~/.kimi-bridge/wechat/credentials.json` or the configured `storage_path` and merges the returned stable scanner identity into `wechat.allowed_users`. Check that the added entry is the intended sender; additional entries must be real stable identities, never a nickname, guessed account identifier, QQ-style identifier, or bot identity.
 
 5. Run:
 

@@ -67,7 +67,7 @@ kimi-bridge qq login
 kimi-bridge wechat login
 ```
 
-在微信中打开命令输出的 URL，扫码并批准 iLink 机器人授权；只有微信明确要求时才输入验证码。凭据保存到 `~/.kimi-bridge/wechat/credentials.json`，不写入配置文件。授权返回扫码账号的稳定身份，把它手工写入 `~/.kimi-bridge/config.toml` 的 `[wechat].allowed_users`——不要填昵称或猜测的账号标识。
+在微信中打开命令输出的 URL，扫码并批准 iLink 机器人授权；只有微信明确要求时才输入验证码。凭据保存到 `~/.kimi-bridge/wechat/credentials.json`，不写入配置文件。授权返回扫码账号的稳定身份，`login` 会自动把它写入 `allowed_users` 白名单，确认它就是要授权的用户即可。
 
 一个机器人授权只能由一个进程轮询，不要同时让其他 iLink 进程连接它。微信固定 `auto`，支持接收图片、语音、文件和视频，发送图片、视频和文件；外发音频作为普通文件。
 

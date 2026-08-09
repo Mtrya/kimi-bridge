@@ -29,7 +29,7 @@ Only these keys have an effect. Permission mode and thinking rendering are per-c
 | `qq.app_id` / `qq.app_secret` | strings | empty | Optional complete TOML fallback when QQ is selected. If either value is set, both must be set. |
 | `qq.allowed_users` | string array | empty | At runtime, at least one app-scoped QQ C2C `user_openid` is required. QR login adds the returned scanner `user_openid` automatically. |
 | `qq.storage_path` | path | `~/.kimi-bridge/qq` | Managed QQ credential directory; file is `credentials.json`. |
-| `wechat.allowed_users` | string array | empty | Empty only during QR bootstrap; runtime requires at least one stable scanner identity. |
+| `wechat.allowed_users` | string array | empty | At runtime, at least one stable scanner identity is required. QR login adds the returned scanner identity automatically. |
 | `wechat.storage_path` | path | `~/.kimi-bridge/wechat` | WeChat credential and adapter receive-state directory; credential file is `credentials.json`. |
 | `telegram.bot_token` | string | empty | Required when Telegram is selected. |
 | `telegram.allowed_users` | positive integer array | empty | Required when Telegram is selected. |
@@ -168,7 +168,7 @@ storage_path = "~/.kimi-bridge/wechat"
 allowed_users = []
 ```
 
-Leave the allowlist empty only while running `kimi-bridge wechat login`; the authorization flow is in the [installation guide](../INSTALL.en_US.md). Afterward put the returned stable scanner identity in `wechat.allowed_users` — not a nickname or guessed account identifier. The credential is stored under `wechat.storage_path`, never in TOML.
+Run `kimi-bridge wechat login`; the authorization flow is in the [installation guide](../INSTALL.en_US.md). Login merges the returned stable scanner identity into `wechat.allowed_users`; edit the array only to authorize a different account, using its real stable identity — never a nickname or guessed account identifier. The credential is stored under `wechat.storage_path`, never in TOML.
 
 The runtime requires at least one allowlisted identity, and one bot authorization can be polled by exactly one process; do not point a second iLink process at the same authorization.
 

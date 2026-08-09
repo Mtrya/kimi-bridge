@@ -67,7 +67,7 @@ Afterward, complete the steps the QQ console currently requires — sandbox test
 kimi-bridge wechat login
 ```
 
-Open the URL printed by the command in WeChat, scan, and approve the iLink bot authorization; enter a verification code only if WeChat explicitly asks for one. The credential is saved to `~/.kimi-bridge/wechat/credentials.json` and never written to the config file. The flow returns the scanning account's stable identity — write it by hand into `[wechat].allowed_users` in `~/.kimi-bridge/config.toml`; do not use a nickname or a guessed account identifier.
+Open the URL printed by the command in WeChat, scan, and approve the iLink bot authorization; enter a verification code only if WeChat explicitly asks for one. The credential is saved to `~/.kimi-bridge/wechat/credentials.json` and never written to the config file. The flow returns the scanning account's stable identity, and `login` adds it to `wechat.allowed_users` automatically; check that it is the intended user.
 
 One bot authorization can be polled by exactly one process; do not let another iLink process connect to it. WeChat forces `auto`. It receives images, voice, files, and video, and sends images, videos, and files; outbound audio goes as a generic file.
 

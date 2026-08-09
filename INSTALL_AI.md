@@ -107,7 +107,7 @@ Prefer a dedicated platform bot when another service, webhook, gateway connectio
 
 ## 4. Prepare private local configuration
 
-For Feishu, QQ, and WeChat, do not pre-create a config: run the platform's `login` directly. When `config.toml` does not exist, `login` creates it and writes the selected platform; when the flow returns a user identity (Feishu `open_id`, QQ `user_openid`), `login` merges it into `allowed_users`. WeChat is the exception: its returned stable scanner identity must be written into `wechat.allowed_users` by hand. Create or edit the file by hand only to select a non-default path, pre-set `storage_path`, write a Telegram config, or supply a Feishu/QQ TOML fallback pair.
+For Feishu, QQ, and WeChat, do not pre-create a config: run the platform's `login` directly. When `config.toml` does not exist, `login` creates it and writes the selected platform; when the flow returns a user identity (Feishu `open_id`, QQ `user_openid`, WeChat scanner identity), `login` merges it into `allowed_users`. Create or edit the file by hand only to select a non-default path, pre-set `storage_path`, write a Telegram config, or supply a Feishu/QQ TOML fallback pair.
 
 The default file is `Path.home() / .kimi-bridge / config.toml`; `--config` and `KIMI_BRIDGE_CONFIG` select another file. Before writing:
 
@@ -303,7 +303,7 @@ storage_path = "~/.kimi-bridge/wechat"
 allowed_users = []
 ```
 
-Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, copy the returned stable scanner identity privately into `wechat.allowed_users`; do not use a nickname, guessed account identifier, or bot identity.
+Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, `login` merges the returned stable scanner identity into `wechat.allowed_users`; check that it is the intended sender. If a different sender should be authorized, add that account's real stable identity — never a nickname, guessed account identifier, or bot identity.
 
 Run `kimi-bridge wechat status` to inspect local storage and redacted metadata, then run `kimi-bridge doctor`; resolve local errors and only then start the bridge.
 
