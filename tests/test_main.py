@@ -18,6 +18,7 @@ from kimi_bridge.config import (
     FeishuConfig,
     QQConfig,
     TelegramConfig,
+    load_config,
     WechatConfig,
 )
 from kimi_bridge.kimi_server import KimiServerAuthenticationError
@@ -153,12 +154,196 @@ def test_builds_feishu_adapter_with_resolved_ffmpeg(
     assert isinstance(adapter, FakeAdapter)
     assert received == {
         "args": ("app-1", "secret-1", frozenset({"ou_one"})),
-        "kwargs": {"ffmpeg_executable": "/usr/bin/ffmpeg"},
+        "kwargs": {
+            "api_domain": "https://open.feishu.cn",
+            "ffmpeg_executable": "/usr/bin/ffmpeg",
+        },
     }
 
 
+def test_managed_feishu_credential_takes_precedence_and_sets_domain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms.feishu.storage import (
+        LARK_API_DOMAIN,
+        FeishuCredential,
+        FeishuStorage,
+    )
+
+    storage_path = tmp_path / "feishu"
+    FeishuStorage(storage_path).save_credential(
+        FeishuCredential(
+            app_id="managed-app",
+            app_secret="managed-secret",
+            api_domain=LARK_API_DOMAIN,
+            tenant_brand="lark",
+            authorized_at="2026-08-08T12:00:00+00:00",
+        )
+    )
+    received: dict[str, Any] = {}
+
+    class FakeAdapter(_Adapter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            received["args"] = args
+            received["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "FeishuAdapter", FakeAdapter)
+    monkeypatch.setattr(main_module.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+
+    adapter = main_module._build_adapter(
+        Config(
+            platform="feishu",
+            feishu=FeishuConfig(
+                app_id="toml-app",
+                app_secret="toml-secret",
+                allowed_users=frozenset({"ou_one"}),
+                storage_path=storage_path,
+            ),
+        )
+    )
+
+    assert isinstance(adapter, FakeAdapter)
+    assert received == {
+        "args": ("managed-app", "managed-secret", frozenset({"ou_one"})),
+        "kwargs": {
+            "api_domain": LARK_API_DOMAIN,
+            "ffmpeg_executable": "/usr/bin/ffmpeg",
+        },
+    }
+
+
+def test_managed_qq_credential_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms.qq.storage import QQManagedCredential, QQStorage
+
+    storage_path = tmp_path / "qq"
+    QQStorage(storage_path).save_credential(
+        QQManagedCredential(
+            app_id="managed-app",
+            app_secret="managed-secret",
+            authorized_at="2026-08-08T12:00:00+00:00",
+        )
+    )
+    received: dict[str, Any] = {}
+
+    class FakeAdapter(_Adapter):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            received["args"] = args
+            received["kwargs"] = kwargs
+
+    monkeypatch.setattr(main_module, "QQAdapter", FakeAdapter)
+
+    adapter = main_module._build_adapter(
+        Config(
+            platform="qq",
+            qq=QQConfig(
+                app_id="toml-app",
+                app_secret="toml-secret",
+                allowed_users=frozenset({"O1"}),
+                storage_path=storage_path,
+            ),
+        )
+    )
+
+    assert isinstance(adapter, FakeAdapter)
+    assert received["args"] == ("managed-app", frozenset({"O1"}))
+    assert isinstance(received["kwargs"]["api"], main_module.QQBotAPI)
+    assert received["kwargs"]["api"]._token_manager._credentials.app_id == "managed-app"
+
+
+def test_invalid_managed_feishu_credential_does_not_fallback(
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu.storage import FeishuStorage
+
+    storage = FeishuStorage(tmp_path / "feishu")
+    storage.path.mkdir(parents=True, mode=0o700)
+    storage.credential_path.write_text("{not-json", encoding="utf-8")
+    storage.credential_path.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="managed credentials") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="feishu",
+                feishu=FeishuConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"ou_one"}),
+                    storage_path=storage.path,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
+def test_invalid_managed_qq_credential_does_not_fallback(tmp_path: Path) -> None:
+    from kimi_bridge.platforms.qq.storage import QQStorage
+
+    storage = QQStorage(tmp_path / "qq")
+    storage.path.mkdir(parents=True, mode=0o700)
+    storage.credential_path.write_text("{not-json", encoding="utf-8")
+    storage.credential_path.chmod(0o600)
+
+    with pytest.raises(RuntimeError, match="managed credentials") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="qq",
+                qq=QQConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"O1"}),
+                    storage_path=storage.path,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
+def test_unsafe_feishu_storage_path_blocks_toml_fallback(tmp_path: Path) -> None:
+    blocker = tmp_path / "feishu-blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="storage path is not usable") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="feishu",
+                feishu=FeishuConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"ou_one"}),
+                    storage_path=blocker,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
+def test_unsafe_qq_storage_path_blocks_toml_fallback(tmp_path: Path) -> None:
+    blocker = tmp_path / "qq-blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="storage path is not usable") as caught:
+        main_module._build_adapter(
+            Config(
+                platform="qq",
+                qq=QQConfig(
+                    app_id="toml-app",
+                    app_secret="toml-secret",
+                    allowed_users=frozenset({"O1"}),
+                    storage_path=blocker,
+                ),
+            )
+        )
+
+    assert "toml-secret" not in str(caught.value)
+
+
 def test_selected_feishu_adapter_requires_ffmpeg(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(main_module.shutil, "which", lambda _name: None)
 
@@ -176,7 +361,7 @@ def test_selected_feishu_adapter_requires_ffmpeg(
 
 
 def test_builds_qq_adapter_with_wired_transport(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -189,7 +374,10 @@ def test_builds_qq_adapter_with_wired_transport(
     config = Config(
         platform="qq",
         qq=QQConfig(
-            app_id="app-1", app_secret="secret-1", allowed_users=frozenset({"O1"})
+            app_id="app-1",
+            app_secret="secret-1",
+            allowed_users=frozenset({"O1"}),
+            storage_path=tmp_path / "qq",
         ),
     )
 
@@ -208,11 +396,27 @@ def test_selected_platform_requires_its_own_credentials(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="Telegram bot token"):
         main_module._build_adapter(Config(platform="telegram"))
 
-    with pytest.raises(RuntimeError, match="Feishu credentials"):
-        main_module._build_adapter(Config(platform="feishu"))
+    with pytest.raises(RuntimeError, match="Feishu credentials are unavailable"):
+        main_module._build_adapter(
+            Config(
+                platform="feishu",
+                feishu=FeishuConfig(
+                    allowed_users=frozenset({"ou_one"}),
+                    storage_path=tmp_path / "missing-feishu",
+                ),
+            )
+        )
 
-    with pytest.raises(RuntimeError, match="QQ credentials"):
-        main_module._build_adapter(Config(platform="qq"))
+    with pytest.raises(RuntimeError, match="QQ credentials are unavailable"):
+        main_module._build_adapter(
+            Config(
+                platform="qq",
+                qq=QQConfig(
+                    allowed_users=frozenset({"O1"}),
+                    storage_path=tmp_path / "missing-qq",
+                ),
+            )
+        )
 
     with pytest.raises(RuntimeError, match="qq.allowed_users"):
         main_module._build_adapter(
@@ -462,6 +666,161 @@ def test_wechat_controls_do_not_start_runtime_or_build_adapter(
     assert calls == [("login", True), ("status", False), ("logout", False)]
     assert not runtime_started
     assert not adapter_built
+
+
+def test_feishu_and_qq_controls_dispatch_without_starting_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as feishu_auth
+    from kimi_bridge.platforms.qq import auth as qq_auth
+
+    calls: list[tuple[str, bool]] = []
+
+    def feishu_login(
+        _config: FeishuConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert config_path is not None
+        calls.append(("feishu-login", replace))
+        return 0
+
+    def feishu_status(_config: FeishuConfig) -> int:
+        calls.append(("feishu-status", False))
+        return 0
+
+    def feishu_logout(_config: FeishuConfig) -> int:
+        calls.append(("feishu-logout", False))
+        return 0
+
+    def qq_login(
+        _config: QQConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert config_path is not None
+        calls.append(("qq-login", replace))
+        return 0
+
+    def qq_status(_config: QQConfig) -> int:
+        calls.append(("qq-status", False))
+        return 0
+
+    def qq_logout(_config: QQConfig) -> int:
+        calls.append(("qq-logout", False))
+        return 0
+
+    monkeypatch.setattr(feishu_auth, "run_login", feishu_login)
+    monkeypatch.setattr(feishu_auth, "run_status", feishu_status)
+    monkeypatch.setattr(feishu_auth, "run_logout", feishu_logout)
+    monkeypatch.setattr(qq_auth, "run_login", qq_login)
+    monkeypatch.setattr(qq_auth, "run_status", qq_status)
+    monkeypatch.setattr(qq_auth, "run_logout", qq_logout)
+
+    feishu_config = tmp_path / "feishu.toml"
+    feishu_config.write_text('platform = "feishu"\n', encoding="utf-8")
+    qq_config = tmp_path / "qq.toml"
+    qq_config.write_text('platform = "qq"\n', encoding="utf-8")
+
+    assert main_module.main(
+        ["--config", str(feishu_config), "feishu", "login", "--replace"]
+    ) == 0
+    assert main_module.main(["feishu", "--config", str(feishu_config), "status"]) == 0
+    assert main_module.main(["feishu", "logout", "--config", str(feishu_config)]) == 0
+    assert main_module.main(
+        ["--config", str(qq_config), "qq", "login", "--replace"]
+    ) == 0
+    assert main_module.main(["qq", "--config", str(qq_config), "status"]) == 0
+    assert main_module.main(["qq", "logout", "--config", str(qq_config)]) == 0
+    assert calls == [
+        ("feishu-login", True),
+        ("feishu-status", False),
+        ("feishu-logout", False),
+        ("qq-login", True),
+        ("qq-status", False),
+        ("qq-logout", False),
+    ]
+
+
+def test_feishu_and_qq_controls_require_selected_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as feishu_auth
+    from kimi_bridge.platforms.qq import auth as qq_auth
+
+    called = False
+
+    def forbidden_status(_config: Any) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(feishu_auth, "run_status", forbidden_status)
+    monkeypatch.setattr(qq_auth, "run_status", forbidden_status)
+
+    qq_config = tmp_path / "qq.toml"
+    qq_config.write_text('platform = "qq"\n', encoding="utf-8")
+    assert main_module.main(["--config", str(qq_config), "feishu", "status"]) == 1
+    assert 'selected platform must be "feishu"' in capsys.readouterr().err
+
+    feishu_config = tmp_path / "feishu.toml"
+    feishu_config.write_text('platform = "feishu"\n', encoding="utf-8")
+    assert main_module.main(["--config", str(feishu_config), "qq", "status"]) == 1
+    assert 'selected platform must be "qq"' in capsys.readouterr().err
+    assert not called
+
+
+def test_login_offers_to_switch_selected_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu import auth as feishu_auth
+
+    calls: list[Path] = []
+
+    def fake_login(
+        _config: FeishuConfig,
+        *,
+        replace: bool = False,
+        config_path: Path | None = None,
+    ) -> int:
+        assert replace is False
+        assert config_path is not None
+        calls.append(config_path)
+        return 0
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "qq"\n', encoding="utf-8")
+    monkeypatch.setattr(feishu_auth, "run_login", fake_login)
+    monkeypatch.setattr("builtins.input", lambda: "yes")
+
+    assert main_module.main(["--config", str(config_path), "feishu", "login"]) == 0
+    assert load_config(config_path).platform == "feishu"
+    assert calls == [config_path]
+
+
+def test_declined_login_platform_switch_preserves_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from kimi_bridge.platforms.qq import auth as qq_auth
+
+    def forbidden_login(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("login should not run after declining the switch")
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('platform = "feishu"\n', encoding="utf-8")
+    monkeypatch.setattr(qq_auth, "run_login", forbidden_login)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+
+    assert main_module.main(["--config", str(config_path), "qq", "login"]) == 1
+    assert load_config(config_path).platform == "feishu"
+    assert 'selected platform must be "qq"' in capsys.readouterr().err
 
 
 def test_wechat_controls_require_selected_wechat_config(

@@ -119,7 +119,10 @@ def diagnose(
         )
         checks.append(_check_selected_adapter(config))
         if config.platform == "feishu":
+            checks.extend(_check_feishu_storage(config, platform_name))
             _check_ffmpeg(runner, which, checks)
+        elif config.platform == "qq":
+            checks.extend(_check_qq_storage(config, platform_name))
         elif config.platform == "wechat":
             checks.append(_check_wechat_media_dependency())
             checks.extend(_check_wechat_storage(config, platform_name))
@@ -227,10 +230,20 @@ def _check_config_permissions(path: Path, platform_name: str) -> DoctorCheck:
 
 def _check_selected_adapter(config: Config) -> DoctorCheck:
     if config.platform == "feishu":
-        credentials_present = bool(config.feishu.app_id and config.feishu.app_secret)
+        from .platforms.feishu.storage import FeishuStorage
+
+        credentials_present = bool(
+            FeishuStorage(config.feishu.storage_path).has_credential()
+            or (config.feishu.app_id and config.feishu.app_secret)
+        )
         allowlist_size = len(config.feishu.allowed_users)
     elif config.platform == "qq":
-        credentials_present = bool(config.qq.app_id and config.qq.app_secret)
+        from .platforms.qq.storage import QQStorage
+
+        credentials_present = bool(
+            QQStorage(config.qq.storage_path).has_credential()
+            or (config.qq.app_id and config.qq.app_secret)
+        )
         allowlist_size = len(config.qq.allowed_users)
     elif config.platform == "wechat":
         from .platforms.wechat import WeChatStorage
@@ -259,6 +272,140 @@ def _check_selected_adapter(config: Config) -> DoctorCheck:
         f"{allowlist_size} allowlisted user(s)"
     )
     return DoctorCheck("adapter", CheckStatus.OK, detail)
+
+
+def _check_feishu_storage(
+    config: Config, platform_name: str
+) -> tuple[DoctorCheck, DoctorCheck]:
+    from .platforms.feishu.storage import FeishuStorage, redact_app_id
+
+    storage = FeishuStorage(config.feishu.storage_path)
+    inspection = storage.inspect(platform_name=platform_name)
+    fallback_available = bool(config.feishu.app_id and config.feishu.app_secret)
+    if inspection.directory_error is not None:
+        storage_check = DoctorCheck(
+            "feishu storage", CheckStatus.ERROR, inspection.directory_error
+        )
+    elif inspection.directory_exists:
+        storage_check = DoctorCheck(
+            "feishu storage",
+            CheckStatus.OK,
+            f"private local directory is usable: {storage.path}",
+        )
+    else:
+        target = _check_directory_target("feishu storage", storage.path)
+        detail = target.detail
+        if fallback_available:
+            detail += "; not created, complete TOML fallback is available"
+        storage_check = DoctorCheck("feishu storage", target.status, detail)
+
+    if inspection.directory_error is not None:
+        authorization_check = DoctorCheck(
+            "feishu authorization",
+            CheckStatus.ERROR,
+            "managed Feishu storage is unavailable; complete TOML fallback was "
+            "not used",
+        )
+    elif inspection.credential_error is not None:
+        authorization_check = DoctorCheck(
+            "feishu authorization",
+            CheckStatus.ERROR,
+            inspection.credential_error,
+        )
+    elif inspection.credential is None:
+        if fallback_available:
+            authorization_check = DoctorCheck(
+                "feishu authorization",
+                CheckStatus.OK,
+                "managed authorization not created; complete TOML fallback is "
+                f"available for {redact_app_id(config.feishu.app_id)}; network "
+                "status was not checked",
+            )
+        else:
+            authorization_check = DoctorCheck(
+                "feishu authorization",
+                CheckStatus.ERROR,
+                "not authorized locally; run kimi-bridge feishu login or "
+                "configure a complete [feishu] app_id/app_secret",
+            )
+    else:
+        credential = inspection.credential
+        authorization_check = DoctorCheck(
+            "feishu authorization",
+            CheckStatus.OK,
+            "stored authorization is locally valid for application "
+            f"{redact_app_id(credential.app_id)}; tenant "
+            f"{credential.tenant_brand}; API domain {credential.api_domain}; "
+            f"authorized at {credential.authorized_at}; network status was not "
+            "checked",
+        )
+    return storage_check, authorization_check
+
+
+def _check_qq_storage(
+    config: Config, platform_name: str
+) -> tuple[DoctorCheck, DoctorCheck]:
+    from .platforms.qq.storage import QQStorage, redact_app_id
+
+    storage = QQStorage(config.qq.storage_path)
+    inspection = storage.inspect(platform_name=platform_name)
+    fallback_available = bool(config.qq.app_id and config.qq.app_secret)
+    if inspection.directory_error is not None:
+        storage_check = DoctorCheck(
+            "qq storage", CheckStatus.ERROR, inspection.directory_error
+        )
+    elif inspection.directory_exists:
+        storage_check = DoctorCheck(
+            "qq storage",
+            CheckStatus.OK,
+            f"private local directory is usable: {storage.path}",
+        )
+    else:
+        target = _check_directory_target("qq storage", storage.path)
+        detail = target.detail
+        if fallback_available:
+            detail += "; not created, complete TOML fallback is available"
+        storage_check = DoctorCheck("qq storage", target.status, detail)
+
+    if inspection.directory_error is not None:
+        authorization_check = DoctorCheck(
+            "qq authorization",
+            CheckStatus.ERROR,
+            "managed QQ storage is unavailable; complete TOML fallback was not "
+            "used",
+        )
+    elif inspection.credential_error is not None:
+        authorization_check = DoctorCheck(
+            "qq authorization",
+            CheckStatus.ERROR,
+            inspection.credential_error,
+        )
+    elif inspection.credential is None:
+        if fallback_available:
+            authorization_check = DoctorCheck(
+                "qq authorization",
+                CheckStatus.OK,
+                "managed authorization not created; complete TOML fallback is "
+                f"available for {redact_app_id(config.qq.app_id)}; network status "
+                "was not checked",
+            )
+        else:
+            authorization_check = DoctorCheck(
+                "qq authorization",
+                CheckStatus.ERROR,
+                "not authorized locally; run kimi-bridge qq login or configure "
+                "a complete [qq] app_id/app_secret",
+            )
+    else:
+        credential = inspection.credential
+        authorization_check = DoctorCheck(
+            "qq authorization",
+            CheckStatus.OK,
+            "stored authorization is locally valid for bot "
+            f"{redact_app_id(credential.app_id)}; authorized at "
+            f"{credential.authorized_at}; network status was not checked",
+        )
+    return storage_check, authorization_check
 
 
 def _check_wechat_storage(

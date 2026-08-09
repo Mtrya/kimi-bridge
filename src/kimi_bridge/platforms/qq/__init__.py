@@ -56,8 +56,8 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-from ..interactions import InteractionOutcome, InteractionPrompt
-from .base import (
+from ...interactions import InteractionOutcome, InteractionPrompt
+from ..base import (
     ActorRef,
     ConversationRef,
     InboundAudio,

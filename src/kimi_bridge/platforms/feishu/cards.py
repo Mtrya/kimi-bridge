@@ -6,7 +6,7 @@ import json
 from difflib import unified_diff
 from typing import Any
 
-from ..interactions import (
+from ...interactions import (
     ApprovalPrompt,
     ApprovalResponse,
     InteractionOutcome,

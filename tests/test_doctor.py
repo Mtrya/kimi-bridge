@@ -274,6 +274,210 @@ def test_valid_qq_config_is_secret_safe(
     assert ("/fake/ffmpeg", "-version") not in runner.calls
 
 
+def test_valid_managed_feishu_reports_redacted_local_metadata(
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu.storage import (
+        FeishuCredential,
+        FeishuStorage,
+        LARK_API_DOMAIN,
+    )
+
+    storage_path = tmp_path / "feishu-private"
+    secret = "DO_NOT_PRINT_MANAGED_FEISHU_SECRET"
+    FeishuStorage(storage_path).save_credential(
+        FeishuCredential(
+            app_id="managed-feishu-app",
+            app_secret=secret,
+            api_domain=LARK_API_DOMAIN,
+            tenant_brand="lark",
+            authorized_at="2026-08-08T12:00:00+00:00",
+        )
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'platform = "feishu"',
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                "[feishu]",
+                'allowed_users = ["ou_one"]',
+                f"storage_path = '{storage_path}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+    rendered = report.render()
+
+    assert report.exit_code == 0
+    assert _status(report, "feishu storage") is CheckStatus.OK
+    assert _status(report, "feishu authorization") is CheckStatus.OK
+    assert "managed-feishu-app" not in rendered
+    assert "mana…-app" in _detail(report, "feishu authorization")
+    assert "lark" in _detail(report, "feishu authorization")
+    assert LARK_API_DOMAIN in _detail(report, "feishu authorization")
+    assert secret not in rendered
+
+
+def test_valid_managed_qq_reports_redacted_local_metadata(tmp_path: Path) -> None:
+    from kimi_bridge.platforms.qq.storage import QQManagedCredential, QQStorage
+
+    storage_path = tmp_path / "qq-private"
+    secret = "DO_NOT_PRINT_MANAGED_QQ_SECRET"
+    QQStorage(storage_path).save_credential(
+        QQManagedCredential(
+            app_id="managed-qq-app",
+            app_secret=secret,
+            authorized_at="2026-08-08T12:00:00+00:00",
+        )
+    )
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'platform = "qq"',
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                "[qq]",
+                'allowed_users = ["OPENID-USER"]',
+                f"storage_path = '{storage_path}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+    rendered = report.render()
+
+    assert report.exit_code == 0
+    assert _status(report, "qq storage") is CheckStatus.OK
+    assert _status(report, "qq authorization") is CheckStatus.OK
+    assert "managed-qq-app" not in rendered
+    assert "OPENID-USER" not in rendered
+    assert secret not in rendered
+
+
+@pytest.mark.parametrize(
+    ("platform", "section", "storage_name", "app_id", "app_secret", "auth_name"),
+    [
+        ("feishu", "feishu", "feishu-private", "toml-feishu", "secret-feishu", "feishu authorization"),
+        ("qq", "qq", "qq-private", "toml-qq", "secret-qq", "qq authorization"),
+    ],
+)
+def test_missing_managed_storage_uses_complete_toml_fallback(
+    tmp_path: Path,
+    platform: str,
+    section: str,
+    storage_name: str,
+    app_id: str,
+    app_secret: str,
+    auth_name: str,
+) -> None:
+    storage_path = tmp_path / storage_name
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f'platform = "{platform}"',
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                f"[{section}]",
+                f'app_id = "{app_id}"',
+                f'app_secret = "{app_secret}"',
+                'allowed_users = ["allowlisted-user"]',
+                f"storage_path = '{storage_path}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 0
+    assert _status(report, f"{platform} storage") is CheckStatus.OK
+    assert _status(report, auth_name) is CheckStatus.OK
+    assert "not created" in _detail(report, f"{platform} storage")
+    assert "complete TOML fallback" in _detail(report, auth_name)
+    assert app_secret not in report.render()
+
+
+def test_invalid_managed_qq_authorization_is_blocking_and_no_fallback(
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.qq.storage import QQStorage
+
+    storage_path = tmp_path / "qq-private"
+    storage_path.mkdir()
+    credential_path = storage_path / "credentials.json"
+    credential_path.write_text("{not-json", encoding="utf-8")
+    credential_path.chmod(0o600)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'platform = "qq"',
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                "[qq]",
+                'app_id = "toml-qq"',
+                'app_secret = "DO_NOT_PRINT_QQ_FALLBACK_SECRET"',
+                'allowed_users = ["OPENID-USER"]',
+                f"storage_path = '{storage_path}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+    assert QQStorage(storage_path).has_credential()
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 1
+    assert _status(report, "qq authorization") is CheckStatus.ERROR
+    assert "DO_NOT_PRINT_QQ_FALLBACK_SECRET" not in report.render()
+
+
+@requires_posix_modes
+def test_feishu_managed_storage_permission_error_is_blocking(
+    tmp_path: Path,
+) -> None:
+    from kimi_bridge.platforms.feishu.storage import FeishuCredential, FeishuStorage
+
+    storage_path = tmp_path / "feishu-private"
+    FeishuStorage(storage_path).save_credential(
+        FeishuCredential(
+            app_id="managed-feishu-app",
+            app_secret="DO_NOT_PRINT_PERMISSION_SECRET",
+            authorized_at="2026-08-08T12:00:00+00:00",
+        )
+    )
+    storage_path.chmod(0o755)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                'platform = "feishu"',
+                f"default_workspace = '{tmp_path / 'workspace'}'",
+                "[feishu]",
+                'allowed_users = ["ou_one"]',
+                f"storage_path = '{storage_path}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+    report = _diagnose(config_path, tmp_path / "state.json", _runner())
+
+    assert report.exit_code == 1
+    assert _status(report, "feishu storage") is CheckStatus.ERROR
+    assert _status(report, "feishu authorization") is CheckStatus.ERROR
+    assert "DO_NOT_PRINT_PERMISSION_SECRET" not in report.render()
+    storage_path.chmod(0o700)
+
+
 def test_valid_wechat_config_checks_only_local_authorization(
     tmp_path: Path,
 ) -> None:

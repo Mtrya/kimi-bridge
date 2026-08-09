@@ -4,83 +4,114 @@
 
 Control a local [Kimi Code](https://github.com/MoonshotAI/kimi-code) agent from an instant-messaging conversation.
 
-kimi-bridge supervises Kimi Code's local server, keeps chat-to-session bindings across restarts, renders model replies according to each platform's capabilities, and brings steering, files, session controls, and supported interactive surfaces into your chat client.
+kimi-bridge connects the local Kimi Code server to one chat platform, preserves chat-to-session bindings, and provides streaming replies, files, session controls, and interactive features according to each platform's capabilities.
 
 ## Support
 
-| Surface | Status |
+| Platform / capability | Status |
 | --- | --- |
-| Feishu, WeChat, and QQ direct messages | Supported |
+| Feishu, QQ, and WeChat private chats | Supported |
 | Telegram private chats | Experimental |
 | Linux, macOS, and Windows | Supported |
 | Voice messages | Supported on Feishu, QQ, and WeChat |
 
-Only one adapter runs in each bridge process. Feishu uses the official `lark-oapi` WebSocket client. Telegram, QQ, and WeChat use small handwritten `httpx`/`websockets` transports without a platform SDK dependency.
+Each bridge process selects exactly one platform adapter. Feishu, QQ, and WeChat all support local QR onboarding, but the three QR flows have different meanings; see [QR onboarding](docs/QR_ONBOARDING.md). WeChat supports QR-authorized private-chat bots but forces `auto` mode and has no approvals, questions, separate thinking stream, groups, or proactive delivery; it accepts inbound image, voice, file, and video messages and sends outbound images, videos, and files.
 
-WeChat support is private-chat and QR-authorized, and was live-validated on 2026-08-08 against Tencent's openclaw-weixin tag `v2.4.6`. It forces `auto`, sends immutable replies, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file; outbound audio is a generic downloadable file rather than a native voice message. One bot authorization must have exactly one poller.
+## Quick start
+
+First verify that `kimi` is the official Kimi Code executable, not the older Python `kimi-cli` product that uses the same command name:
+
+```bash
+kimi --version
+kimi --help
+kimi doctor config
+kimi -p "Reply with OK only."
+```
+
+After Kimi Code completes a real reply, install the bridge. Do not run `doctor` immediately after installation: first follow the “Choose one platform and prepare private configuration” section of [INSTALL.en_US.md](INSTALL.en_US.md) to create `~/.kimi-bridge/config.toml` and select one platform.
+
+```bash
+uv tool install kimi-bridge
+kimi-bridge --version
+```
+
+Complete setup for the selected platform before running diagnostics:
+
+- Feishu, QQ, or WeChat: start with the platform's bootstrap config, run its `login` command, approve any guided platform settings, then complete the remaining platform-side setup and check or supplement `allowed_users`;
+- Telegram: follow the manual Bot API flow in the installation guide and set the bot token and numeric user ID under `[telegram]`.
+
+Then run the local diagnostic and start the bridge in the foreground:
+
+```bash
+kimi-bridge doctor
+kimi-bridge
+```
+
+One process runs one platform. For the first start, complete a real message round trip (send `/status` and a normal prompt) to confirm platform permissions, event delivery, allowlisting, and the reply path before configuring persistent operation.
+
+### QR control-command index
+
+The first three platforms have QR control commands, but these are three different authorization flows, not three forms of the same login:
+
+```bash
+kimi-bridge feishu login       # Feishu/Lark application registration QR
+kimi-bridge feishu status      # Inspect local managed credential storage
+kimi-bridge feishu logout      # Remove adapter-owned local managed files
+
+kimi-bridge qq login           # QQ official-bot credential binding QR
+kimi-bridge qq status          # Inspect local managed credential storage
+kimi-bridge qq logout          # Remove adapter-owned local managed files
+
+kimi-bridge wechat login       # WeChat iLink bot authorization QR
+kimi-bridge wechat status      # Inspect local managed credential storage
+kimi-bridge wechat logout      # Remove adapter-owned local managed files
+```
+
+All three QR login commands support `--replace`. Their `status` commands inspect only local managed credential storage and do not verify the network; `logout` removes only adapter-owned managed files and does not remove a platform-side bot binding. These commands handle authorization only; they do not start Kimi Code or message polling. Telegram has no such command group; configure its Bot API token and `allowed_users` manually.
+
+The default managed credential paths are:
+
+- Feishu: `~/.kimi-bridge/feishu/credentials.json`
+- QQ: `~/.kimi-bridge/qq/credentials.json`
+- WeChat: `~/.kimi-bridge/wechat/credentials.json`
+
+Set `storage_path` in the corresponding `[feishu]`, `[qq]`, or `[wechat]` table to relocate it. Feishu and QQ prefer a valid managed credential; a complete TOML `app_id` plus `app_secret` pair is used only when the managed credential file is absent. A present but damaged managed file is an error and never silently falls back. WeChat QR credentials are never written to TOML.
+
+For the complete human walkthrough, read [Install and operate](INSTALL.en_US.md). For QR details, read [QR onboarding](docs/QR_ONBOARDING.md). The configuration, chat-command, and architecture references are currently in English: [Configuration](docs/CONFIGURATION.md), [Commands](docs/COMMANDS.md), and [Architecture](docs/ARCHITECTURE.md).
 
 ## Features
 
 - Durable Kimi session creation, listing, switching, renaming, inspection, compaction, and undo.
-- Edit-in-place answer streaming, router-side chunking, and optional separate thinking output.
-- Interactive approvals and questions on adapters that can present them, with timeout handling and stale-action protection.
-- Busy-turn prompt steering, cancellation, permission modes, model/effort/plan controls, goals, tasks, skills, and read-only MCP inspection.
-- Inbound images, videos, files, and transcribed voice messages plus workspace-contained outbound `/send`.
-- Private-chat allowlists, loopback-only Kimi server supervision, and a secret-safe non-starting doctor command.
-
-## Quick start
-
-The easiest path: open any CLI agent and say:
-```text
-Read https://github.com/Mtrya/kimi-bridge/blob/main/INSTALL_AI.md and help me configure kimi-bridge.
-```
-The agent interviews you and runs the setup end to end.
-
-Manual skeleton — requires authenticated [Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started) and [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-uv tool install 'kimi-bridge'     # install every adapter dependency
-# create ~/.kimi-bridge/config.toml for one adapter, chmod 600
-kimi-bridge doctor                # validate without starting anything
-kimi-bridge                       # run
-```
-
-Full walkthrough in [INSTALL.en_US.md](INSTALL.en_US.md); complete adapter examples in the [configuration reference](docs/CONFIGURATION.md).
+- Edit-in-place answer streaming, router-side chunking, and separate thinking output where the platform supports it.
+- Interactive approvals and questions on adapters that can present them.
+- Busy-turn prompt steering, cancellation, permission modes, model, effort, plan, goal, task, skill, and MCP controls.
+- Inbound images, videos, files, and transcribed voice messages, plus `/send` for outbound files.
+- Private-chat allowlists, loopback-only Kimi server supervision, and a local `doctor` diagnostic that starts no services.
 
 ## Commands
 
-Commands cover:
+Chat commands include:
 
 - sessions: `/new`, `/sessions`, `/switch`, `/status`, `/title`, `/usage`, `/compact`, `/undo`;
 - control: `/mode`, `/model`, `/effort`, `/plan`, `/goal`, `/stop`, `/restart-server`;
 - tasks and tools: `/tasks`, `/skills`, `/mcp`;
 - output: `/send`, `/render-thinking`.
 
-Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact grammar, busy-session behavior, and platform media semantics. Send `/<command> ?` for detailed in-chat usage, including sub-forms such as `/tasks show ?`.
+Use `/help` in chat or read the [command reference](docs/COMMANDS.md) for exact syntax and platform limits. Send `/<command> ?` for detailed in-chat usage.
 
 ## Architecture and security
 
 ```text
 Feishu, QQ, WeChat, or experimental Telegram
-              │
-              ▼
-       semantic chat router
-              │
-              ▼
-  supervised local `kimi web`
+                  │
+                  ▼
+             semantic chat router
+                  │
+                  ▼
+           supervised local `kimi web`
 ```
 
-The managed Kimi server binds to loopback with a generated bearer token, and chat access is restricted by the adapter's allowlist. kimi-bridge is designed for one trusted operator, not mutually untrusted tenants: a permitted Kimi agent can read, write, and execute with the host account's authority, so protect both the host and chat credentials. Component boundaries and the Kimi Code compatibility policy (`kimi-bridge compat`) live in [Architecture](docs/ARCHITECTURE.md).
-
-## Documentation
-
-- [Install and operate](INSTALL.en_US.md)
-- [Agent-driven setup](INSTALL_AI.md)
-- [Configure](docs/CONFIGURATION.md)
-- [Commands and interactions](docs/COMMANDS.md)
-- [Architecture and compatibility](docs/ARCHITECTURE.md)
-- [Upstream Kimi Code](https://moonshotai.github.io/kimi-code/en/guides/getting-started)
-- [Report an issue](https://github.com/Mtrya/kimi-bridge/issues)
+The managed Kimi server binds only to loopback and uses a generated bearer token; adapter allowlists restrict chat access. kimi-bridge is designed for one trusted operator. An authorized Kimi agent can read, write, and execute with the host account's authority, so protect the host, configuration files, and chat credentials. See [Architecture and compatibility](docs/ARCHITECTURE.md) for component boundaries and the compatibility command.
 
 ## Development
 
@@ -89,8 +120,6 @@ uv sync --dev
 uv run pytest -q
 uv run ruff check .
 ```
-
-Unit tests use fake Kimi, Feishu, Telegram, QQ, WeChat, WebSocket, state, and process boundaries; hosted checks use no credentials or inference.
 
 ## License
 
