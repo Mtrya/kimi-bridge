@@ -42,9 +42,9 @@ Model aliases and thinking efforts come from the live Kimi catalog. Plan usage a
 
 ## Terminal platform authorization commands
 
-These are terminal commands, not chat commands. They do not start Kimi Code or message polling. Every command loads the config first. A `login` offers to update a mismatched `platform` value and continue after confirmation; `status` and `logout` still require an exact match. Use `--config PATH` at the top level, on the platform command, or on the subcommand when the config is not at the default path.
+These are terminal commands, not chat commands. They do not start Kimi Code or message polling. Every command loads the config first. If the config's `platform` does not match the command platform, `login` offers to switch the setting after confirmation; `status` and `logout` require an exact match. Use `--config PATH` at the top level, on the platform command, or on the subcommand when the config is not at the default path.
 
-The three QR groups below are not three versions of the same “login”: Feishu registers an application, QQ binds an official bot credential, and WeChat authorizes an iLink bot. Telegram has no QR or terminal authorization command; configure its Bot API token and numeric user allowlist in TOML.
+The three QR groups below are not three versions of the same “login”: Feishu registers an application, QQ binds an official bot credential, and WeChat authorizes an iLink bot.
 
 | Platform | QR semantic | `login` | `login --replace` | `status` | `logout` |
 | --- | --- | --- | --- | --- | --- |
@@ -72,9 +72,9 @@ kimi-bridge wechat status
 kimi-bridge wechat logout
 ```
 
-Default managed credential files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`; each platform's `storage_path` can relocate its directory. Feishu and QQ use a complete TOML `[feishu]`/`[qq]` `app_id` + `app_secret` pair only when the managed file is absent. A present but invalid managed file is a startup error, not a reason to use TOML silently. WeChat credentials never go into TOML.
+Default managed credential files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`; each platform's `storage_path` can relocate its directory. Feishu and QQ use a complete TOML `[feishu]`/`[qq]` `app_id` + `app_secret` pair only when the managed file is absent. A present but invalid managed file is a startup error. WeChat credentials never go into TOML.
 
-After Feishu login, approve the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback on the confirmation page; then confirm bot capability and any remaining console settings and publish the app. When registration returns `user_info.open_id`, login merges it into `feishu.allowed_users`; review or remove that entry if finer control is needed. After QQ binding, a returned scanner `user_openid` is merged into `qq.allowed_users`; it is not a QQ number or nickname. If either QR flow returns no identity, configure its allowlist manually. After WeChat authorization, put the returned stable scanner identity into `wechat.allowed_users` manually. If the running WeChat adapter reports expired authorization, stop it and run `kimi-bridge wechat login --replace`; WeChat QR completion does not automatically add an allowlist entry.
+After Feishu login, approve the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback on the confirmation page; then confirm bot capability and any remaining console settings and publish the app. See [QR onboarding](QR_ONBOARDING.md) for how login updates `allowed_users`. After WeChat authorization, add the returned stable scanner identity to `wechat.allowed_users` manually. If the running WeChat adapter reports expired authorization, stop it and run `kimi-bridge wechat login --replace`.
 
 ## Busy-session matrix
 
@@ -100,13 +100,13 @@ Feishu renders approvals and questions as interactive cards. Telegram renders ap
 
 Answers stream through editable messages where the platform supports edits and are split at the platform text limit. Bridge-generated command, status, validation, and error replies are final messages.
 
-`/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. QQ and WeChat never offer a separate thinking stream. QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
+`/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
 
 ## Inbound and outbound media
 
 Feishu accepts text, native images and videos, generic files, and voice messages. QQ accepts C2C text and HTTPS attachments; only supported native image/video values take the native-media route. WeChat accepts private-chat text, images, voice, files, and video. Native image/video input depends on the selected model's `image_in`/`video_in` capability; otherwise the bridge saves the item under the workspace inbox. Generic files always use the workspace inbox. Voice messages are transcribed using the configured `[voice.asr]` endpoint first and the platform-native fallback when available.
 
-`/send <path>` can send one regular file contained by the bound workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and requires the latest inbound context token, so it is not proactive.
+`/send <path>` can send one regular file contained by the bound workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and cannot send it proactively.
 
 ## Current operating limits
 

@@ -40,22 +40,20 @@ The router does not construct Feishu cards, QQ message payloads, WeChat item pay
 `src/kimi_bridge/platforms/base.py` defines the semantic adapter protocol. Platform-native authentication, identity handling, events, uploads, callbacks, and rendering stay within the selected adapter package.
 
 - `src/kimi_bridge/platforms/feishu/` is the Feishu/Lark adapter package. Its `__init__.py` owns API and WebSocket transport, direct-message filtering, identity checks, Markdown messages and edits, uploads, native media, FFmpeg voice conversion, native speech recognition, and adapter integration. `auth.py` owns application-registration QR controls, `storage.py` owns the versioned managed credential directory, and `cards.py` owns interactive-card rendering and callback decoding.
-- `src/kimi_bridge/platforms/qq/` is the QQ official-bot adapter package. Its `__init__.py` owns REST/token transport, WebSocket gateway lifecycle, C2C filtering, app-scoped `user_openid` allowlisting, attachment handling, streaming, and native outbound media; `auth.py` owns QR credential binding and `storage.py` owns the versioned managed credential directory. QQ does not present interactive approvals or questions and therefore forces `auto`.
-- `src/kimi_bridge/platforms/wechat/` owns WeChat iLink QR authorization, private credential and receive-state storage, HTTP polling, sender allowlisting, cursor/context persistence, retry behavior, immutable text, typing, and encrypted CDN media. It supports private chat only, forces `auto`, has no group or proactive delivery, and allows one polling process per bot authorization.
+- `src/kimi_bridge/platforms/qq/` is the QQ official-bot adapter package. Its `__init__.py` owns REST/token transport, WebSocket gateway lifecycle, C2C filtering, app-scoped `user_openid` allowlisting, attachment handling, streaming, and native outbound media; `auth.py` owns QR credential binding and `storage.py` owns the versioned managed credential directory.
+- `src/kimi_bridge/platforms/wechat/` owns WeChat iLink QR authorization, private credential and receive-state storage, HTTP polling, sender allowlisting, cursor/context persistence, retry behavior, immutable text, typing, and encrypted CDN media. It supports private chat only and has no proactive delivery.
 - `src/kimi_bridge/platforms/telegram.py` owns the experimental Telegram Bot API transport, private numeric identity checks, long polling, media transfers, and interaction UI.
 
 Adapters separately expose whether text can be edited and whether interactive prompts are supported. For QQ and WeChat, the router emits immutable or platform-specific streaming messages and keeps permission mode fixed at `auto`; no adapter creates a generic UI schema.
 
 ## Authorization and storage lifecycle
 
-Terminal controls are separate from runtime startup. They apply only to the Feishu, QQ, and WeChat QR flows; Telegram is configured manually in TOML:
+Terminal controls are separate from runtime startup. They apply only to the Feishu, QQ, and WeChat QR flows; Telegram is configured manually in TOML. The platform match/switch policy is in [Commands](COMMANDS.md).
 
 ```text
 kimi-bridge feishu|qq|wechat login|status|logout
                          │
-                         ├─ load config; `login` may offer a platform switch
                          ├─ operate only the selected adapter's control/storage path
-                         ├─ `status`/`logout` require matching `platform`
                          └─ never start Kimi Code or message polling
 ```
 
@@ -81,7 +79,7 @@ This section records the authoritative credential flows behind the QR controls. 
 
 - Flow: `kimi-bridge feishu login` runs `lark_oapi.aregister_app(..., addons=...)` without `create_only=True`, so the confirmation page can create or select an application. The fixed add-ons pre-fill the bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. The flow stores the returned application `client_id`/`client_secret` plus tenant brand, API domain, and optional operator `open_id` metadata. It is not a user OAuth flow, so no user token is stored.
 - Token type: application-level long-lived credentials. The bridge still acts as the application, and `lark-oapi` exchanges them for `tenant_access_token` values server-side.
-- Scopes: the operator must approve the pre-filled application settings on the confirmation page. Bot capability, publication, and target-user availability remain manual platform steps; when registration returns `user_info.open_id`, QR onboarding merges it into `feishu.allowed_users`, which can be edited afterward.
+- Scopes: the operator must approve the pre-filled application settings on the confirmation page. Bot capability, publication, and target-user availability remain manual platform steps; when registration returns `user_info.open_id`, QR onboarding merges it into `feishu.allowed_users`.
 - Refresh: application credentials have no expiry and no refresh token (none is needed without user OAuth).
 - Transport: unchanged REST + WebSocket long connection. Feishu tenants use `https://open.feishu.cn` and Lark tenants `https://open.larksuite.com`; the managed record preserves the returned domain.
 
@@ -101,7 +99,7 @@ This section records the authoritative credential flows behind the QR controls. 
 
 The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, and then starts that adapter. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path`; Kimi owns its own sessions and model/profile state.
 
-Always complete a real allowlisted `/status` and normal-prompt message round trip in the foreground before creating a persistent service. Linux may use a systemd user unit; macOS may use a user `launchd` agent; Windows may use a current-user Task Scheduler task. `systemd` is a Linux mechanism only, and any service definition must reference local paths without embedding secrets.
+Always complete an allowlisted `/status` and normal-prompt message round trip in the foreground before creating a persistent service. Linux may use a systemd user unit; macOS may use a user `launchd` agent; Windows may use a current-user Task Scheduler task. Any service definition must reference local paths without embedding secrets.
 
 ## Security model
 

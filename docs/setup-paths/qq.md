@@ -36,13 +36,13 @@ allowed_users = []
 kimi-bridge qq login
 ```
 
-The command does not start Kimi Code or message polling. It creates a short-lived official bind task, prints the QQ authorization URL, and waits for confirmation.
+It creates a short-lived official bind task, prints the QQ authorization URL, and waits for confirmation.
 
 3. Have the user scan and approve the bot bind. The completed result provides `bot_appid` and encrypted `bot_encrypt_secret`; kimi-bridge decrypts the AppSecret locally and stores only the final managed credential at `~/.kimi-bridge/qq/credentials.json` or the configured `storage_path`. The temporary AES key, task/QR URL, and encrypted blob are not persisted.
 
-4. If the command returns scanner `user_openid`, it automatically merges that exact app-scoped value into `qq.allowed_users` while preserving existing entries. It is not a QQ number, nickname, or display name. Review or remove the generated entry in the TOML if you want finer access control. If no identity is returned, configure the allowlist manually.
+4. When QQ returns the scanner `user_openid`, the command adds it to `qq.allowed_users`. It is not a QQ number, nickname, or display name. Review or remove the generated entry if you want finer access control. If no identity is returned, configure the allowlist manually.
 
-5. Confirm current QQ platform prerequisites, including bot availability, sandbox tester access or production status as applicable, and the absence of another gateway consumer. QR completion is not proof that all event/gateway permissions or the message path are ready.
+5. Confirm current QQ platform prerequisites — bot availability, sandbox tester access or production status as applicable, and the absence of another gateway consumer. QR completion does not establish sandbox tester access, production review, event Intents, or a working message path.
 
 6. Run:
 
@@ -51,11 +51,11 @@ kimi-bridge qq status
 kimi-bridge doctor
 ```
 
-`status` checks only local storage. Resolve every local error before startup.
+Resolve every local error before startup.
 
 7. Start `kimi-bridge` in the foreground. From the real allowlisted `user_openid`, send `/status`, then a normal prompt. Confirm the C2C reply completes. Test only the media types needed by the installation, then stop cleanly or proceed to persistence.
 
-The runtime obtains an access token, discovers the QQ WebSocket gateway, identifies for C2C events, and continues to use its existing REST/token/WebSocket transport. The QR flow does not create a second transport.
+The runtime obtains an access token, discovers the QQ WebSocket gateway, and identifies for C2C events; the QR flow does not create a second transport.
 
 ## Manual TOML fallback
 
@@ -79,7 +79,7 @@ If the intended `user_openid` is not known, use a bounded foreground gateway obs
 
 - `kimi-bridge qq login --replace` keeps the old credential until a new bind succeeds.
 - `kimi-bridge qq status` inspects local storage and redacted metadata only; it does not call QQ.
-- `kimi-bridge qq logout` removes only adapter-owned managed files. It does not remotely reset the bot credential, and a TOML AppID/AppSecret pair remains available.
+- `kimi-bridge qq logout` removes only adapter-owned managed files; it does not remotely reset the bot credential, and a TOML AppID/AppSecret pair remains.
 
 ## Checkpoints and divergence
 
@@ -90,4 +90,4 @@ If the intended `user_openid` is not known, use a bounded foreground gateway obs
 - Rejected sender: use only the app-scoped `user_openid` from the event.
 - Callback/webhook controls do not repair this adapter's WebSocket receive path unless QQ returns a specific documented requirement.
 
-QQ forces `auto` and does not present approvals, questions, or separate thinking output. A successful local status or gateway connection is not completion; require the real foreground message round trip.
+QQ forces `auto` and does not present approvals, questions, or separate thinking output.

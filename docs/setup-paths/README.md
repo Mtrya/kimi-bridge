@@ -1,6 +1,6 @@
 # Verified setup paths
 
-These files are agent/automation-oriented operational paths that supplement [INSTALL_AI.md](../../INSTALL_AI.md). They preserve detect-before-ask, ownership, checkpoint, freshness, and safe-abort rules that should not be copied into ordinary human documentation.
+These files are agent/automation-oriented operational paths that supplement [INSTALL_AI.md](../../INSTALL_AI.md) and preserve detect-before-ask, ownership, checkpoint, freshness, and safe-abort rules.
 
 ## Available paths
 
@@ -11,7 +11,7 @@ Feishu's recommended QR application-registration path and its complete TOML fall
 
 ## Current control-plane facts
 
-All three supported QR controls load config first. `login` offers to switch a mismatched `platform` after confirmation; `status` and `logout` require an exact platform match:
+All three supported QR controls load config first:
 
 ```bash
 kimi-bridge feishu login|status|logout
@@ -19,9 +19,9 @@ kimi-bridge qq login|status|logout
 kimi-bridge wechat login|status|logout
 ```
 
-Every `login` supports `--replace`. These controls do not start Kimi Code or message polling. `status` is local-only and never proves that platform authorization or message delivery is active. `logout` removes only adapter-owned local files; it does not remotely delete a bot or binding. Feishu/QQ TOML fallback remains after logout.
+Every `login` supports `--replace`. `status` is local-only and never proves that platform authorization or message delivery is active. `logout` removes only adapter-owned local files; it does not remotely delete a bot or binding. Feishu/QQ TOML fallback remains after logout.
 
-The QR semantics are deliberately distinct:
+QR semantics per platform:
 
 - Feishu performs official application registration and stores application credentials plus the Feishu/Lark API domain. It is not user OAuth.
 - QQ performs official bot credential bootstrap and stores the final bot AppID/AppSecret after local decryption. It is not QQ user login or OAuth.

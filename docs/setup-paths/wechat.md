@@ -6,7 +6,7 @@
 | Last complete verification | `2026-08-08` |
 | `reverify_after` | `2026-11-06` |
 
-Read [INSTALL_AI.md](../../INSTALL_AI.md) and the [setup-path rules](README.md) before using this path. WeChat private-chat support is a supported path. One bot authorization can have only one polling process, but the config allowlist is an array and may authorize more than one stable private-chat identity.
+Read [INSTALL_AI.md](../../INSTALL_AI.md) and the [setup-path rules](README.md) before using this path. One bot authorization can have only one polling process; the allowlist is an array and may authorize more than one stable private-chat identity.
 
 ## Preconditions
 
@@ -39,11 +39,11 @@ WeChat credentials never belong in TOML.
 kimi-bridge wechat login
 ```
 
-The command starts neither Kimi Code nor message polling. If the config selects another platform, `login` offers to switch it after confirmation. It prints a short-lived authorization URL.
+It prints a short-lived authorization URL.
 
 3. Have the user open the URL in WeChat, scan and approve the iLink bot authorization, and enter a verification code only when the flow explicitly asks for one.
 
-4. On success, the command stores the managed credential at `~/.kimi-bridge/wechat/credentials.json` or the configured `storage_path` and prints a stable scanner identity. Copy that identity privately into `wechat.allowed_users`. Do not use a nickname, guessed account identifier, QQ-style identifier, or bot identity. Additional allowlist entries must be real stable identities, not fabricated placeholders.
+4. On success, the command stores the managed credential at `~/.kimi-bridge/wechat/credentials.json` or the configured `storage_path` and prints a stable scanner identity. Copy that identity privately into `wechat.allowed_users`. Do not use a nickname, guessed account identifier, QQ-style identifier, or bot identity; additional entries must be real stable identities.
 
 5. Run:
 
@@ -52,7 +52,7 @@ kimi-bridge wechat status
 kimi-bridge doctor
 ```
 
-`status` inspects local credential metadata and storage only. It performs no network check. `doctor` checks local config, storage, allowlist, paths, Kimi Code, and the encrypted-media dependency without starting runtime.
+`status` inspects local credential metadata and storage only, with no network check. `doctor` checks local config, storage, allowlist, paths, Kimi Code, and the encrypted-media dependency without starting runtime.
 
 6. Confirm that no other process polls the bot authorization, then start `kimi-bridge` in the foreground.
 
@@ -68,7 +68,7 @@ Native images and videos become Kimi media only when the selected model advertis
 
 - `kimi-bridge wechat login --replace` preserves the old local credential until a new authorization is confirmed. If WeChat reports the already-bound bot, the previous credential may be retained.
 - If runtime reports expired authorization, stop it and use `login --replace`; do not repeatedly restart the stale credential.
-- `kimi-bridge wechat status` remains local-only and cannot prove that the remote authorization is active.
+- `kimi-bridge wechat status` cannot prove that the remote authorization is active.
 - `kimi-bridge wechat logout` removes only adapter-owned `credentials.json` and receive-state files. It does not remotely delete the bot binding.
 - There is no TOML credential fallback for WeChat.
 

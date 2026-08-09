@@ -1,6 +1,6 @@
 # QR onboarding
 
-This page explains what each QR flow does, what command to run, what the person scanning the code is approving, and what still has to be configured afterward. A QR result is a credential bootstrap, not a complete bridge setup or a proof that messages can already travel end to end.
+A QR result is a credential bootstrap, not a complete bridge setup or proof that messages can already travel end to end.
 
 ## Before any QR flow
 
@@ -13,7 +13,7 @@ kimi doctor config
 kimi -p "Reply with OK only."
 ```
 
-Create a config whose `platform` names the platform you are onboarding. A bridge process runs one selected platform only. The terminal controls below do not start Kimi Code or message polling. A `login` command offers to switch the selected platform when it does not match; `status` and `logout` continue to refuse mismatched platforms. These controls cover the three QR platforms only; Telegram has no QR or terminal authorization command and is configured manually with a Bot API token and numeric user ID.
+Create a config whose `platform` names the platform you are onboarding; a bridge runs one selected platform only. The controls below do not start Kimi Code or message polling. A `login` command offers to switch the selected platform when it does not match; `status` and `logout` require an exact match. These controls cover the three QR platforms only; Telegram is configured manually with a Bot API token and numeric user ID.
 
 The three QR control groups are:
 
@@ -23,15 +23,15 @@ kimi-bridge qq     login|status|logout [--replace on login]
 kimi-bridge wechat login|status|logout [--replace on login]
 ```
 
-`status` performs a local inspection and does not verify the network. `logout` removes only files owned by the selected adapter. It does not remotely delete a platform bot or invalidate a platform-side binding. If a Feishu or QQ TOML fallback remains in `config.toml`, logout does not remove it.
+`status` performs a local inspection and does not verify the network. `logout` removes only files owned by the selected adapter; it does not remotely delete a platform bot or invalidate a platform-side binding.
 
 ## What the three QR flows mean
 
 | Platform | QR meaning | Successful local result | What QR does not do |
 | --- | --- | --- | --- |
-| Feishu/Lark | Official application registration or existing-application selection | `client_id`/`client_secret`, tenant brand/API domain, and when returned the operator `open_id` merged into `feishu.allowed_users` | It is not user OAuth; publication, target-user availability, and any desired allowlist edits still require follow-up |
-| QQ | Official bot credential bootstrap/bind | `bot_appid`, the AppSecret decrypted locally from `bot_encrypt_secret`, and when returned the scanner `user_openid` merged into `qq.allowed_users` | It is not QQ user login or OAuth; it does not establish every sandbox/review/event/message prerequisite |
-| WeChat | WeChat iLink bot authorization | A bot credential and a stable scanner identity stored locally | It does not write credentials to TOML, add an arbitrary user to the allowlist, or permit a second polling process |
+| Feishu/Lark | Official application registration or existing-application selection | `client_id`/`client_secret`, tenant brand/API domain, and the operator `open_id` when returned | Not user OAuth; publication and target-user availability require follow-up |
+| QQ | Official bot credential bootstrap/bind | `bot_appid`, the AppSecret decrypted locally from `bot_encrypt_secret`, and the scanner `user_openid` when returned | Not user login or OAuth; sandbox/review/event/message readiness stays manual |
+| WeChat | WeChat iLink bot authorization | A bot credential and a stable scanner identity stored locally | No TOML credentials; no automatic allowlist entry; one polling process |
 
 The default managed files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi-bridge/qq/credentials.json`, and `~/.kimi-bridge/wechat/credentials.json`. Set each platform's `storage_path` to relocate its directory. The files are adapter-owned and private.
 
@@ -39,7 +39,7 @@ The default managed files are `~/.kimi-bridge/feishu/credentials.json`, `~/.kimi
 
 ### What it is
 
-`kimi-bridge feishu login` starts the official Feishu/Lark application-registration flow. The person scanning the QR is approving registration of an application, not granting a user access token. The result supplies an application `client_id` and `client_secret`. The managed record also keeps whether the tenant is Feishu or Lark and the API domain required for that tenant.
+`kimi-bridge feishu login` starts the official Feishu/Lark application-registration flow. The person scanning the QR is approving registration of an application, not granting a user access token. The result supplies an application `client_id` and `client_secret`. The managed record also keeps the tenant brand and its API domain.
 
 ### Run it
 
@@ -59,17 +59,16 @@ Then run:
 kimi-bridge feishu login
 ```
 
-Open the short-lived URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. Scan with or approve in Feishu/Lark and confirm those requested settings. The managed credential is written only after the command completes successfully; without `--replace`, an existing credential is protected from overwrite.
+Open the short-lived URL printed by the command in a browser. The page lets the operator create or select an application and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. Approve the requested settings in Feishu/Lark. The managed credential is written only after the command completes successfully; without `--replace`, an existing credential is protected from overwrite.
 
 ### What still has to happen
 
-The registration confirmation applies the pre-filled bridge permissions, event subscription, and callback only after the operator approves them. The remaining platform-side steps are:
+The remaining platform-side steps are:
 
 - confirm bot capability and any console settings not represented by the registration add-ons;
-- publish an application version and make it available to the intended tenant/user;
-- review the generated `feishu.allowed_users` entry and edit or remove it if the registration operator should not be an authorized sender; obtain a different sender's `open_id` manually when needed.
+- publish an application version and make it available to the intended tenant/user.
 
-When the registration result includes `user_info.open_id`, QR completion adds that identity to `feishu.allowed_users`. If the result omits it, the command reports that the allowlist still needs manual configuration. QR completion does not publish the application.
+When registration returns the operator's `open_id`, the command adds it to `feishu.allowed_users`. Review the entry and edit it if a different sender should be authorized. If no identity is returned, add the `open_id` manually.
 
 Check and test:
 
@@ -85,9 +84,7 @@ The allowlisted user must send `/status` and a normal prompt while the bridge is
 
 ### What it is
 
-`kimi-bridge qq login` starts the official QQ bot bind flow. The completed result returns `bot_appid` and encrypted `bot_encrypt_secret`. The bridge decrypts the AppSecret locally and stores only the final managed credential. The per-flow AES key, task ID/QR URL, and encrypted secret blob are not persisted. Runtime continues to use the existing QQ REST, token, and WebSocket gateway transport.
-
-A QR scan is not QQ user login or OAuth. The flow may also return a scanner `user_openid`. That value is scoped to the bot application and must be treated as an app-specific identity: it is not a QQ number, nickname, or display name.
+`kimi-bridge qq login` starts the official QQ bot bind flow. The completed result returns `bot_appid` and an encrypted `bot_encrypt_secret`; kimi-bridge decrypts the AppSecret locally and stores only the final managed credential. The per-flow AES key, task ID/QR URL, and encrypted secret blob are not persisted. A QR scan is not QQ user login or OAuth.
 
 ### Run it
 
@@ -107,7 +104,7 @@ Run:
 kimi-bridge qq login
 ```
 
-Open the printed URL, scan it, and approve the official bot bind. When QQ returns a scanner `user_openid`, the command merges that exact app-scoped value into `qq.allowed_users` for you. Existing entries are preserved. Review or edit the generated TOML entry if you want finer access control:
+Open the printed URL, scan it, and approve the official bot bind. When QQ returns the scanner `user_openid`, the command adds it to `qq.allowed_users`. Review or edit the generated entry if you want finer access control:
 
 ```toml
 [qq]
@@ -115,9 +112,9 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = ["user_openid_returned_by_the_flow"]
 ```
 
-Never replace it with a QQ number or a nickname. If the flow does not return an identity, discover the app-scoped `user_openid` through the normal QQ message/allowlist procedure before starting production use.
+Never replace it with a QQ number or nickname — the value is app-scoped to the bot application. If no identity is returned, discover the `user_openid` through the normal QQ message/allowlist procedure before starting production use.
 
-QR completion does not by itself prove sandbox tester access, production review, authorization for the required event Intents, gateway readiness, or a complete message path. Confirm the current QQ platform requirements separately and do not share the bot with another polling process.
+QR completion does not establish sandbox tester access, production review, event Intents, or a working message path — confirm those separately.
 
 Check and test:
 
@@ -133,9 +130,9 @@ The allowlisted user must send `/status` and a normal C2C prompt. QQ is always `
 
 ### What it is
 
-`kimi-bridge wechat login` starts WeChat's iLink bot authorization flow. The person scanning the QR authorizes a bot for private-chat use. This is supported onboarding, not a user OAuth flow. The credential is stored in adapter-owned local storage, never in TOML. The result also supplies a stable scanner identity for the bridge allowlist.
+`kimi-bridge wechat login` starts WeChat's iLink bot authorization flow. The person scanning the QR authorizes a bot for private-chat use. It is supported onboarding, not user OAuth. The credential is stored in adapter-owned local storage, never in TOML. The result also supplies a stable scanner identity for the bridge allowlist.
 
-One bot authorization can be used by only one polling process. The human WeChat account that scans the QR does not automatically grant access to every account; the bridge still requires manual `wechat.allowed_users` entries.
+One bot authorization can be used by only one polling process. The scan authorizes the bot, not an account; `wechat.allowed_users` entries stay manual.
 
 ### Run it
 
@@ -163,7 +160,7 @@ storage_path = "~/.kimi-bridge/wechat"
 allowed_users = ["stable_scanner_identity_returned_by_login"]
 ```
 
-Do not use a nickname, QQ-style identifier, guessed account value, or bot identity. The credential is saved at `~/.kimi-bridge/wechat/credentials.json` by default. It is not written to TOML.
+Do not use a nickname, QQ-style identifier, guessed account value, or bot identity.
 
 Check and test:
 
@@ -173,7 +170,7 @@ kimi-bridge doctor
 kimi-bridge
 ```
 
-`status` checks only local authorization metadata and storage hygiene. A real allowlisted `/status` message and a normal prompt are required to verify the remote authorization and message path. WeChat supports private chats, inbound images/voice/files/videos, and outbound images/videos/files. It forces `auto`, has immutable replies, and does not support approvals, questions, separate thinking output, groups, proactive delivery, or native outbound voice messages.
+A real allowlisted `/status` message and a normal prompt verify the remote authorization and message path. WeChat supports private chats, inbound images/voice/files/videos, and outbound images/videos/files, forces `auto`, and has immutable replies; it has no approvals, questions, separate thinking output, groups, proactive delivery, or native outbound voice.
 
 ## Managed credentials, fallback, replacement, and logout
 
@@ -193,7 +190,7 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = ["<real QQ user_openid>"]
 ```
 
-The priority is simple: a valid managed file wins; if no managed file exists, a complete TOML pair is used; if a managed file exists but is bad, startup fails instead of silently falling back. Feishu managed credentials preserve the returned Feishu/Lark API domain. WeChat has no TOML credential fallback.
+A valid managed file wins; without one, a complete TOML pair is used; a present but invalid managed file fails startup instead of silently falling back. Feishu managed credentials preserve the returned Feishu/Lark API domain. WeChat has no TOML fallback.
 
 To replace an existing managed credential:
 
@@ -211,8 +208,8 @@ kimi-bridge qq logout
 kimi-bridge wechat logout
 ```
 
-Logout does not remove a remote bot binding, and Feishu/QQ TOML fallback values remain in `config.toml`.
+Logout leaves Feishu/QQ TOML fallback values in `config.toml`.
 
 ## After QR onboarding
 
-Run `status`, then `kimi-bridge doctor`, then start the bridge in the foreground. `doctor` is a bridge-local diagnostic; it does not prove platform permissions, event delivery, or message round trips. Once `/status` and a normal prompt have completed successfully, configure Linux systemd, macOS launchd, or Windows Task Scheduler as appropriate. Systemd is a Linux mechanism only.
+Run `status`, then `kimi-bridge doctor`, then start the bridge in the foreground. `doctor` is bridge-local and does not prove platform permissions or message delivery. After the round trip succeeds, configure persistence: Linux systemd, macOS launchd, or Windows Task Scheduler.

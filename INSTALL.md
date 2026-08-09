@@ -74,7 +74,7 @@ Windows 的 `doctor` 不执行 POSIX mode 检查，但仍会检查路径是否�
 
 前三个平台提供 QR 控制命令，但三种 QR 不是同一种“登录”：它们分别完成 Feishu/Lark 应用注册、QQ 官方机器人凭据绑定和 WeChat iLink 机器人授权。Telegram 不提供本项目的 QR 控制命令，使用手工 Bot API 配置。
 
-所有 QR 控制命令都只操作对应平台的授权控制面：不会启动 Kimi Code，也不会开始消息轮询。`login` 可连接平台授权服务并等待扫码；如果配置选择了其他平台，`login` 会在确认后提供切换设置；`status` 只检查本地文件，不做网络验证；`logout` 只删除适配器拥有的托管文件，且 `status` 和 `logout` 要求配置中的 `platform` 与命令平台一致。
+所有 QR 控制命令都只操作对应平台的授权控制面：不会启动 Kimi Code，也不会开始消息轮询。`status` 只检查本地文件，不做网络验证；`logout` 只删除适配器拥有的托管文件。命令与配置平台不一致时的行为见[命令参考](docs/COMMANDS.md)。
 
 | 平台 | 命令 | 授权方式 |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ Windows 的 `doctor` 不执行 POSIX mode 检查，但仍会检查路径是否�
 
 ### 飞书：应用注册 QR
 
-先创建 bootstrap 配置并暂时保留空白白名单。飞书注册返回 `user_info.open_id` 或 QQ 绑定返回 `user_openid` 时，`login` 会在保留已有条目的前提下，把该身份合并到对应的 `allowed_users`；不要把扫码本身当作完整的平台权限或消息链路验证。
+先创建 bootstrap 配置，白名单暂时留空即可：注册返回操作人的 `open_id` 时，`login` 会自动把它填入 `allowed_users`。
 
 ```toml
 platform = "feishu"
@@ -107,16 +107,16 @@ kimi-bridge feishu login
 
 在浏览器中打开命令输出的 URL。页面允许创建新应用或选择已有应用，并预填 bridge 所需的 tenant 权限、`im.message.receive_v1` 事件和 `card.action.trigger` 回调。按页面提示使用飞书/Lark 扫码或确认这些设置。该流程返回应用 `client_id` 和 `client_secret`，bridge 将其安全保存为 `~/.kimi-bridge/feishu/credentials.json`（或 `storage_path` 指定的路径），并记录返回的 Feishu/Lark tenant 与 API domain。它不是用户 OAuth。
 
-操作人仍需确认机器人能力和 registration add-ons 未覆盖的控制台设置，发布应用版本并确认目标用户可用。注册结果包含 `user_info.open_id` 时，`login` 会把它合并到 `[feishu].allowed_users`；如果注册用户不应被授权，请检查或删除该条目。若未返回身份，则在同一应用和 tenant 上获取目标用户的 `open_id` 并手动加入。Feishu 语音消息仍需要 `ffmpeg` 在 PATH 中。
+操作人仍需确认机器人能力和 registration add-ons 未覆盖的控制台设置，发布应用版本并确认目标用户可用。注册返回的 `open_id` 已自动填入 `allowed_users`，确认它就是要授权的用户即可；没有返回时，在同一应用和 tenant 下获取目标用户的 `open_id` 手动填入。Feishu 语音消息仍需要 `ffmpeg` 在 PATH 中。
 
-完成上面步骤后，检查自动生成的数组，或把 bootstrap 配置中的空数组改成包含真实身份的配置（下面的值只是位置说明，不能原样复制）：
+完成后白名单应包含真实身份：
 
 ```toml
 [feishu]
 allowed_users = ["<同一应用和 tenant 下的真实 open_id>"]
 ```
 
-无论是否自动生成白名单条目，都不要因为 QR 流程成功就跳过应用发布或真实消息往返验证。
+QR 成功不代表应用已发布；发布完成后仍要做一次真实消息往返验证。
 
 检查并验证：
 
@@ -130,7 +130,7 @@ kimi-bridge
 
 ### QQ：官方机器人凭据绑定 QR
 
-准备配置。QR 登录期间可以暂时使用空白白名单；如果返回 `user_openid`，`login` 会自动写入对应条目，启动 bridge 前请检查白名单：
+准备配置。白名单暂时留空即可：绑定返回扫码用户的 `user_openid` 时，`login` 会自动写入：
 
 ```toml
 platform = "qq"
@@ -150,9 +150,9 @@ kimi-bridge qq login
 
 打开命令打印的 QQ 授权 URL，**扫码并批准官方机器人绑定**。成功后，bridge 取得 `bot_appid` 和加密的 `bot_encrypt_secret`，只在本地解密为 AppSecret，并保存最终凭据到 `~/.kimi-bridge/qq/credentials.json`（或自定义 `storage_path`）。临时密钥、绑定任务 ID、二维码 URL 和加密密文不会持久化；消息仍通过现有 QQ REST/token/WebSocket transport 运行。
 
-如果命令返回扫码用户的 `user_openid`，`login` 会在保留已有条目的前提下，把这个精确的应用级身份合并到 `[qq].allowed_users`。它不是 QQ 号、昵称或显示名；不要自行转换格式，也不要把它写成其他账号的身份。如果没有返回身份，再手动配置白名单。QR 成功不代表沙箱测试用户、生产审核、事件权限/Intents 或消息链路已确认；按 QQ 控制台当前要求完成这些步骤，并确保机器人没有被另一个轮询进程使用。
+绑定成功后，返回的 `user_openid` 会自动写入 `[qq].allowed_users`。它是该 bot 范围内的应用级身份，不是 QQ 号、昵称或显示名，不要转换格式；没有返回时手动配置。QR 成功不代表沙箱测试、生产审核、事件权限/Intents 或消息链路已就绪；按 QQ 控制台当前要求完成这些步骤，并确保机器人没有被另一个轮询进程使用。
 
-成功后，检查自动生成的数组，或把 bootstrap 配置中的空数组改成包含返回值的配置（下面的值只是位置说明，不能原样复制）：
+成功后白名单应包含返回的身份：
 
 ```toml
 [qq]

@@ -15,7 +15,7 @@ kimi-bridge 连接本地 Kimi Code 服务器与一个聊天平台，保持聊天
 | Linux、macOS 和 Windows | 已支持 |
 | 语音消息 | 飞书、QQ 和微信支持 |
 
-每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信支持二维码授权，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。
+每个 bridge 进程只选择一个平台适配器。飞书、QQ 和微信都支持本地 QR 授权，三种 QR 的含义不同，详见 [QR onboarding（英文）](docs/QR_ONBOARDING.md)。微信支持扫码授权的私聊机器人，但强制使用 `auto`，不提供审批、提问、独立思考流、群聊或主动推送；它支持接收图片、语音、文件和视频，以及发送图片、视频和文件。
 
 ## 快速开始
 
@@ -47,6 +47,8 @@ kimi-bridge doctor
 kimi-bridge
 ```
 
+一个进程只运行一个平台。首次启动请完成一次真实的消息往返（例如发送 `/status` 和一条普通提示），确认平台权限、事件投递、白名单和回复链路都正常，再配置常驻运行。
+
 ### 二维码登录
 
 前三个平台有 QR 控制命令；它们不是同一种“登录”：
@@ -65,7 +67,7 @@ kimi-bridge wechat status      # 检查本地托管凭据目录
 kimi-bridge wechat logout      # 删除适配器拥有的本地托管文件
 ```
 
-三组 QR 命令都支持登录时使用 `--replace`。对应的 `status` 只检查本地托管凭据目录，不做网络验证；`logout` 只删除适配器拥有的托管文件，不会删除平台侧机器人绑定。控制命令不会启动 Kimi Code，也不会开始消息轮询；`login` 检测到平台不一致时会在确认后提供切换，`status` 和 `logout` 仍要求平台严格一致。Telegram 没有本项目的 QR、`login`、`status` 或 `logout` 控制命令，必须手工配置 Bot API token 和 `allowed_users`。
+三组 QR 命令的 `login` 都支持 `--replace`。`status` 只检查本地托管凭据，不做网络验证；`logout` 只删除本地托管文件，不影响平台侧的机器人绑定。这些命令只操作授权，不会启动 Kimi Code 或消息轮询。Telegram 没有这组命令，必须手工配置 Bot API token 和 `allowed_users`。
 
 默认托管凭据目录为：
 

@@ -4,7 +4,7 @@
 
 Control a local [Kimi Code](https://github.com/MoonshotAI/kimi-code) agent from an instant-messaging conversation.
 
-kimi-bridge connects the local Kimi Code server to one chat platform, preserves chat-to-session bindings, and provides streaming replies, files, session controls, and supported interactive surfaces according to each platform's capabilities.
+kimi-bridge connects the local Kimi Code server to one chat platform, preserves chat-to-session bindings, and provides streaming replies, files, session controls, and interactive features according to each platform's capabilities.
 
 ## Support
 
@@ -15,7 +15,7 @@ kimi-bridge connects the local Kimi Code server to one chat platform, preserves 
 | Linux, macOS, and Windows | Supported |
 | Voice messages | Supported on Feishu, QQ, and WeChat |
 
-Each bridge process selects exactly one platform adapter. Feishu, QQ, and WeChat all support local QR onboarding, but the three QR flows have different meanings; see [QR onboarding](docs/QR_ONBOARDING.md). WeChat is a supported QR-authorized private-chat bot. It forces `auto` mode and has no approvals, questions, separate thinking stream, groups, or proactive delivery; it accepts inbound image, voice, file, and video messages and sends outbound images, videos, and files.
+Each bridge process selects exactly one platform adapter. Feishu, QQ, and WeChat all support local QR onboarding, but the three QR flows have different meanings; see [QR onboarding](docs/QR_ONBOARDING.md). WeChat supports QR-authorized private-chat bots but forces `auto` mode and has no approvals, questions, separate thinking stream, groups, or proactive delivery; it accepts inbound image, voice, file, and video messages and sends outbound images, videos, and files.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ kimi-bridge --version
 
 Complete setup for the selected platform before running diagnostics:
 
-- Feishu, QQ, or WeChat: start with the platform's bootstrap config, run its `login` command, approve any guided platform settings, then complete the remaining platform-side setup and review or fill `allowed_users`;
+- Feishu, QQ, or WeChat: start with the platform's bootstrap config, run its `login` command, approve any guided platform settings, then complete the remaining platform-side setup and check or supplement `allowed_users`;
 - Telegram: follow the manual Bot API flow in the installation guide and set the bot token and numeric user ID under `[telegram]`.
 
 Then run the local diagnostic and start the bridge in the foreground:
@@ -47,7 +47,7 @@ kimi-bridge doctor
 kimi-bridge
 ```
 
-One process runs one platform. For the first start, complete a real message round trip, such as `/status` followed by a normal prompt. This confirms platform permissions, event delivery, allowlisting, and replies before you configure persistent operation.
+One process runs one platform. For the first start, complete a real message round trip (send `/status` and a normal prompt) to confirm platform permissions, event delivery, allowlisting, and the reply path before configuring persistent operation.
 
 ### QR control-command index
 
@@ -67,7 +67,7 @@ kimi-bridge wechat status      # Inspect local managed credential storage
 kimi-bridge wechat logout      # Remove adapter-owned local managed files
 ```
 
-All three QR login commands support `--replace`. Their `status` commands inspect only local managed credential storage and do not verify the network; `logout` removes only adapter-owned managed files and does not remove a platform-side bot binding. Control commands do not start Kimi Code or message polling; `login` offers to switch a mismatched `platform` after confirmation, while `status` and `logout` require an exact match. Telegram has no QR, `login`, `status`, or `logout` control command in this project; configure its Bot API token and `allowed_users` manually.
+All three QR login commands support `--replace`. Their `status` commands inspect only local managed credential storage and do not verify the network; `logout` removes only adapter-owned managed files and does not remove a platform-side bot binding. These commands handle authorization only; they do not start Kimi Code or message polling. Telegram has no such command group; configure its Bot API token and `allowed_users` manually.
 
 The default managed credential paths are:
 
@@ -85,7 +85,7 @@ For the complete human walkthrough, read [Install and operate](INSTALL.en_US.md)
 - Edit-in-place answer streaming, router-side chunking, and separate thinking output where the platform supports it.
 - Interactive approvals and questions on adapters that can present them.
 - Busy-turn prompt steering, cancellation, permission modes, model, effort, plan, goal, task, skill, and MCP controls.
-- Inbound images, videos, files, and transcribed voice messages, plus workspace-contained outbound `/send`.
+- Inbound images, videos, files, and transcribed voice messages, plus `/send` for outbound files.
 - Private-chat allowlists, loopback-only Kimi server supervision, and a local `doctor` diagnostic that starts no services.
 
 ## Commands

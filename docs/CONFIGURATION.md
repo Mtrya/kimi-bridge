@@ -24,10 +24,10 @@ Only these keys have an effect. Permission mode and thinking rendering are per-c
 | Table/key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `feishu.app_id` / `feishu.app_secret` | strings | empty | Optional complete TOML fallback when Feishu is selected. If either value is set, both must be set. |
-| `feishu.allowed_users` | string array | empty | At runtime, at least one Feishu `open_id` or `user_id` is required. QR merges a returned registration `open_id` automatically; edit the array for finer control. |
+| `feishu.allowed_users` | string array | empty | At runtime, at least one Feishu `open_id` or `user_id` is required. QR login adds the returned registration `open_id` automatically. |
 | `feishu.storage_path` | path | `~/.kimi-bridge/feishu` | Managed Feishu credential directory; file is `credentials.json`. |
 | `qq.app_id` / `qq.app_secret` | strings | empty | Optional complete TOML fallback when QQ is selected. If either value is set, both must be set. |
-| `qq.allowed_users` | string array | empty | At runtime, at least one app-scoped QQ C2C `user_openid` is required. QR merges a returned scanner identity automatically; it is not a QQ number or nickname. |
+| `qq.allowed_users` | string array | empty | At runtime, at least one app-scoped QQ C2C `user_openid` is required. QR login adds the returned scanner `user_openid` automatically. |
 | `qq.storage_path` | path | `~/.kimi-bridge/qq` | Managed QQ credential directory; file is `credentials.json`. |
 | `wechat.allowed_users` | string array | empty | Empty only during QR bootstrap; runtime requires at least one stable scanner identity. |
 | `wechat.storage_path` | path | `~/.kimi-bridge/wechat` | WeChat credential and adapter receive-state directory; credential file is `credentials.json`. |
@@ -50,7 +50,7 @@ Feishu and QQ support either the QR-managed credential or a complete TOML pair. 
 
 1. No managed credential file: use the complete TOML `app_id` + `app_secret` pair.
 2. Managed credential exists and is valid: use it in preference to TOML. Feishu also uses its stored tenant brand and API domain.
-3. Managed credential exists but is unreadable, unsafe, malformed, or invalid: fail startup. Do not silently fall back to TOML; repair the storage or run the matching `login --replace`.
+3. Managed credential exists but is unreadable, unsafe, malformed, or invalid: fail startup; repair the storage or run the matching `login --replace`.
 
 `feishu logout` and `qq logout` remove only adapter-owned files in their configured `storage_path`; they do not remove `[feishu]` or `[qq]` TOML values. WeChat has no TOML credential fallback. See [QR onboarding](QR_ONBOARDING.md) for the human flow and command semantics.
 
@@ -69,11 +69,11 @@ storage_path = "~/.kimi-bridge/feishu"
 allowed_users = []
 ```
 
-Run `kimi-bridge feishu login` and open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. The result is an application credential, not a user OAuth token. The managed file records whether the tenant is Feishu or Lark and the corresponding API domain.
+Run `kimi-bridge feishu login` and open the URL printed by the command in a browser. The page lets the operator create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback required by the bridge. The result is an application credential, not a user OAuth token.
 
-The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; edit or remove it afterward if the registering user should not be authorized. If no identity is returned, obtain the target user's `open_id` in the same app/tenant context manually. The registration result is not a user OAuth token.
+The operator must approve the pre-filled settings, confirm bot capability and any console settings not represented by the registration add-ons, publish an application version, and make it available to the intended user/tenant. When registration returns `user_info.open_id`, login merges that identity into `feishu.allowed_users`; edit or remove it afterward if the registering user should not be authorized. If no identity is returned, obtain the target user's `open_id` in the same app/tenant context manually.
 
-After those steps, review the generated array or replace it with the intended identity (the value below is a location marker, not a value to copy literally):
+After those steps, review the generated array or replace it with the intended identity:
 
 ```toml
 [feishu]
@@ -111,11 +111,11 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = []
 ```
 
-Run `kimi-bridge qq login`, scan and approve the official bot bind URL, and review the generated `qq.allowed_users` entry. When the flow returns a scanner `user_openid`, the bridge merges that exact app-scoped value into the array while preserving existing entries. The QR result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary key, bind task, QR URL, and encrypted blob are not persisted. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
+Run `kimi-bridge qq login`, scan and approve the official bot bind URL. When the flow returns a scanner `user_openid`, login merges it into `qq.allowed_users`. The QR result contains `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary key, bind task, QR URL, and encrypted blob are not persisted. A scanner `user_openid` is app-scoped and must not be replaced by a QQ number or nickname.
 
 If the flow does not return an identity, configure `qq.allowed_users` manually. QR completion does not automatically provide all sandbox/review/event/gateway prerequisites. Confirm current QQ platform requirements separately before starting the foreground bridge.
 
-After the flow succeeds, review the generated array or replace it with the returned identity (the value below is a location marker, not a value to copy literally):
+After the flow succeeds, review the generated array or replace it with the returned identity:
 
 ```toml
 [qq]
@@ -134,7 +134,7 @@ storage_path = "~/.kimi-bridge/qq"
 allowed_users = ["<real QQ user_openid>"]
 ```
 
-Replace the marker with a real identity before startup. The pair is used only when the managed file is absent. QQ handles C2C private messages, uses the existing REST/token/WebSocket transport, and forces `auto`; it cannot present approvals, questions, or a separate thinking stream.
+Replace the marker with a real identity before startup. The pair is used only when the managed file is absent. QQ handles C2C private messages.
 
 ## Telegram example
 
@@ -151,7 +151,7 @@ bot_token = "<token from BotFather>"
 allowed_users = [123456789]
 ```
 
-The token is `[telegram].bot_token`; `allowed_users` must contain positive numeric Telegram user IDs, not usernames or display names. Telegram has no project `login`, `status`, or `logout` command, remains experimental, and accepts private chats only. At startup it takes over long polling and drops pending updates.
+The token is `[telegram].bot_token`; `allowed_users` must contain positive numeric Telegram user IDs, not usernames or display names. Telegram remains experimental and accepts private chats only. At startup it takes over long polling and drops pending updates.
 
 ## WeChat example
 
@@ -168,7 +168,7 @@ allowed_users = []
 
 Leave the allowlist empty only while running `kimi-bridge wechat login`. Open the printed URL in WeChat, scan and approve the iLink bot authorization, enter a verification code only if requested, and then put the returned stable scanner identity in `wechat.allowed_users`. The credential is stored at `wechat.storage_path`, not in TOML.
 
-Run `kimi-bridge wechat status` to inspect local storage; it does not perform a network check. Then run `kimi-bridge doctor` and start the bridge in the foreground. The runtime requires at least one allowlisted identity and exclusive ownership of the bot authorization by one polling process. WeChat is private-chat only, forces `auto`, emits immutable replies, and supports inbound image/voice/file/video plus outbound image/video/file. It has no approvals, questions, separate thinking stream, group chat, or proactive delivery.
+Run `kimi-bridge wechat status` to inspect local storage; it does not perform a network check. Then run `kimi-bridge doctor` and start the bridge in the foreground. The runtime requires at least one allowlisted identity and one polling process per bot authorization. WeChat is private-chat only, emits immutable replies, and supports inbound image/voice/file/video plus outbound image/video/file; it has no group chat, proactive delivery, or separate thinking stream.
 
 `kimi-bridge wechat login --replace` preserves the existing credential until a replacement is confirmed. `kimi-bridge wechat logout` removes only adapter-owned credential and receive-state files; it does not remove the remote bot binding.
 

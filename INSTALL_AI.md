@@ -99,11 +99,11 @@ Treat `compat` as a Kimi Code version classification, not as platform permission
 Ask which platform only after host and Kimi Code readiness is established. One process runs exactly one adapter.
 
 - **Feishu:** application-registration QR or complete TOML app credentials. It needs bot capability, platform permissions, long-connection events, app publication, a bridge-side user allowlist, and FFmpeg for inbound voice.
-- **QQ:** official bot credential-bind QR or complete TOML AppID/AppSecret. It is C2C private chat, uses the existing REST/token/WebSocket transport, forces `auto`, and has no approvals, questions, or separate thinking stream.
-- **WeChat:** supported iLink bot QR authorization, with the credential outside TOML. It handles private chats, forces `auto`, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file. One bot authorization has one poller.
+- **QQ:** official bot credential-bind QR or complete TOML AppID/AppSecret. It is C2C private chat, forces `auto`, and has no approvals, questions, or separate thinking stream.
+- **WeChat:** supported iLink bot QR authorization. It handles private chats, forces `auto`, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file.
 - **Telegram:** experimental private-chat adapter with its own bot-token flow; startup takes over long polling and discards pending updates.
 
-Prefer a dedicated platform bot when another service, webhook, gateway connection, or poller would be displaced. For WeChat, the scanning human account need not be dedicated, but the resulting bot authorization must be polled exclusively by one process.
+Prefer a dedicated platform bot when another service, webhook, gateway connection, or poller would be displaced. For WeChat, the scanning human account need not be dedicated.
 
 ## 4. Prepare private local configuration
 
@@ -157,7 +157,7 @@ kimi-bridge qq login|status|logout
 kimi-bridge wechat login|status|logout
 ```
 
-`login --replace` is available for all three. The control commands load config and do not start Kimi Code or message polling. If `login` finds a mismatched `platform`, it offers to switch the setting after confirmation; `status` and `logout` still require an exact match. `status` is local-only and does not validate the network. `logout` removes only adapter-owned managed files; it does not remotely delete a bot binding. Feishu/QQ TOML fallback values remain after logout.
+`login --replace` is available for all three. The control commands load config and do not start Kimi Code or message polling. Platform-match behavior for `login`, `status`, and `logout` is described in [Commands](docs/COMMANDS.md). `status` is local-only and does not validate the network. `logout` removes only adapter-owned managed files; it does not remotely delete a bot binding. Feishu/QQ TOML fallback values remain after logout.
 
 Do not call a QR flow complete until its platform-specific manual follow-up is done and the real foreground round trip passes.
 
@@ -181,9 +181,9 @@ Run:
 kimi-bridge feishu login
 ```
 
-Have the user open the URL printed by the command in a browser. The page lets the user create a new application or select an existing one and pre-fills kimi-bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. Have the user confirm those requested settings in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records Feishu or Lark tenant brand, API domain, and when returned the registration user's `open_id`. When `user_info.open_id` is present, login merges it into `feishu.allowed_users`; the QR flow still does not publish the app.
+Have the user open the URL printed by the command in a browser. The page lets the user create a new application or select an existing one and pre-fills kimi-bridge's tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback. Have the user confirm those requested settings in Feishu/Lark. This is not user OAuth. The result returns `client_id` and `client_secret`; managed storage also records the Feishu or Lark tenant brand, API domain, and, when returned, the registration user's `open_id`. When registration returns the operator's `open_id`, `login` adds it to `feishu.allowed_users`; check that it is the intended sender. If no identity is returned, or a different sender should be authorized, obtain the real identity in the same app/tenant context and add it to the array. The QR flow still does not publish the app.
 
-Review the generated `feishu.allowed_users` entry before foreground startup. If no `open_id` was returned, or a different sender should be authorized, obtain the real identity in the same app/tenant context and edit the array. The following is a location marker, not a value to copy literally:
+The following is a location marker, not a value to copy literally:
 
 ```toml
 [feishu]
@@ -204,7 +204,7 @@ storage_path = "~/.kimi-bridge/feishu"
 allowed_users = ["ou_replace_privately"]
 ```
 
-The pair must be complete. A complete TOML pair is used only when the managed credential file is absent. If a managed file exists but is invalid, do not use this fallback silently; repair it or run `kimi-bridge feishu login --replace`.
+The pair must be complete.
 
 ### 6.3 Platform-side follow-up
 
@@ -212,10 +212,9 @@ Research the current official console and guide the user through the identity-bo
 
 - the pre-filled tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback were approved on the registration confirmation page;
 - bot capability and any console settings not represented by the registration add-ons are configured;
-- the application version is published and available to the intended user/tenant;
-- the generated `feishu.allowed_users` entry is reviewed; if registration returned no identity or a different sender should be authorized, that sender's `open_id` is discovered in the same app/tenant context and added manually.
+- the application version is published and available to the intended user/tenant.
 
-If the user scans but has not completed these steps, pause rather than report readiness. Require `ffmpeg` on PATH for Feishu voice messages.
+If the user scans but has not completed these steps, pause rather than report readiness.
 
 ### 6.4 Feishu validation
 
@@ -251,7 +250,7 @@ kimi-bridge qq login
 
 Have the user open the printed URL, scan it, and approve the official bot bind. The completed result returns `bot_appid` and encrypted `bot_encrypt_secret`; the bridge decrypts the AppSecret locally and persists only the final managed credential. The temporary AES key, task ID/QR URL, and encrypted secret blob are not persisted. Runtime still uses the existing REST/token/WebSocket transport.
 
-When the flow returns `user_openid`, login merges that exact app-scoped identity into `qq.allowed_users` while preserving existing entries. Review or remove the generated entry if you want finer access control. It is not a QQ number or nickname. If no identity is returned, configure the allowlist manually. QR success does not automatically establish sandbox tester access, production review, authorization for the required event Intents, or end-to-end delivery. The following is a location marker, not a value to copy literally:
+When the flow returns the scanner's `user_openid`, `login` adds it to `qq.allowed_users`; check that it is the intended sender. It is an app-scoped identity for that bot, not a QQ number or nickname. If no identity is returned, add it manually. QR success does not automatically establish sandbox tester access, production review, event Intents, or end-to-end delivery. The following is a location marker, not a value to copy literally:
 
 ```toml
 [qq]
@@ -276,15 +275,13 @@ AppID and AppSecret must be entered as a complete pair. Discover the intended ap
 
 ### 7.3 QQ validation
 
-Run `kimi-bridge qq status`, `kimi-bridge doctor`, then start `kimi-bridge` in the foreground. Validate a real allowlisted C2C `/status`, a complete normal reply, and only the media types the installation needs. QQ is forced to `auto` and cannot present approvals or questions. Ensure no second gateway consumer uses the bot.
+Run `kimi-bridge qq status`, `kimi-bridge doctor`, then start `kimi-bridge` in the foreground. Validate a real allowlisted C2C `/status`, a complete normal reply, and only the media types the installation needs. Ensure no second gateway consumer uses the bot.
 
 ## 8. WeChat bootstrap
 
-WeChat is a supported QR-authorized private-chat adapter. Its credential is managed outside TOML.
-
 ### 8.1 Ownership and preflight
 
-Determine whether another process polls the intended bot authorization. One bot authorization can have one poller only. A scanning human account need not be dedicated, but stopping or displacing another iLink consumer requires explicit approval. Use distinct config, `state_path`, workspace, and `wechat.storage_path` for distinct bridge instances.
+Determine whether another process polls the intended bot authorization. One bot authorization can have one poller only. Stopping or displacing another iLink consumer requires explicit approval.
 
 ### 8.2 QR authorization and allowlisting
 
@@ -305,13 +302,13 @@ Run:
 kimi-bridge wechat login
 ```
 
-Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, copy the returned stable scanner identity privately into `wechat.allowed_users`; do not expose it, use a nickname, or put the credential in TOML, environment variables, command arguments, chat, or reports.
+Have the user open the printed URL in WeChat, scan and approve the iLink authorization, and enter a verification number only if explicitly requested. On success, copy the returned stable scanner identity privately into `wechat.allowed_users`; do not use a nickname, guessed account identifier, or bot identity.
 
-Run `kimi-bridge wechat status` to inspect local storage and redacted metadata. It performs no network check. Run `kimi-bridge doctor`, resolve local errors, and only then start the bridge.
+Run `kimi-bridge wechat status` to inspect local storage and redacted metadata, then run `kimi-bridge doctor`; resolve local errors and only then start the bridge.
 
 ### 8.3 WeChat validation and limits
 
-From the real allowlisted private chat, send `/status` and a normal prompt and confirm a complete immutable reply. Test inbound image, voice, file, and video and outbound image, video, and file when needed. WeChat forces `auto`, has no approvals, questions, separate thinking stream, groups, proactive delivery, or native outbound voice messages. Exactly one process may poll the authorization.
+From the real allowlisted private chat, send `/status` and a normal prompt and confirm a complete immutable reply. Test inbound image, voice, file, and video and outbound image, video, and file when needed; outbound audio is a generic file, not a native voice message.
 
 ### 8.4 Replacement and logout
 
@@ -321,7 +318,7 @@ When the authorization must be replaced or runtime reports expiry, stop the brid
 kimi-bridge wechat login --replace
 ```
 
-The previous local credential remains until a new authorization is confirmed. If the platform returns the already-bound bot, the existing credential may be retained. `kimi-bridge wechat logout` removes only adapter-owned credential and receive-state files; it does not remotely delete the bot binding.
+The previous local credential remains until a new authorization is confirmed. If the platform returns the already-bound bot, the existing credential may be retained. `kimi-bridge wechat logout` removes only adapter-owned credential and receive-state files.
 
 ## 9. Doctor and startup diagnosis
 
@@ -338,7 +335,7 @@ Resolve every `ERROR` and investigate every `WARN`. Common branches:
 - missing or malformed config: repair the protected file;
 - incomplete Feishu/QQ TOML pair: provide both values or use the matching QR login;
 - malformed existing managed file: repair it or run `login --replace`; do not expect TOML fallback;
-- missing/empty allowlist: review whether QR returned an identity; otherwise obtain the real platform identity and add it manually;
+- missing/empty allowlist: if the QR login returned no identity, obtain the real platform identity and add it manually;
 - missing Feishu FFmpeg: install it and confirm it is on PATH;
 - missing WeChat authorization or media dependency: return to the WeChat QR branch or repair the installation;
 - legacy or missing `kimi`: return to Kimi Code preflight;
