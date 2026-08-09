@@ -113,6 +113,8 @@ QQ_PASSIVE_REPLY_WINDOW_SECONDS = 60 * 60
 QQ_TYPING_KEEPALIVE_SECONDS = 50
 QQ_TYPING_INPUT_SECONDS = 60
 QQ_STREAM_IDLE_TIMEOUT_SECONDS = 6.0
+QQ_GATEWAY_SETUP_TIMEOUT_SECONDS = 30.0
+QQ_LOG_PREVIEW_LIMIT = 60
 QQ_URL_DEFANG_ERROR_CODE = 304003
 QQ_ATTACHMENT_LIMIT_BYTES = 20 * 1024 * 1024
 _QQ_DEDUPE_MEMORY = 512
@@ -412,6 +414,23 @@ class QQBotAPI:
         )
         if not isinstance(data, dict):
             raise QQProtocolError("QQ send message response must be an object")
+        preview_source = content
+        if preview_source is None and isinstance(markdown, dict):
+            markdown_content = markdown.get("content")
+            if isinstance(markdown_content, str):
+                preview_source = markdown_content
+        if preview_source is None:
+            preview_source = ""
+        LOGGER.info(
+            "QQ C2C outbound message: msg_type=%d returned_id=%s "
+            "msg_id=%s msg_seq=%s content_len=%d content_preview=%s",
+            msg_type,
+            data.get("id"),
+            msg_id,
+            msg_seq,
+            len(preview_source),
+            _content_preview(preview_source),
+        )
         return data
 
     async def send_c2c_stream_message(
@@ -447,6 +466,18 @@ class QQBotAPI:
         )
         if not isinstance(data, dict):
             raise QQProtocolError("QQ stream message response must be an object")
+        LOGGER.info(
+            "QQ C2C outbound stream frame: state=%d index=%d msg_seq=%d "
+            "stream_msg_id=%s returned_id=%s remain_msg_len=%s "
+            "content_preview=%s",
+            input_state,
+            index,
+            msg_seq,
+            stream_msg_id,
+            data.get("id"),
+            data.get("remain_msg_len"),
+            _content_preview(content_raw),
+        )
         return data
 
     async def delete_c2c_message(self, openid: str, message_id: str) -> None:
@@ -687,11 +718,17 @@ class QQGatewayClient:
         event_worker = self._event_worker
         if event_worker is None:
             raise RuntimeError("QQ gateway event worker is not running")
-        heartbeat_interval = await self._expect_hello(ws)
-        if self._session_id is not None and self._last_seq is not None:
-            await self._send_resume(ws)
-        else:
-            await self._send_identify(ws)
+        try:
+            async with asyncio.timeout(QQ_GATEWAY_SETUP_TIMEOUT_SECONDS):
+                heartbeat_interval = await self._expect_hello(ws)
+                if self._session_id is not None and self._last_seq is not None:
+                    await self._send_resume(ws)
+                else:
+                    await self._send_identify(ws)
+        except TimeoutError as exc:
+            raise QQTransportError(
+                "QQ gateway connection setup timed out"
+            ) from exc
         heartbeat_acknowledged = asyncio.Event()
         heartbeat_acknowledged.set()
         heartbeat = asyncio.create_task(
@@ -888,6 +925,13 @@ _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _URL_RE = re.compile(r"(https?://)(\S+)")
 _EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
+
+
+def _content_preview(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+    if len(escaped) <= QQ_LOG_PREVIEW_LIMIT:
+        return escaped
+    return escaped[: QQ_LOG_PREVIEW_LIMIT - 1] + "…"
 
 
 def sanitize_markdown(text: str) -> str:
@@ -1565,6 +1609,14 @@ class QQAdapter:
         if not isinstance(msg_id, str) or not msg_id:
             LOGGER.warning("QQ C2C message omitted id; dropping")
             return
+        content = data.get("content")
+        text = content if isinstance(content, str) else ""
+        LOGGER.info(
+            "QQ C2C inbound message: msg_id=%s content_len=%d content_preview=%s",
+            msg_id,
+            len(text),
+            _content_preview(text),
+        )
         dedupe_key = _dedupe_key(data, msg_id)
         if dedupe_key in self._seen_ids:
             return
@@ -1582,8 +1634,6 @@ class QQAdapter:
             )
             return
 
-        content = data.get("content")
-        text = content if isinstance(content, str) else ""
         timestamp = _parse_qq_timestamp(data.get("timestamp"))
         conversation = ConversationRef(
             platform="qq", bot_id=self._app_id, conversation_id=openid
