@@ -136,6 +136,10 @@ allowed_users = ["<real QQ user_openid>"]
 
 Replace the marker with a real identity before startup. The pair is used only when the managed file is absent. QQ handles C2C private messages.
 
+### QQ runtime diagnostics
+
+QQ gives gateway Hello and Identify/Resume setup 30 seconds to complete. If setup stalls, the bridge closes that attempt and reconnects through its existing backoff loop. At `INFO`, the QQ adapter writes one-line traces for accepted inbound C2C messages and successful outbound direct or streaming frames. Each trace includes a bounded preview of up to 60 characters after escaping non-printable characters. Previews can contain message content, so apply the same access and retention controls as the messages themselves. Set `log_level = "WARNING"` or higher to suppress these records; there is no separate QQ trace toggle.
+
 ## Telegram example
 
 Telegram has no QR or terminal authorization command. Use the official Telegram Bot API and BotFather flow to create a bot and obtain its token, then store the token and the numeric user allowlist in TOML:

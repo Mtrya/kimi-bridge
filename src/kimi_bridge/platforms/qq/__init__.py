@@ -928,7 +928,16 @@ _EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
 
 
 def _content_preview(text: str) -> str:
-    escaped = text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+    escaped = "".join(
+        "\\\\"
+        if character == "\\"
+        else (
+            character
+            if character.isprintable()
+            else ascii(character)[1:-1]
+        )
+        for character in text
+    )
     if len(escaped) <= QQ_LOG_PREVIEW_LIMIT:
         return escaped
     return escaped[: QQ_LOG_PREVIEW_LIMIT - 1] + "…"
@@ -1609,14 +1618,6 @@ class QQAdapter:
         if not isinstance(msg_id, str) or not msg_id:
             LOGGER.warning("QQ C2C message omitted id; dropping")
             return
-        content = data.get("content")
-        text = content if isinstance(content, str) else ""
-        LOGGER.info(
-            "QQ C2C inbound message: msg_id=%s content_len=%d content_preview=%s",
-            msg_id,
-            len(text),
-            _content_preview(text),
-        )
         dedupe_key = _dedupe_key(data, msg_id)
         if dedupe_key in self._seen_ids:
             return
@@ -1634,6 +1635,14 @@ class QQAdapter:
             )
             return
 
+        content = data.get("content")
+        text = content if isinstance(content, str) else ""
+        LOGGER.info(
+            "QQ C2C inbound message: msg_id=%s content_len=%d content_preview=%s",
+            msg_id,
+            len(text),
+            _content_preview(text),
+        )
         timestamp = _parse_qq_timestamp(data.get("timestamp"))
         conversation = ConversationRef(
             platform="qq", bot_id=self._app_id, conversation_id=openid

@@ -1136,6 +1136,13 @@ def test_content_preview_is_single_line_and_bounded() -> None:
     assert preview.endswith("…")
 
 
+def test_content_preview_escapes_non_printable_characters() -> None:
+    preview = qq_module._content_preview("tab\tansi\x1bseparator\u2028")
+
+    assert preview == "tab\\tansi\\x1bseparator\\u2028"
+    assert all(character.isprintable() for character in preview)
+
+
 def test_sanitize_markdown_flattens_fenced_code() -> None:
     result = sanitize_markdown("```python\ndef f():\n    return 1\n```")
     assert "```" not in result
@@ -1242,7 +1249,7 @@ async def test_adapter_drops_unauthorized_sender(
     async def on_message(_sender: Any, message: Any) -> None:
         delivered.append(message)
 
-    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
+    caplog.set_level(logging.INFO, logger="kimi_bridge.platforms.qq")
     await adapter.start(on_message, _noop_on_interaction)
     try:
         await gateway.emit(
@@ -1258,6 +1265,7 @@ async def test_adapter_drops_unauthorized_sender(
 
     assert not delivered
     assert "unauthorized sender openid: OPENID-USER" in caplog.text
+    assert "QQ C2C inbound message:" not in caplog.text
 
 
 async def test_adapter_dedupes_by_message_id() -> None:
