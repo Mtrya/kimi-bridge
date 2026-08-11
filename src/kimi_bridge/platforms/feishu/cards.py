@@ -26,6 +26,9 @@ from ...interactions import (
 INTERACTION_SUMMARY_LIMIT = 1200
 APPROVAL_PREVIEW_LIMIT = 1600
 APPROVAL_PATH_LIMIT = 400
+# Plan previews arrive pre-bounded by the router (4000 chars + marker), so
+# the card only guards against pathological input instead of re-truncating.
+PLAN_PREVIEW_CARD_LIMIT = 4600
 
 
 def render_interaction(prompt: InteractionPrompt) -> dict[str, Any]:
@@ -193,6 +196,16 @@ def _approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
             for label, decision, button_type in buttons
         ],
     }
+    elements: list[dict[str, Any]] = [_approval_context(prompt)]
+    if prompt.plan_preview is not None:
+        elements.append(
+            _preview_block(
+                "Plan", prompt.plan_preview, limit=PLAN_PREVIEW_CARD_LIMIT
+            )
+        )
+    else:
+        elements.append(_approval_preview(request.input_display))
+    elements.append(button_block)
     return _card_shell(
         "Approval required",
         prompt.session_title,
@@ -200,11 +213,7 @@ def _approval_card(prompt: ApprovalPrompt) -> dict[str, Any]:
         icon_token="approval_colorful",
         tag_text="Pending",
         tag_color="yellow",
-        elements=[
-            _approval_context(prompt),
-            _approval_preview(request.input_display),
-            button_block,
-        ],
+        elements=elements,
     )
 
 
@@ -320,6 +329,7 @@ def _preview_block(
     *,
     language: str = "",
     path: str | None = None,
+    limit: int = APPROVAL_PREVIEW_LIMIT,
 ) -> dict[str, Any]:
     elements: list[dict[str, Any]] = [
         {
@@ -338,7 +348,7 @@ def _preview_block(
                 },
             }
         )
-    bounded = _bounded(preview, APPROVAL_PREVIEW_LIMIT)
+    bounded = _bounded(preview, limit)
     if title == "Path" and path is None:
         elements.append(
             {

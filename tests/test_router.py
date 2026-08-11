@@ -2756,6 +2756,159 @@ async def test_approval_interaction_resolves_and_rejects_wrong_actor(
     assert adapter.sent[0][1] == message.conversation
 
 
+def _exit_plan_approval(plan_path: Path) -> ApprovalRequest:
+    return ApprovalRequest(
+        id="approval-1",
+        session_id="session-1",
+        tool_name="ExitPlanMode",
+        action="Presenting plan and exiting plan mode",
+        input_display={"path": str(plan_path)},
+    )
+
+
+def _write_plan(home: Path, content: str) -> Path:
+    plan = (
+        home
+        / ".kimi-code"
+        / "sessions"
+        / "wd_project_abcd1234"
+        / "session_1"
+        / "agents"
+        / "main"
+        / "plans"
+        / "plan.md"
+    )
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(content, encoding="utf-8")
+    return plan
+
+
+async def test_exit_plan_approval_includes_plan_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    plan = _write_plan(home, "# Plan\n\nDo the thing.\n")
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_exit_plan_approval(plan)]
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+    finally:
+        await router.close()
+
+    prompt = adapter.interactions[0][2]
+    assert isinstance(prompt, ApprovalPrompt)
+    assert prompt.plan_preview == "# Plan\n\nDo the thing.\n"
+    assert adapter.files == []
+
+
+async def test_exit_plan_approval_truncated_preview_sends_full_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    content = "x" * 5000
+    plan = _write_plan(home, content)
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_exit_plan_approval(plan)]
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+    finally:
+        await router.close()
+
+    prompt = adapter.interactions[0][2]
+    assert isinstance(prompt, ApprovalPrompt)
+    assert prompt.plan_preview is not None
+    assert prompt.plan_preview.startswith("x" * 100)
+    assert len(prompt.plan_preview) < len(content)
+    assert "truncated" in prompt.plan_preview
+    assert [item[2] for item in adapter.files] == [
+        OutboundFile("plan.md", content.encode(), "text/markdown")
+    ]
+
+
+async def test_exit_plan_approval_ignores_path_outside_kimi_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    outside = tmp_path / "not-a-plan.md"
+    outside.write_text("secret", encoding="utf-8")
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_exit_plan_approval(outside)]
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+    finally:
+        await router.close()
+
+    prompt = adapter.interactions[0][2]
+    assert isinstance(prompt, ApprovalPrompt)
+    assert prompt.plan_preview is None
+    assert adapter.files == []
+
+
+async def test_non_exit_plan_approval_does_not_read_plan_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    plan = _write_plan(home, "# Plan\n")
+    request = ApprovalRequest(
+        id="approval-1",
+        session_id="session-1",
+        tool_name="WriteFile",
+        action="Write file",
+        input_display={"path": str(plan)},
+    )
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [request]
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("run"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+    finally:
+        await router.close()
+
+    prompt = adapter.interactions[0][2]
+    assert isinstance(prompt, ApprovalPrompt)
+    assert prompt.plan_preview is None
+    assert adapter.files == []
+
+
 async def test_question_option_and_free_text_paths(
     tmp_path: Path,
 ) -> None:

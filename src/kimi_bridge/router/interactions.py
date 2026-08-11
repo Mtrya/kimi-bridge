@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import logging
 import uuid
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from ..interactions import (
@@ -25,7 +27,7 @@ from ..interactions import (
     SkippedAnswer,
 )
 from ..kimi_server import KimiServerAPIError
-from ..platforms.base import InboundInteraction, PlatformAdapter
+from ..platforms.base import InboundInteraction, OutboundFile, PlatformAdapter
 from .formatting import _conversation_key
 from .models import _ActiveStream, _PendingInteraction
 
@@ -37,6 +39,65 @@ STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
     "if you still need it."
 )
+
+# ExitPlanMode approvals carry only the plan file path; the bridge reads the
+# file itself so the operator can review the plan before deciding.
+PLAN_PREVIEW_LIMIT = 4000
+_PLAN_FILE_READ_LIMIT = 1 << 20
+_PLAN_PATH_KEYS = ("path", "file_path", "target_path", "filename")
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanPreview:
+    path: Path
+    data: bytes
+    text: str
+    truncated: bool
+
+
+def _load_plan_preview(request: ApprovalRequest) -> _PlanPreview | None:
+    """Read the ExitPlanMode plan file for in-chat review, if it is safe.
+
+    The path arrives over the wire, so only regular files directly inside a
+    ``~/.kimi-code/sessions/**/plans/`` directory are read — anything else
+    would let a crafted payload leak arbitrary host files into the chat.
+    """
+
+    if request.tool_name != "ExitPlanMode":
+        return None
+    value = request.input_display
+    if not isinstance(value, dict):
+        return None
+    raw_path = next(
+        (
+            candidate
+            for key in _PLAN_PATH_KEYS
+            if isinstance((candidate := value.get(key)), str) and candidate
+        ),
+        None,
+    )
+    if raw_path is None:
+        return None
+    root = (Path.home() / ".kimi-code" / "sessions").resolve()
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if resolved.parent.name != "plans" or not resolved.is_file():
+        return None
+    try:
+        with resolved.open("rb") as plan_file:
+            data = plan_file.read(_PLAN_FILE_READ_LIMIT)
+    except OSError:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    if len(text) <= PLAN_PREVIEW_LIMIT:
+        return _PlanPreview(path=resolved, data=data, text=text, truncated=False)
+    preview = (
+        text[:PLAN_PREVIEW_LIMIT] + "\n… (truncated — full plan sent as a file)"
+    )
+    return _PlanPreview(path=resolved, data=data, text=preview, truncated=True)
 
 
 class _InteractionMixin:
@@ -221,12 +282,28 @@ class _InteractionMixin:
             session = await self._client.get_session(active.session_id)
             if kind == "approval":
                 assert isinstance(request, ApprovalRequest)
+                plan = _load_plan_preview(request)
                 prompt = ApprovalPrompt(
                     interaction_id=interaction_id,
                     request=request,
                     session_title=str(session.get("title") or "Untitled"),
                     workspace=str(session["metadata"]["cwd"]),
+                    plan_preview=plan.text if plan is not None else None,
                 )
+                if plan is not None and plan.truncated:
+                    # The full plan goes out before the card so the approval
+                    # stays the last message; delivery is best-effort.
+                    try:
+                        await active.adapter.send_file(
+                            active.conversation,
+                            OutboundFile(
+                                name=plan.path.name,
+                                data=plan.data,
+                                media_type="text/markdown",
+                            ),
+                        )
+                    except Exception:
+                        LOGGER.exception("failed to send full plan file")
             else:
                 assert isinstance(request, QuestionRequest)
                 prompt = QuestionPrompt(

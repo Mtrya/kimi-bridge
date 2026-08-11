@@ -1291,7 +1291,9 @@ def _approval_text(prompt: ApprovalPrompt) -> str:
         f"Tool: {request.tool_name}",
         f"Action: {request.action}",
     ]
-    if summary:
+    if prompt.plan_preview is not None:
+        parts.extend(("", "Plan:", prompt.plan_preview))
+    elif summary:
         parts.extend(("", summary))
     return _truncate("\n".join(parts))
 

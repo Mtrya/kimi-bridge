@@ -399,6 +399,31 @@ def test_approval_preview_truncates_dynamic_content() -> None:
     assert "…" in preview["content"]
 
 
+def test_approval_card_renders_plan_preview_beyond_generic_limit() -> None:
+    prompt = _approval_prompt()
+    marker = "PLAN-END-MARKER"
+    prompt = ApprovalPrompt(
+        interaction_id=prompt.interaction_id,
+        request=ApprovalRequest(
+            id=prompt.request.id,
+            session_id=prompt.request.session_id,
+            tool_name="ExitPlanMode",
+            action="Presenting plan and exiting plan mode",
+            input_display={"path": "/home/u/.kimi-code/sessions/x/plans/p.md"},
+        ),
+        session_title=prompt.session_title,
+        workspace=prompt.workspace,
+        plan_preview="a" * 2000 + marker,
+    )
+
+    card = render_interaction(prompt)
+    serialized = json.dumps(card, ensure_ascii=False)
+
+    assert "**Plan**" in serialized
+    assert "**Path**" not in serialized
+    assert marker in serialized
+
+
 async def test_allowlisted_p2p_text_is_normalized_once() -> None:
     transport = FakeTransport()
     runners: list[FakeWebSocketRunner] = []

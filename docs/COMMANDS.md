@@ -95,7 +95,7 @@ Changing `/mode` affects later permission checks but does not answer a currently
 - `auto` is autonomous and does not ask questions.
 - `yolo` auto-approves regular tools but may still ask questions.
 
-Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
+Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. An `ExitPlanMode` approval additionally shows a bounded (4,000-character) preview of the plan file — read only from `~/.kimi-code/sessions/**/plans/` — and sends the full plan as a file when the preview truncates. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
 
 ## Streaming and thinking
 
