@@ -1,6 +1,6 @@
 # Commands and interactions
 
-Commands are case-insensitive before the first space; arguments retain their case. Any message not beginning with a recognized slash command is submitted to the bound Kimi session. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt.
+Commands are case-insensitive before the first space; arguments retain their case. Any message not beginning with a recognized slash command is submitted to the bound Kimi session. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt. Path arguments (`/new`, `/send`) treat a leading fullwidth `～` (U+FF5E, common from mobile IMEs) as `~` when the literal path does not exist.
 
 ## Exact command grammar
 
