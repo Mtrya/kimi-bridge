@@ -23,6 +23,10 @@ from ..platforms.base import InboundInteraction, InboundMessage
 SESSION_TITLE_LIMIT = 80
 TASK_DESCRIPTION_LIMIT = 100
 TASK_COMMAND_LIMIT = 500
+HISTORY_DEFAULT_COUNT = 10
+HISTORY_MAX_COUNT = 50
+HISTORY_RECAP_COUNT = 2
+HISTORY_MESSAGE_LIMIT = 500
 _TASK_STATUS_DISPLAY: dict[TaskStatus, tuple[int, str, str]] = {
     "running": (0, "🟡", "Running"),
     "failed": (1, "❌", "Failed"),
@@ -489,3 +493,60 @@ def _persisted_assistant_message(
     if assistant_messages:
         return assistant_messages[-1]
     return None
+
+
+def _format_history(snapshot: dict[str, Any], count: int) -> str | None:
+    """Format the newest ``count`` snapshot messages for chat display.
+
+    The snapshot is the server's authoritative post-undo/post-compaction
+    view, so this reflects what the agent currently sees. Every role is
+    kept in order; thinking parts are skipped; non-text content parts
+    become ``[attachment: <name>]`` placeholders.
+    """
+
+    messages = snapshot.get("messages")
+    items = messages.get("items", []) if isinstance(messages, dict) else []
+    entries = [item for item in items if isinstance(item, dict)]
+    if not entries:
+        return None
+    recent = entries[-count:]
+    header = f"Last {len(recent)} {'message' if len(recent) == 1 else 'messages'}:"
+    blocks = [header]
+    for item in recent:
+        role = item.get("role")
+        label = role if isinstance(role, str) and role else "unknown"
+        blocks.append(f"[{label}]\n{_history_item_text(item)}")
+    return "\n\n".join(blocks)
+
+
+def _history_item_text(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    parts = content if isinstance(content, list) else []
+    texts: list[str] = []
+    attachments: list[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        part_type = part.get("type")
+        if part_type == "text":
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                texts.append(text)
+        elif part_type == "thinking":
+            continue
+        else:
+            name = (
+                part.get("name") or part.get("file_name") or part.get("filename")
+            )
+            label = (
+                name
+                if isinstance(name, str) and name
+                else str(part_type or "unknown")
+            )
+            attachments.append(f"[attachment: {label}]")
+    body = "\n".join([*texts, *attachments]).strip()
+    if not body:
+        body = "(no text content)"
+    if len(body) > HISTORY_MESSAGE_LIMIT:
+        body = body[:HISTORY_MESSAGE_LIMIT] + "…"
+    return body

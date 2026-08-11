@@ -1963,6 +1963,172 @@ async def test_compact_and_undo_validate_arguments_and_busy_state(
     assert sum(text.startswith("Session is busy.") for text in texts) == 2
 
 
+def _history_snapshot(*items: dict) -> dict:
+    return {"in_flight_turn": None, "messages": {"items": list(items)}}
+
+
+def _history_item(role: str, text: str, *extra_parts: dict) -> dict:
+    return {
+        "role": role,
+        "content": [{"type": "text", "text": text}, *extra_parts],
+    }
+
+
+async def test_history_formats_recent_messages(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    client.snapshots["session-control"] = _history_snapshot(
+        _history_item("user", "first question"),
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "secret reasoning"},
+                {"type": "text", "text": "first answer"},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "with file"},
+                {"type": "image", "name": "pic.png"},
+            ],
+        },
+        _history_item("system", "compaction summary"),
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/history"))
+        await router.handle_inbound(adapter, _message("/history 2"))
+    finally:
+        await router.close()
+
+    full, pair = [text for _ref, _conversation, text in adapter.sent]
+    assert full.startswith("Last 4 messages:")
+    assert "[user]\nfirst question" in full
+    assert "[assistant]\nfirst answer" in full
+    assert "secret reasoning" not in full
+    assert "[attachment: pic.png]" in full
+    assert "[system]\ncompaction summary" in full
+    assert pair.startswith("Last 2 messages:")
+    assert "first question" not in pair
+    assert "compaction summary" in pair
+
+
+async def test_history_validates_arguments_and_empty_snapshot(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        for command in ("/history 0", "/history 51", "/history nope"):
+            await router.handle_inbound(adapter, _message(command))
+        await router.handle_inbound(adapter, _message("/history"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert texts[:3] == ["Usage: /history [1-50]"] * 3
+    assert texts[3] == "No history yet."
+
+
+async def test_history_truncates_long_messages(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    client.snapshots["session-control"] = _history_snapshot(
+        _history_item("assistant", "y" * 600),
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/history 1"))
+    finally:
+        await router.close()
+
+    (reply,) = [text for _ref, _conversation, text in adapter.sent]
+    assert reply.startswith("Last 1 message:")
+    assert "y" * 500 + "…" in reply
+    assert "y" * 501 not in reply
+
+
+async def test_undo_confirmation_includes_history_recap(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    client.snapshots["session-control"] = _history_snapshot(
+        _history_item("user", "latest question"),
+        _history_item("assistant", "latest answer"),
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/undo"))
+    finally:
+        await router.close()
+
+    (reply,) = [text for _ref, _conversation, text in adapter.sent]
+    assert reply.startswith("Undid 1 history step.")
+    assert "Last 2 messages:" in reply
+    assert "[user]\nlatest question" in reply
+    assert "[assistant]\nlatest answer" in reply
+
+
+async def test_switch_confirmation_includes_history_recap(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(),
+        _discovery_session(
+            "session-login", "Login refactor", "/tmp/login", updated_at="2026-07-01"
+        ),
+    ]
+    client.snapshots["session-login"] = _history_snapshot(
+        _history_item("user", "login question"),
+        _history_item("assistant", "login answer"),
+    )
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = _discovery_router(client, store, tmp_path)
+    try:
+        await router.handle_inbound(adapter, _message("/switch Login refactor"))
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    recap = next(text for text in texts if text.startswith("Switched to session-login"))
+    assert "Last 2 messages:" in recap
+    assert "[assistant]\nlogin answer" in recap
+
+
 async def test_undo_surfaces_unavailable_and_compaction_boundary_errors(
     tmp_path: Path,
 ) -> None:
