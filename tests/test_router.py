@@ -2789,6 +2789,7 @@ async def test_exit_plan_approval_includes_plan_preview(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     plan = _write_plan(home, "# Plan\n\nDo the thing.\n")
     client = FakeKimiClient()
     client.approvals["session-1"] = [_exit_plan_approval(plan)]
@@ -2817,6 +2818,7 @@ async def test_exit_plan_approval_truncated_preview_sends_full_file(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     content = "x" * 5000
     plan = _write_plan(home, content)
     client = FakeKimiClient()
@@ -2851,6 +2853,7 @@ async def test_exit_plan_approval_ignores_path_outside_kimi_sessions(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     outside = tmp_path / "not-a-plan.md"
     outside.write_text("secret", encoding="utf-8")
     client = FakeKimiClient()
@@ -2880,6 +2883,7 @@ async def test_non_exit_plan_approval_does_not_read_plan_files(
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
     plan = _write_plan(home, "# Plan\n")
     request = ApprovalRequest(
         id="approval-1",
