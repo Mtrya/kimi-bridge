@@ -1168,6 +1168,33 @@ def test_sanitize_markdown_preserves_heading_and_bold() -> None:
     assert "*italic*" in result
 
 
+def test_sanitize_markdown_preserves_cjk_punctuation_inside_emphasis() -> None:
+    assert sanitize_markdown("这是**重点。**继续") == "这是**重点。\u200b**继续"
+    assert sanitize_markdown("先*停一下，*再出发") == "先*停一下，\u200b*再出发"
+    # No CJK punctuation inside the span: nothing changes.
+    assert sanitize_markdown("**plain** text") == "**plain**\u200b text"
+
+
+def test_sanitize_markdown_preserves_symbols_inside_emphasis() -> None:
+    assert sanitize_markdown("**some [text]**") == "**some [text]\u200b**"
+    assert sanitize_markdown("**some <argument>**") == "**some <argument>\u200b**"
+    assert sanitize_markdown("**a sentence.**") == "**a sentence.\u200b**"
+    assert sanitize_markdown("*a sentence.*") == "*a sentence.\u200b*"
+    assert sanitize_markdown("***重点。***继续") == "***重点。\u200b***继续"
+    assert sanitize_markdown("___重点。___继续") == "___重点。\u200b___继续"
+    assert sanitize_markdown("**cafe\u0301.**next") == "**cafe\u0301.\u200b**next"
+    # Literal asterisks with a whitespace-only tail stay untouched.
+    assert sanitize_markdown("2 * 3 * 4") == "2 * 3 * 4"
+
+
+def test_compact_markdown_keeps_emphasis_rendering_aids() -> None:
+    result = qq_module._sanitize_stable_markdown(
+        "这是**重点。**继续 and **bold** more", final=True
+    )
+    assert "**重点。\u200b**继续" in result
+    assert "**bold**\u200b more" in result
+
+
 def test_sanitize_markdown_forces_single_line_breaks() -> None:
     result = sanitize_markdown("line1\nline2\n\nline3")
     assert result == "line1\u200b\nline2\n\nline3"

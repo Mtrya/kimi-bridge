@@ -45,6 +45,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -924,7 +925,11 @@ _FENCE_OPEN_RE = re.compile(r"```[^\n]*\n")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _URL_RE = re.compile(r"(https?://)(\S+)")
-_EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
+_EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,3}|_{1,3})(?= )")
+# QQ can leave emphasis markers visible when punctuation or a symbol is
+# immediately before the closing delimiter. Keep the authored span intact
+# and insert an invisible rendering aid before that delimiter.
+_EMPHASIS_SPAN_RE = re.compile(r"(\*{3}|_{3}|\*\*|__|[*_])([^*_]+?)\1")
 
 
 def _content_preview(text: str) -> str:
@@ -949,8 +954,10 @@ def sanitize_markdown(text: str) -> str:
     QQ renders four-space-indented text as a code block but not inline code
     or tables; a single newline also collapses into the surrounding paragraph
     unless forced with a trailing zero-width space. Headings, bold/italic,
-    lists, and quotes pass through unchanged. If those rendering aids would
-    exceed QQ's message limit, formatting degrades without dropping content.
+    lists, and quotes pass through unchanged; invisible rendering aids keep
+    punctuation and symbols inside emphasis spans while making their closing
+    markers unambiguous to QQ. If those rendering aids would exceed QQ's
+    message limit, formatting degrades without dropping content.
     """
 
     return _render_markdown(text, force_line_breaks=_force_line_breaks)
@@ -962,6 +969,7 @@ def _render_markdown(
     rendered = _flatten_fenced_code(source)
     rendered = _flatten_tables(rendered)
     rendered = _strip_inline_code(rendered)
+    rendered = _preserve_emphasis_closures(rendered)
     rendered = _preserve_emphasis_spacing(rendered)
     rendered = force_line_breaks(rendered)
     if len(rendered) <= QQ_TEXT_LIMIT:
@@ -974,6 +982,8 @@ def _render_compact_markdown(source: str) -> str:
     compact = _strip_fenced_code(source)
     compact = _strip_table_separators(compact)
     compact = _strip_inline_code(compact)
+    compact = _preserve_emphasis_closures(compact)
+    compact = _preserve_emphasis_spacing(compact)
     if len(compact) <= QQ_TEXT_LIMIT:
         return compact
     raise ValueError(
@@ -1029,6 +1039,23 @@ def _preserve_emphasis_spacing(text: str) -> str:
         lambda match: match.group(1) + _ZERO_WIDTH_SPACE,
         text,
     )
+
+
+def _preserve_emphasis_closures(text: str) -> str:
+    """Make QQ close emphasis without moving visible content outside it."""
+
+    def _fix(match: re.Match[str]) -> str:
+        marker, content = match.group(1), match.group(2)
+        final_character = content[-1]
+        if (
+            final_character.isalnum()
+            or final_character.isspace()
+            or unicodedata.category(final_character).startswith("M")
+        ):
+            return match.group(0)
+        return f"{marker}{content}{_ZERO_WIDTH_SPACE}{marker}"
+
+    return _EMPHASIS_SPAN_RE.sub(_fix, text)
 
 
 def _flatten_tables(text: str) -> str:
