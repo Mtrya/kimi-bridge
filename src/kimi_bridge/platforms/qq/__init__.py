@@ -925,13 +925,10 @@ _FENCE_OPEN_RE = re.compile(r"```[^\n]*\n")
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _URL_RE = re.compile(r"(https?://)(\S+)")
-_EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
-# Bold/italic spans. A closing emphasis marker preceded by any punctuation,
-# symbol, or whitespace and followed by more text is not a valid CommonMark
-# closer, so QQ renders the markers literally; QQ's renderer is stricter
-# here than Feishu's, which closes emphasis regardless of trailing
-# punctuation. _move_punctuation_outside_emphasis aligns QQ with the Feishu
-# behavior by moving the trailing non-alphanumeric run outside the span.
+_EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,3}|_{1,3})(?= )")
+# QQ can leave emphasis markers visible when punctuation or a symbol is
+# immediately before the closing delimiter. Keep the authored span intact
+# and insert an invisible rendering aid before that delimiter.
 _EMPHASIS_SPAN_RE = re.compile(r"(\*{3}|_{3}|\*\*|__|[*_])([^*_]+?)\1")
 
 
@@ -957,11 +954,10 @@ def sanitize_markdown(text: str) -> str:
     QQ renders four-space-indented text as a code block but not inline code
     or tables; a single newline also collapses into the surrounding paragraph
     unless forced with a trailing zero-width space. Headings, bold/italic,
-    lists, and quotes pass through unchanged; trailing punctuation and
-    symbols are moved outside emphasis spans so their closing markers stay
-    valid (matching Feishu's lenient emphasis rendering). If those rendering
-    aids would exceed QQ's message limit, formatting degrades without
-    dropping content.
+    lists, and quotes pass through unchanged; invisible rendering aids keep
+    punctuation and symbols inside emphasis spans while making their closing
+    markers unambiguous to QQ. If those rendering aids would exceed QQ's
+    message limit, formatting degrades without dropping content.
     """
 
     return _render_markdown(text, force_line_breaks=_force_line_breaks)
@@ -973,7 +969,7 @@ def _render_markdown(
     rendered = _flatten_fenced_code(source)
     rendered = _flatten_tables(rendered)
     rendered = _strip_inline_code(rendered)
-    rendered = _move_punctuation_outside_emphasis(rendered)
+    rendered = _preserve_emphasis_closures(rendered)
     rendered = _preserve_emphasis_spacing(rendered)
     rendered = force_line_breaks(rendered)
     if len(rendered) <= QQ_TEXT_LIMIT:
@@ -986,7 +982,7 @@ def _render_compact_markdown(source: str) -> str:
     compact = _strip_fenced_code(source)
     compact = _strip_table_separators(compact)
     compact = _strip_inline_code(compact)
-    compact = _move_punctuation_outside_emphasis(compact)
+    compact = _preserve_emphasis_closures(compact)
     compact = _preserve_emphasis_spacing(compact)
     if len(compact) <= QQ_TEXT_LIMIT:
         return compact
@@ -1045,32 +1041,19 @@ def _preserve_emphasis_spacing(text: str) -> str:
     )
 
 
-def _move_punctuation_outside_emphasis(text: str) -> str:
-    """Move trailing punctuation/symbols out of bold/italic spans.
-
-    A closing emphasis marker preceded by punctuation, a symbol, or
-    whitespace and followed by more text is not right-flanking in
-    CommonMark, so QQ renders ``**重点。**继续`` with the markers visible.
-    Rewriting it as ``**重点**。继续`` keeps the closing marker valid
-    without changing the visible characters' order, and matches Feishu's
-    lenient emphasis rendering.
-    """
+def _preserve_emphasis_closures(text: str) -> str:
+    """Make QQ close emphasis without moving visible content outside it."""
 
     def _fix(match: re.Match[str]) -> str:
         marker, content = match.group(1), match.group(2)
-        boundary = len(content)
-        while boundary > 0 and not (
-            content[boundary - 1].isalnum()
-            or unicodedata.category(content[boundary - 1]).startswith("M")
+        final_character = content[-1]
+        if (
+            final_character.isalnum()
+            or final_character.isspace()
+            or unicodedata.category(final_character).startswith("M")
         ):
-            boundary -= 1
-        trailing = content[boundary:]
-        # Only act when punctuation/symbols precede the closing marker;
-        # whitespace-only tails keep literal asterisks like "2 * 3 * 4"
-        # untouched.
-        if boundary == 0 or not trailing or trailing.isspace():
             return match.group(0)
-        return f"{marker}{content[:boundary]}{marker}{trailing}"
+        return f"{marker}{content}{_ZERO_WIDTH_SPACE}{marker}"
 
     return _EMPHASIS_SPAN_RE.sub(_fix, text)
 
