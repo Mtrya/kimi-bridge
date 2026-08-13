@@ -21,6 +21,7 @@ from ..platforms.base import (
     PlatformAdapter,
 )
 from ..state import PERMISSION_MODES, ConversationBinding
+from .files import _expand_fullwidth_tilde
 from .formatting import _session_recency_key
 from .models import _ActiveStream, _CompactionOutcome
 
@@ -137,7 +138,9 @@ class _SessionMixin:
         if not argument:
             self._default_workspace.mkdir(parents=True, exist_ok=True)
             return self._default_workspace
-        workspace = Path(argument).expanduser().resolve()
+        workspace = _expand_fullwidth_tilde(
+            Path(argument).expanduser(), argument
+        ).resolve()
         if not workspace.is_dir():
             raise ValueError(f"workspace is not a directory: {workspace}")
         return workspace

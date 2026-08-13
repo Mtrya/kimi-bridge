@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -3488,6 +3489,122 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
     assert any("File not found" in reply for reply in replies)
     assert any("Not a regular file" in reply for reply in replies)
     assert sum("stay inside" in reply for reply in replies) == 2
+
+
+def test_expand_fullwidth_tilde_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kimi_bridge.router.files import _expand_fullwidth_tilde
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    existing = tmp_path / "real"
+    existing.mkdir()
+    # The literal candidate wins even when the argument starts with ～.
+    assert _expand_fullwidth_tilde(existing, "～/real") is existing
+    # A missing candidate retries the leading ～ as ~.
+    assert _expand_fullwidth_tilde(tmp_path / "missing", "～/real") == home / "real"
+    assert _expand_fullwidth_tilde(tmp_path / "missing", "～") == home
+    assert _expand_fullwidth_tilde(
+        tmp_path / "missing", f"～{os.sep}real"
+    ) == home / "real"
+    # Without a fullwidth tilde prefix the candidate is returned unchanged.
+    missing = tmp_path / "plain"
+    assert _expand_fullwidth_tilde(missing, "~/plain") == missing
+    # A ～ that is not the whole argument or followed by "/" is left alone.
+    assert _expand_fullwidth_tilde(missing, "～plain") == missing
+
+
+async def test_new_expands_fullwidth_tilde_when_literal_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = home / "project"
+    project.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "scratch",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/new ～/project"))
+    finally:
+        await router.close()
+
+    assert client.created[0][0] == str(project.resolve())
+
+
+async def test_new_fullwidth_tilde_missing_everywhere_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        FakeKimiClient(),  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "scratch",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/new ～/missing"))
+    finally:
+        await router.close()
+
+    replies = [text for _message_ref, _conversation, text in adapter.sent]
+    assert replies == [
+        f"workspace is not a directory: {(home / 'missing').resolve()}"
+    ]
+
+
+async def test_send_expands_fullwidth_tilde_inside_home_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "home"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("hello", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(workspace))
+    monkeypatch.setenv("USERPROFILE", str(workspace))
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-1",
+                    workspace=str(workspace),
+                )
+            }
+        )
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        FakeKimiClient(),  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=workspace,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/send ～/notes.txt"))
+        await router.handle_inbound(adapter, _message("/send ～/missing.txt"))
+    finally:
+        await router.close()
+
+    assert [item[2] for item in adapter.files] == [
+        OutboundFile("notes.txt", b"hello", "text/plain")
+    ]
+    assert [text for _ref, _conversation, text in adapter.sent] == [
+        f"File not found: {(workspace / 'missing.txt').resolve()}"
+    ]
 
 
 async def test_send_surfaces_platform_error_without_kimi_relabeling(
