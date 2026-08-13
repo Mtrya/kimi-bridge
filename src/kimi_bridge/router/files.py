@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from pathlib import Path
 
 from ..platforms.base import InboundFile, OutboundFile
@@ -18,13 +19,15 @@ def _expand_fullwidth_tilde(candidate: Path, argument: str) -> Path:
 
     The literal candidate wins first; the "~" retry only runs when the
     candidate does not exist and the argument starts with "～" (alone or
-    followed by "/"), so a real directory named "～" keeps working.
+    followed by a platform path separator), so a real directory named "～"
+    keeps working.
     """
 
     if candidate.exists():
         return candidate
+    separators = {os.sep, os.altsep} - {None}
     if argument.startswith(_FULLWIDTH_TILDE) and (
-        len(argument) == 1 or argument[1] == "/"
+        len(argument) == 1 or argument[1] in separators
     ):
         return Path("~" + argument[1:]).expanduser()
     return candidate
@@ -39,9 +42,9 @@ def _load_outbound_file(workspace: Path, argument: str) -> OutboundFile:
     if not resolved.is_relative_to(workspace):
         raise ValueError("File must stay inside the bound workspace.")
     if not resolved.exists():
-        raise ValueError(f"File not found: {argument}")
+        raise ValueError(f"File not found: {resolved}")
     if not resolved.is_file():
-        raise ValueError(f"Not a regular file: {argument}")
+        raise ValueError(f"Not a regular file: {resolved}")
     media_type = mimetypes.guess_type(resolved.name)[0]
     return OutboundFile(
         name=resolved.name,
