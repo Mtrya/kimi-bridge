@@ -51,7 +51,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         max_output_seconds: float = 300.0,
         interaction_timeout_seconds: float = 600.0,
         inbox_subdir: str = ".kimi-bridge-inbox",
-        session_list_limit: int = 10,
+        session_list_limit: int = 5,
         transcriber: SpeechTranscriber | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         interaction_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,

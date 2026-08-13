@@ -182,7 +182,7 @@ class Config:
     max_output_seconds: float = 300.0
     interaction_timeout_seconds: float = 600.0
     inbox_subdir: str = ".kimi-bridge-inbox"
-    session_list_limit: int = 10
+    session_list_limit: int = 5
     kimi_server: KimiServerConfig = field(default_factory=KimiServerConfig)
     feishu: FeishuConfig = field(default_factory=FeishuConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -204,7 +204,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
         max_output_seconds = 300
         interaction_timeout_seconds = 600
         inbox_subdir = ".kimi-bridge-inbox"
-        session_list_limit = 10
+        session_list_limit = 5
 
         [kimi_server]
         port = 58628
@@ -311,7 +311,7 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
     if inbox_path.is_absolute() or ".." in inbox_path.parts:
         raise ValueError("inbox_subdir must stay inside the session workspace")
 
-    list_limit = raw.get("session_list_limit", 10)
+    list_limit = raw.get("session_list_limit", 5)
     if isinstance(list_limit, bool) or not isinstance(list_limit, int):
         raise TypeError("session_list_limit must be an integer")
     if list_limit <= 0:

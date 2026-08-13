@@ -14,7 +14,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config PATH` selec
 | `max_output_seconds` | number | `300` | Positive and finite; must leave room for Feishu's edit schedule. |
 | `interaction_timeout_seconds` | number | `600` | Positive; applies to approval/question requests. |
 | `inbox_subdir` | relative path | `.kimi-bridge-inbox` | Must remain inside the session workspace. |
-| `session_list_limit` | integer | `10` | Positive. |
+| `session_list_limit` | integer | `5` | Positive. |
 | `kimi_server.port` | integer or omitted | omitted | If present, must be 1–65535; omitted selects an available port. |
 
 Only these keys have an effect. Permission mode and thinking rendering are per-conversation settings controlled with `/mode` and `/render-thinking`. QQ and WeChat force `auto` because they cannot present interactive prompts.
