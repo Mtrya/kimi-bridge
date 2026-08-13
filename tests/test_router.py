@@ -2779,7 +2779,7 @@ def _write_plan(home: Path, content: str) -> Path:
         / "plan.md"
     )
     plan.parent.mkdir(parents=True, exist_ok=True)
-    plan.write_text(content, encoding="utf-8")
+    plan.write_bytes(content.encode("utf-8"))
     return plan
 
 
