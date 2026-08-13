@@ -37,7 +37,7 @@ from .models import _CompactionWaiter
 
 TASK_OUTPUT_BYTES = 8 * 1024
 TASK_STATUSES: frozenset[str] = frozenset(
-    {"running", "completed", "failed", "cancelled"}
+    {"completed", "failed", "cancelled"}
 )
 PERMISSION_MODE_DESCRIPTIONS = {
     "manual": "Approvals and questions can be answered in chat.",
@@ -630,8 +630,12 @@ class _CommandMixin:
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
-        if not argument or argument in TASK_STATUSES:
-            status = cast(TaskStatus, argument) if argument else None
+        if not argument or argument == "all" or argument in TASK_STATUSES:
+            status = (
+                None
+                if argument == "all"
+                else cast(TaskStatus, argument or "running")
+            )
             tasks = await self._client.list_tasks(binding.session_id, status=status)
             await self._send_chunked(
                 adapter, conversation, _format_tasks(tasks, status)
@@ -655,7 +659,7 @@ class _CommandMixin:
         await self._send_chunked(
             adapter,
             conversation,
-            "Usage: /tasks [running|completed|failed|cancelled] | /tasks show <id> | /tasks cancel <id>",
+            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <id> | /tasks cancel <id>",
         )
 
     async def _handle_skills(

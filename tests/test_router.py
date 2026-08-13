@@ -1072,7 +1072,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/status",
         "/title [text]",
         "/usage",
-        "/tasks [running|completed|failed|cancelled]",
+        "/tasks [all|completed|failed|cancelled]",
         "/skills run <name> [args]",
         "/mcp",
         "/compact",
@@ -1447,6 +1447,8 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
     )
     try:
         await router.handle_inbound(adapter, _message("/tasks"))
+        await router.handle_inbound(adapter, _message("/tasks all"))
+        await router.handle_inbound(adapter, _message("/tasks completed"))
         await router.handle_inbound(adapter, _message("/tasks running"))
         await router.handle_inbound(
             adapter, _message("/tasks show task-running")
@@ -1459,8 +1461,9 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
         await router.close()
 
     assert client.task_list_calls == [
-        ("session-control", None),
         ("session-control", "running"),
+        ("session-control", None),
+        ("session-control", "completed"),
     ]
     assert client.task_detail_calls == [
         ("session-control", "task-running", 8192)
@@ -1468,13 +1471,15 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
     assert client.cancelled_tasks == [("session-control", "task-running")]
     texts = [text for _message_ref, _conversation, text in adapter.sent]
     task_list = texts[0]
-    assert "**Tasks · 2**" in task_list
-    assert task_list.index("🟡 **Running**") < task_list.index("✅ **Completed**")
+    assert "**Running tasks · 1**" in task_list
     assert "Command · `sleep 60`" in task_list
     assert "`task-running`" in task_list
-    assert "`task-complete`" in task_list
-    assert "**Running tasks · 1**" in texts[1]
-    detail = texts[2]
+    assert "`task-complete`" not in task_list
+    all_tasks = texts[1]
+    assert "**Tasks · 2**" in all_tasks
+    assert all_tasks.index("🟡 **Running**") < all_tasks.index("✅ **Completed**")
+    assert "**Completed tasks · 1**" in texts[2]
+    detail = texts[4]
     assert "**Command**\n`sleep 60`" in detail
     assert "**Output tail · 9.8 KiB**\nlast output" in detail
     assert "Started 2026-07-23 10:55:54 UTC" in detail
@@ -1650,7 +1655,7 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
         "/title",
         "/usage",
         "/tasks",
-        "/tasks running",
+        "/tasks all",
         "/tasks show task-1",
         "/tasks cancel task-1",
         "/skills",
@@ -4749,7 +4754,7 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
         text for text in texts if text.startswith("**/tasks show <id>**")
     )
     assert "8 KiB" in show_details
-    task_fallbacks = [text for text in texts if text.startswith("**/tasks [running")]
+    task_fallbacks = [text for text in texts if text.startswith("**/tasks [all")]
     assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
     # `help` is not a help token: the keyword reaches the search handler.
     assert not any(

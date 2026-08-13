@@ -332,23 +332,24 @@ Example:
 - `/restart-server`""",
     ),
     "/tasks": CommandHelp(
-        syntax="/tasks [running|completed|failed|cancelled]",
+        syntax="/tasks [all|completed|failed|cancelled]",
         summary="list tasks",
         section="Tasks and tools",
-        details="""**/tasks [running|completed|failed|cancelled]**
+        details="""**/tasks [all|completed|failed|cancelled]**
 
 List background tasks of the bound session.
 
 Arguments:
-- an optional status filter: `running`, `completed`, `failed`, or `cancelled`.
+- `all` — include tasks in every status.
+- an optional terminal status filter: `completed`, `failed`, or `cancelled`.
 
-Defaults: without a filter, lists all tasks.
+Defaults: without an argument, lists running tasks.
 
 Details: `/tasks show ?`, `/tasks cancel ?`.
 
 Example:
 - `/tasks`
-- `/tasks running`""",
+- `/tasks all`""",
     ),
     "/tasks show": CommandHelp(
         syntax="/tasks show <id>",
