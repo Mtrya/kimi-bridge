@@ -45,6 +45,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -931,7 +932,7 @@ _EMPHASIS_SPACE_RE = re.compile(r"(?<=\S)(\*{1,2}|_{1,2})(?= )")
 # here than Feishu's, which closes emphasis regardless of trailing
 # punctuation. _move_punctuation_outside_emphasis aligns QQ with the Feishu
 # behavior by moving the trailing non-alphanumeric run outside the span.
-_EMPHASIS_SPAN_RE = re.compile(r"(\*\*|__|[*_])([^*_]+?)\1")
+_EMPHASIS_SPAN_RE = re.compile(r"(\*{3}|_{3}|\*\*|__|[*_])([^*_]+?)\1")
 
 
 def _content_preview(text: str) -> str:
@@ -1058,7 +1059,10 @@ def _move_punctuation_outside_emphasis(text: str) -> str:
     def _fix(match: re.Match[str]) -> str:
         marker, content = match.group(1), match.group(2)
         boundary = len(content)
-        while boundary > 0 and not content[boundary - 1].isalnum():
+        while boundary > 0 and not (
+            content[boundary - 1].isalnum()
+            or unicodedata.category(content[boundary - 1]).startswith("M")
+        ):
             boundary -= 1
         trailing = content[boundary:]
         # Only act when punctuation/symbols precede the closing marker;

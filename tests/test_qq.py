@@ -1179,6 +1179,9 @@ def test_sanitize_markdown_moves_any_punctuation_outside_emphasis() -> None:
     assert sanitize_markdown("**bold.**next") == "**bold**.next"
     assert sanitize_markdown("**注意！**接下来") == "**注意**！接下来"
     assert sanitize_markdown("__done!__now") == "__done__!now"
+    assert sanitize_markdown("***重点。***继续") == "***重点***。继续"
+    assert sanitize_markdown("___重点。___继续") == "___重点___。继续"
+    assert sanitize_markdown("**cafe\u0301.**next") == "**cafe\u0301**.next"
     # Literal asterisks with a whitespace-only tail stay untouched.
     assert sanitize_markdown("2 * 3 * 4") == "2 * 3 * 4"
 
