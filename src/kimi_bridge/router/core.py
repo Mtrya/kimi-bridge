@@ -47,6 +47,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         default_workspace: str | Path,
         model: str,
         edit_throttle_seconds: float = 1.5,
+        first_flush_delay_seconds: float = 8.0,
         max_output_seconds: float = 300.0,
         interaction_timeout_seconds: float = 600.0,
         inbox_subdir: str = ".kimi-bridge-inbox",
@@ -61,6 +62,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
             raise ValueError("model must be non-empty")
         if edit_throttle_seconds <= 0:
             raise ValueError("edit_throttle_seconds must be positive")
+        if first_flush_delay_seconds < 0:
+            raise ValueError("first_flush_delay_seconds must be non-negative")
         if max_output_seconds <= 0:
             raise ValueError("max_output_seconds must be positive")
         if interaction_timeout_seconds <= 0:
@@ -76,6 +79,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._default_workspace = Path(default_workspace).expanduser().resolve()
         self._model = model
         self._edit_throttle_seconds = edit_throttle_seconds
+        self._first_flush_delay_seconds = first_flush_delay_seconds
         self._max_output_seconds = max_output_seconds
         self._interaction_timeout_seconds = interaction_timeout_seconds
         self._inbox_subdir = inbox_subdir

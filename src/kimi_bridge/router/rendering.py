@@ -117,7 +117,15 @@ class _RenderingMixin:
                 await self._flush(active, active.thinking)
         active.pending_finalization = None
         active.step = None
-        active.render = _RenderState(turn_id=turn_id, turn_active=True)
+        active.render = _RenderState(
+            turn_id=turn_id,
+            turn_active=True,
+            first_flush_after=(
+                self._clock() + self._first_flush_delay_seconds
+                if self._first_flush_delay_seconds > 0
+                else None
+            ),
+        )
         active.thinking = _RenderState(
             prefix=THINKING_LABEL,
             turn_id=turn_id,
@@ -189,6 +197,19 @@ class _RenderingMixin:
             return
         now = self._clock()
         if not render.messages or render.last_flush is None:
+            if render.first_flush_after is not None and now < (
+                render.first_flush_after
+            ):
+                if render.delayed_flush is None or render.delayed_flush.done():
+                    render.delayed_flush = asyncio.create_task(
+                        self._flush_after(
+                            active,
+                            render,
+                            render.first_flush_after - now,
+                        ),
+                        name="delayed-first-flush",
+                    )
+                return
             await self._flush(active, render)
             return
         interval = self._next_flush_interval(active, render)
