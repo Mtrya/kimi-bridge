@@ -89,6 +89,7 @@ class ApprovalPrompt:
     request: ApprovalRequest
     session_title: str
     workspace: str
+    plan_preview: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

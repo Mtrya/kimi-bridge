@@ -88,6 +88,7 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 - Feishu authorizes stable `open_id`/`user_id` values, QQ authorizes app-scoped C2C `user_openid` values, and WeChat authorizes stable QR-scanner identities. None is a display-name or nickname substitute.
 - Platform secrets remain in protected configuration or adapter-owned managed storage. `state.json` never contains adapter credentials.
 - `/send` accepts only files within the bound workspace, including symlink containment checks.
+- `ExitPlanMode` plan previews read only regular files under `~/.kimi-code/sessions/**/plans/`; any other wire-supplied path is ignored.
 - The deployment model is one trusted host account and trusted operator, not tenant isolation. Kimi Code and its tools retain the host account's filesystem, process, and network authority.
 
 ## Compatibility policy

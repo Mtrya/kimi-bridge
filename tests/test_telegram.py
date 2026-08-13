@@ -1144,3 +1144,26 @@ async def test_old_callback_after_adapter_restart_uses_stale_path() -> None:
     assert _requests(second_api, "editMessageText")[-1]["reply_markup"] == {
         "inline_keyboard": []
     }
+
+
+def test_approval_text_includes_plan_preview_and_skips_json_summary() -> None:
+    prompt = _approval_prompt()
+    prompt = ApprovalPrompt(
+        interaction_id=prompt.interaction_id,
+        request=ApprovalRequest(
+            id=prompt.request.id,
+            session_id=prompt.request.session_id,
+            tool_name="ExitPlanMode",
+            action="Presenting plan and exiting plan mode",
+            input_display={"path": "/home/u/.kimi-code/sessions/x/plans/p.md"},
+        ),
+        session_title=prompt.session_title,
+        workspace=prompt.workspace,
+        plan_preview="# Plan\n\nDo the thing.",
+    )
+
+    text = telegram_module._approval_text(prompt)
+
+    assert "Plan:" in text
+    assert "# Plan" in text
+    assert "p.md" not in text
