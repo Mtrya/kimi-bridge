@@ -43,7 +43,7 @@ Example:
         section="Sessions",
         details="""**/sessions**
 
-List recent Kimi sessions with one-based indices and idle/busy state. The list size is the configured `session_list_limit` (default 10).
+List recent Kimi sessions with one-based indices and idle/busy state. The list size is the configured `session_list_limit` (default 5).
 
 Side effects: remembers the displayed indices so `/switch <n>` can reference them.
 
