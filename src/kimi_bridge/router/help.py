@@ -141,6 +141,25 @@ Side effects: rejected while the session is busy; mutates session history by com
 Example:
 - `/compact`""",
     ),
+    "/history": CommandHelp(
+        syntax="/history [count]",
+        summary="show the newest session messages",
+        section="Sessions",
+        details="""**/history [count]**
+
+Show the newest messages in the bound session's authoritative history — the post-undo, post-compaction view the agent currently sees. Every role is kept in order; thinking is skipped; non-text content becomes `[attachment: <name>]` placeholders.
+
+Arguments:
+- `count` — messages to show, 1-50.
+
+Defaults: `10` when omitted.
+
+Side effects: none. `/undo` and `/switch` confirmations automatically include the newest 2 messages.
+
+Example:
+- `/history`
+- `/history 20`""",
+    ),
     "/undo": CommandHelp(
         syntax="/undo [count]",
         summary="undo one or more history steps",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import cast
 
@@ -18,9 +19,13 @@ from ..state import PERMISSION_MODES, ConversationBinding
 from .files import _load_outbound_file
 from .help import command_help_details, render_help_index
 from .formatting import (
+    HISTORY_DEFAULT_COUNT,
+    HISTORY_MAX_COUNT,
+    HISTORY_RECAP_COUNT,
     _effective_model,
     _find_model,
     _format_goal,
+    _format_history,
     _format_mcp_tools,
     _format_models,
     _format_sessions,
@@ -33,6 +38,9 @@ from .formatting import (
     _model_supports_thinking,
 )
 from .models import _CompactionWaiter
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 TASK_OUTPUT_BYTES = 8 * 1024
@@ -158,9 +166,11 @@ class _CommandMixin:
                 return
             self._state.bindings[conversation_key] = binding
             self._state_store.save(self._state)
-            await self._send_chunked(
-                adapter, conversation, f"Switched to {binding.session_id}"
-            )
+            recap = await self._history_recap(binding.session_id)
+            confirmation = f"Switched to {binding.session_id}"
+            if recap is not None:
+                confirmation += f"\n\n{recap}"
+            await self._send_chunked(adapter, conversation, confirmation)
             return
         if command == "/model":
             await self._handle_model(conversation_key, adapter, conversation, argument)
@@ -211,6 +221,11 @@ class _CommandMixin:
                 conversation,
                 actor,
                 argument,
+            )
+            return
+        if command == "/history":
+            await self._handle_history(
+                conversation_key, adapter, conversation, argument
             )
             return
         if command == "/undo":
@@ -787,6 +802,47 @@ class _CommandMixin:
         else:
             await self._send_chunked(adapter, conversation, text)
 
+    async def _handle_history(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        if not argument:
+            count = HISTORY_DEFAULT_COUNT
+        elif (
+            argument.isascii()
+            and argument.isdecimal()
+            and 1 <= int(argument) <= HISTORY_MAX_COUNT
+        ):
+            count = int(argument)
+        else:
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Usage: /history [1-{HISTORY_MAX_COUNT}]",
+            )
+            return
+        binding = await self._require_binding(conversation_key, adapter, conversation)
+        if binding is None:
+            return
+        snapshot = await self._client.get_snapshot(binding.session_id)
+        formatted = _format_history(snapshot, count)
+        await self._send_chunked(
+            adapter, conversation, formatted or "No history yet."
+        )
+
+    async def _history_recap(self, session_id: str) -> str | None:
+        """Best-effort newest-messages recap for undo/switch confirmations."""
+
+        try:
+            snapshot = await self._client.get_snapshot(session_id)
+        except KimiServerError:
+            LOGGER.exception("history recap snapshot failed")
+            return None
+        return _format_history(snapshot, HISTORY_RECAP_COUNT)
+
     async def _handle_undo(
         self,
         conversation_key: str,
@@ -816,11 +872,11 @@ class _CommandMixin:
         if status is None:
             return
         await self._client.undo_session(binding.session_id, count=count)
-        await self._send_chunked(
-            adapter,
-            conversation,
-            f"Undid {count} history {'step' if count == 1 else 'steps'}.",
-        )
+        recap = await self._history_recap(binding.session_id)
+        confirmation = f"Undid {count} history {'step' if count == 1 else 'steps'}."
+        if recap is not None:
+            confirmation += f"\n\n{recap}"
+        await self._send_chunked(adapter, conversation, confirmation)
 
     async def _handle_goal(
         self,

@@ -12,12 +12,13 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
 | `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
 | `/sessions search <keyword>` | Search active sessions by title and workspace path. |
-| `/switch <n\|id\|title>` | Bind a displayed index, explicit session ID, or exact title. |
+| `/switch <n\|id\|title>` | Bind a displayed index, explicit session ID, or exact title; the confirmation recaps the newest 2 messages. |
 | `/status` | Show session, workspace, busy state, pending interaction, model, effort, plan mode, permission mode, and Kimi Code version. |
 | `/title [text]` | Show the current title or rename the session. |
 | `/usage` | Show live token and context-window values when exposed by Kimi. |
 | `/compact` | Start context compaction. |
-| `/undo [count]` | Undo a positive number of history steps; default `1`. |
+| `/history [count]` | Show the newest session messages (default `10`, max `50`); thinking is skipped and attachments become placeholders. |
+| `/undo [count]` | Undo a positive number of history steps; default `1`; the confirmation recaps the newest 2 messages. |
 | `/mode <manual\|auto\|yolo>` | Set the session permission mode where the adapter supports it. |
 | `/model [alias]` | Show the current model and catalog aliases, or select an alias. |
 | `/effort [effort]` | Show or set an effort advertised for the active model. |
