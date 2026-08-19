@@ -47,12 +47,12 @@ _DOCUMENTS = (
     (
         "qq.c2c-message",
         "docs/develop/api-v2/server-inter/message/send-receive/send.md",
-        ("msg_type", "content", "msg_id", "msg_seq"),
+        ("msg_type", "content", "msg_id", "msg_seq", "media", "file_info"),
     ),
     (
         "qq.rich-media",
         "docs/develop/api-v2/server-inter/message/send-receive/rich-media.md",
-        ("file_type", "file_info", "srv_send_msg", "msg_type", "media"),
+        ("file_type", "file_info", "srv_send_msg"),
     ),
 )
 _RAW_ROOT = "https://raw.githubusercontent.com/tencent-connect/bot-docs"
