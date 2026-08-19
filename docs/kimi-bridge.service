@@ -10,6 +10,9 @@ ExecStart=%h/.local/bin/kimi-bridge
 Environment=PATH=%h/.local/bin:%h/.kimi-code/bin:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=5s
+# Bounds memory growth from accumulated kimi web session workers; raise for many concurrent sessions.
+MemoryHigh=3G
+MemoryMax=4G
 
 [Install]
 WantedBy=default.target
