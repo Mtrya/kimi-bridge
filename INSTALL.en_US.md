@@ -98,7 +98,7 @@ kimi-bridge
 
 Decide whether to run persistently only after the foreground round trip passes:
 
-- **Linux**: start from the [systemd user-unit template](docs/kimi-bridge.service), filling in the absolute paths from `command -v kimi-bridge` and `command -v kimi`;
+- **Linux**: start from the [systemd user-unit template](docs/kimi-bridge.service), filling in the absolute paths from `command -v kimi-bridge` and `command -v kimi` — raise the template's memory limits for many concurrent sessions;
 - **macOS**: configure a user-level `launchd` LaunchAgent with the actual absolute paths for `kimi-bridge`, `kimi`, and the config;
 - **Windows**: create a current-user Task Scheduler task running under the same user account that owns the credential files.
 
