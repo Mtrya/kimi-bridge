@@ -31,9 +31,9 @@ class _RenderState:
     prompt_id: str | None = None
     turn_active: bool = False
     last_flush: float | None = None
-    # Set on a turn's first answer render: the first flush waits until this
-    # clock reading so the opening chunk accumulates more content. Later
-    # per-step renders leave it unset and flush immediately.
+    # Backstop deadline for the opening flush, armed lazily on the first
+    # delta that falls short of first_flush_min_chars so a stalled stream
+    # cannot defer the opening chunk forever.
     first_flush_after: float | None = None
     delayed_flush: asyncio.Task[None] | None = None
     edit_counts: dict[MessageRef, int] = field(default_factory=dict)
