@@ -1481,6 +1481,13 @@ def test_session_notice_from_event_ignores_background_task_lifecycle() -> None:
     [
         {"type": "warning", "message": ""},
         {"type": "error", "code": "bad", "message": "Broken"},
+        {"type": "turn.ended", "turnId": 4},
+        {
+            "type": "turn.ended",
+            "turnId": 4,
+            "reason": "failed",
+            "error": {"code": "bad", "message": "Broken"},
+        },
         {"type": "turn.ended", "turnId": 4, "reason": "unknown"},
     ],
 )

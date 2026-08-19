@@ -726,6 +726,11 @@ class FeishuAdapter:
     ) -> MessageRef:
         return await self.send_text(conversation, text)
 
+    async def send_notice_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        return await self.send_text(conversation, text)
+
     async def edit_text(self, message: MessageRef, text: str) -> None:
         if self._transport is None:
             raise RuntimeError("Feishu adapter is not started")

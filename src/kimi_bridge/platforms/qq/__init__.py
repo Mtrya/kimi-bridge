@@ -1316,8 +1316,23 @@ class QQAdapter:
     async def send_final_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef:
+        return await self._send_regular_text(conversation, text, stop_typing=True)
+
+    async def send_notice_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        return await self._send_regular_text(conversation, text, stop_typing=False)
+
+    async def _send_regular_text(
+        self,
+        conversation: ConversationRef,
+        text: str,
+        *,
+        stop_typing: bool,
+    ) -> MessageRef:
         self._validate_conversation(conversation)
-        await self._stop_typing(conversation)
+        if stop_typing:
+            await self._stop_typing(conversation)
         openid = conversation.conversation_id
         sanitized = sanitize_markdown(text)
         anchor = self._anchors.get(conversation)

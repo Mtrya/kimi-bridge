@@ -362,6 +362,66 @@ def test_semantic_projection_checks_requests_messages_and_events(
     assert "websocket.event.assistant.delta.delta" in failures
 
 
+def test_semantic_projection_checks_fields_required_in_optional_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    event = kimi_contract.SessionEventContract(
+        "turn.ended",
+        "session_notice_from_event",
+        (
+            kimi_contract.SchemaFieldContract(
+                ("error", "retryable"),
+                ("boolean",),
+                required=False,
+                required_if_parent_present=True,
+            ),
+        ),
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", (event,))
+    retryable_schema = {"type": "boolean"}
+    error_schema = {
+        "type": "object",
+        "properties": {"retryable": retryable_schema},
+        "required": ["retryable"],
+    }
+    asyncapi["components"]["messages"] = {
+        "session_event": {
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "payload": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": ["turn.ended"],
+                                    },
+                                    "error": error_schema,
+                                },
+                                "required": ["type"],
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+    }
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert not [item for item in checks if item.status == "fail"]
+
+    error_schema["required"] = []
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert {item.id for item in checks if item.status == "fail"} == {
+        "websocket.event.turn.ended.error.retryable"
+    }
+
+
 def test_semantic_projection_checks_multipart_request_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

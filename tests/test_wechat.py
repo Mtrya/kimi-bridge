@@ -2152,6 +2152,51 @@ async def test_formatter_state_spans_chunks_and_resets_after_finalization(
     ]
 
 
+async def test_notice_text_preserves_active_formatter_and_typing(
+    tmp_path: Path,
+) -> None:
+    storage = WeChatStorage(tmp_path / "wechat")
+    storage.save_runtime_state(
+        WeChatRuntimeState(
+            context_tokens={("bot-one@im.bot", "user-one"): "CURRENT_CONTEXT"}
+        )
+    )
+    api = RuntimeAPIStub()
+    api.typing_ticket = "TYPING_TICKET_SECRET"
+    adapter = WeChatAdapter(
+        "bot-one@im.bot",
+        frozenset({"user-one"}),
+        api=api,
+        storage=storage,
+    )
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    adapter._start_typing(conversation, "CURRENT_CONTEXT")
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_ACTIVE
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+
+    await adapter.send_text(conversation, "````\n")
+    await adapter.send_notice_text(conversation, "Kimi warning")
+    assert conversation in adapter._typing_tasks
+    await adapter.send_final_text(conversation, "# still code\n````\n")
+    await _wait_until(
+        lambda: any(
+            status == TYPING_STATUS_CANCEL
+            for _user, _ticket, status in api.typing_calls
+        )
+    )
+    await adapter.stop()
+
+    assert [send["text"] for send in api.sends] == [
+        "````\n",
+        "Kimi warning",
+        "# still code\n````\n",
+    ]
+
+
 async def test_empty_final_text_is_noop_and_finishes_typing(
     tmp_path: Path,
 ) -> None:

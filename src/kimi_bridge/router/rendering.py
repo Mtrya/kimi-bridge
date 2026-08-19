@@ -644,6 +644,7 @@ class _RenderingMixin:
                 active.adapter,
                 active.conversation,
                 _format_session_notice(notice),
+                terminal=notice.kind == "error",
             )
         except Exception:
             LOGGER.exception(
@@ -697,6 +698,24 @@ class _RenderingMixin:
                     await self._flush(active, active.thinking)
             return
 
+        pending = active.pending_finalization
+        if pending is not None:
+            prompt_id = pending.answer.prompt_id
+            answer_text = _persisted_assistant_text(
+                snapshot, prompt_id=prompt_id
+            )
+            if answer_text is not None:
+                pending.answer.text = answer_text
+            if self._thinking_enabled(active):
+                thinking_text = _persisted_thinking_text(
+                    snapshot, prompt_id=prompt_id
+                )
+                if thinking_text is not None:
+                    pending.thinking.text = thinking_text
+            await self._flush_pending_finalization(active, pending)
+            active.pending_finalization = None
+            return
+
         if not active.render.turn_active and not active.thinking.turn_active:
             return
         answer_text = _persisted_assistant_text(snapshot)
@@ -725,10 +744,18 @@ class _RenderingMixin:
             )
 
     async def _send_chunked(
-        self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
+        self,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        text: str,
+        *,
+        terminal: bool = True,
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
-            await adapter.send_final_text(conversation, chunk)
+            if terminal:
+                await adapter.send_final_text(conversation, chunk)
+            else:
+                await adapter.send_notice_text(conversation, chunk)
 
 
 def _optional_int(value: Any) -> int | None:

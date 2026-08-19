@@ -57,7 +57,9 @@ def session_notice_from_event(event: dict[str, Any]) -> SessionNotice | None:
         return None
 
     reason = payload.get("reason")
-    if reason in (None, "completed", "cancelled"):
+    if reason is None:
+        raise KimiServerProtocolError("turn.ended reason must be present")
+    if reason in ("completed", "cancelled"):
         return None
     if reason in ("failed", "blocked"):
         error = payload.get("error")

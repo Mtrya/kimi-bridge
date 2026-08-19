@@ -290,6 +290,29 @@ class WeChatAdapter:
         self, conversation: ConversationRef, text: str
     ) -> MessageRef:
         self._validate_conversation(conversation)
+        formatter = self._formatter_states.get(conversation)
+        if formatter is None:
+            formatter = MarkdownFormatter()
+        else:
+            formatter = formatter.copy()
+        message = await self._send_formatted_text(conversation, text, formatter)
+        self._formatter_states[conversation] = formatter
+        return message
+
+    async def send_notice_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        self._validate_conversation(conversation)
+        return await self._send_formatted_text(
+            conversation, text, MarkdownFormatter()
+        )
+
+    async def _send_formatted_text(
+        self,
+        conversation: ConversationRef,
+        text: str,
+        formatter: MarkdownFormatter,
+    ) -> MessageRef:
         context_token = self._runtime_state.context_tokens.get(
             (conversation.bot_id, conversation.conversation_id)
         )
@@ -297,11 +320,6 @@ class WeChatAdapter:
             raise WeChatProtocolError(
                 "WeChat reply context is unavailable for this conversation"
             )
-        formatter = self._formatter_states.get(conversation)
-        if formatter is None:
-            formatter = MarkdownFormatter()
-        else:
-            formatter = formatter.copy()
         rendered = formatter.sanitize(text)
         client_id = secrets.token_hex(16)
         await self._api.send_text(
@@ -310,7 +328,6 @@ class WeChatAdapter:
             text=rendered,
             client_id=client_id,
         )
-        self._formatter_states[conversation] = formatter
         return MessageRef(conversation, client_id)
 
     async def send_final_text(
