@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,7 +49,7 @@ from kimi_bridge.platforms.feishu import (
     _LarkTransport,
     _LarkWebSocketRunner,
     _convert_opus_to_pcm,
-    _load_video_cover,
+    _extract_video_cover,
 )
 from kimi_bridge.platforms.feishu.cards import (
     decode_interaction_response,
@@ -489,12 +490,22 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
     assert len(runners) == 1
 
 
-async def test_outbound_files_use_native_image_media_and_file_messages() -> None:
+async def test_outbound_files_use_native_image_media_and_file_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extractions: list[tuple[bytes, str]] = []
+
+    async def extract_cover(data: bytes, executable: str) -> bytes:
+        extractions.append((data, executable))
+        return b"\x89PNG\r\n\x1a\n" + data
+
+    monkeypatch.setattr(feishu_module, "_extract_video_cover", extract_cover)
     transport = FakeTransport()
     adapter = FeishuAdapter(
         "cli_config",
         "secret",
         {"ou_allowed"},
+        ffmpeg_executable="C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe",
         transport=transport,
     )
     conversation = ConversationRef("feishu", "cli_event", "oc_direct")
@@ -505,6 +516,9 @@ async def test_outbound_files_use_native_image_media_and_file_messages() -> None
     video_message = await adapter.send_file(
         conversation, OutboundFile("demo.mp4", b"mp4", "video/mp4")
     )
+    second_video_message = await adapter.send_file(
+        conversation, OutboundFile("second.mp4", b"other-mp4", "video/mp4")
+    )
     file_message = await adapter.send_file(
         conversation, OutboundFile("notes.txt", b"text", "text/plain")
     )
@@ -512,18 +526,26 @@ async def test_outbound_files_use_native_image_media_and_file_messages() -> None
     assert [message.message_id for message in (
         image_message,
         video_message,
+        second_video_message,
         file_message,
-    )] == ["media-1", "media-2", "media-3"]
+    )] == ["media-1", "media-2", "media-3", "media-4"]
+    assert extractions == [
+        (b"mp4", "C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe"),
+        (b"other-mp4", "C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe"),
+    ]
     assert transport.uploaded_images[0] == OutboundFile(
         "photo.png", b"png", "image/png"
     )
-    cover = transport.uploaded_images[1]
-    assert cover.name == "video-cover.png"
-    assert cover.media_type == "image/png"
-    assert cover.data == _load_video_cover()
-    assert cover.data.startswith(b"\x89PNG\r\n\x1a\n")
+    covers = transport.uploaded_images[1:]
+    assert [cover.name for cover in covers] == ["video-cover.png"] * 2
+    assert [cover.media_type for cover in covers] == ["image/png"] * 2
+    assert [cover.data for cover in covers] == [
+        b"\x89PNG\r\n\x1a\nmp4",
+        b"\x89PNG\r\n\x1a\nother-mp4",
+    ]
     assert [(item.name, file_type) for item, file_type in transport.uploaded_files] == [
         ("demo.mp4", "mp4"),
+        ("second.mp4", "mp4"),
         ("notes.txt", "stream"),
     ]
     assert transport.sent_media == [
@@ -534,8 +556,40 @@ async def test_outbound_files_use_native_image_media_and_file_messages() -> None
             "media",
             {"file_key": "file-1", "image_key": "img-2"},
         ),
-        ("oc_direct", "chat_id", "file", {"file_key": "file-2"}),
+        (
+            "oc_direct",
+            "chat_id",
+            "media",
+            {"file_key": "file-2", "image_key": "img-3"},
+        ),
+        ("oc_direct", "chat_id", "file", {"file_key": "file-3"}),
     ]
+
+
+async def test_video_cover_failure_prevents_feishu_uploads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_cover(_data: bytes, _executable: str) -> bytes:
+        raise FeishuAPIError("FFmpeg video-cover extraction failed")
+
+    monkeypatch.setattr(feishu_module, "_extract_video_cover", fail_cover)
+    transport = FakeTransport()
+    adapter = FeishuAdapter(
+        "cli_config",
+        "secret",
+        {"ou_allowed"},
+        transport=transport,
+    )
+
+    with pytest.raises(FeishuAPIError, match="video-cover extraction failed"):
+        await adapter.send_file(
+            ConversationRef("feishu", "cli_event", "oc_direct"),
+            OutboundFile("demo.mp4", b"invalid-mp4", "video/mp4"),
+        )
+
+    assert transport.uploaded_files == []
+    assert transport.uploaded_images == []
+    assert transport.sent_media == []
 
 
 async def test_outbound_native_upload_error_is_not_silently_remapped() -> None:
@@ -1380,6 +1434,86 @@ async def test_ffmpeg_converts_opus_to_16khz_mono_pcm(
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
     }
+
+
+async def test_ffmpeg_extracts_video_cover_from_seekable_temporary_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    video_paths: list[Path] = []
+    png = b"\x89PNG\r\n\x1a\nderived-cover"
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self, data: bytes | None) -> tuple[bytes, bytes]:
+            assert data is None
+            return png, b""
+
+    async def fake_create(*args: Any, **kwargs: Any) -> FakeProcess:
+        calls.append((args, kwargs))
+        video_path = Path(args[5])
+        assert video_path.read_bytes() == b"video-bytes"
+        video_paths.append(video_path)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    executable = "C:\\Program Files\\FFmpeg\\bin\\ffmpeg.exe"
+    assert await _extract_video_cover(b"video-bytes", executable) == png
+    args, kwargs = calls[0]
+    assert args == (
+        executable,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_paths[0]),
+        "-map",
+        "0:v:0",
+        "-vf",
+        "thumbnail=30,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+    )
+    assert video_paths[0].name == "video.mp4"
+    assert video_paths[0].parent.name.startswith("kimi-bridge-feishu-cover-")
+    assert not video_paths[0].exists()
+    assert kwargs == {
+        "stdin": asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+
+
+async def test_ffmpeg_video_cover_decode_failure_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video_paths: list[Path] = []
+
+    class FakeProcess:
+        returncode = 1
+
+        async def communicate(self, data: bytes | None) -> tuple[bytes, bytes]:
+            assert data is None
+            return b"", b"invalid video"
+
+    async def fake_create(*args: Any, **_kwargs: Any) -> FakeProcess:
+        video_paths.append(Path(args[5]))
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+    with pytest.raises(FeishuAPIError, match="FFmpeg video-cover extraction failed"):
+        await _extract_video_cover(b"invalid-video", "/fake/ffmpeg")
+
+    assert len(video_paths) == 1
+    assert not video_paths[0].exists()
 
 
 async def test_ffmpeg_timeout_kills_and_reaps_process(

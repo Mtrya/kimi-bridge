@@ -188,8 +188,8 @@ def _build_adapter(config: Config) -> PlatformAdapter:
         ffmpeg_path = shutil.which("ffmpeg")
         if ffmpeg_path is None:
             raise AdapterConfigurationError(
-                "FFmpeg is required for Feishu inbound voice; install ffmpeg "
-                "and ensure it is on PATH"
+                "FFmpeg is required for Feishu voice transcription and outbound "
+                "video covers; install ffmpeg and ensure it is on PATH"
             )
         return FeishuAdapter(
             app_id,

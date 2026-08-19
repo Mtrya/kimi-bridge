@@ -49,7 +49,7 @@ kimi-bridge feishu login
 
 Open the URL printed by the command in a browser. The page can create a new application or select an existing one, and pre-fills the tenant permissions, `im.message.receive_v1` event, and `card.action.trigger` callback the bridge needs; confirm as the page directs. This is application registration, not user OAuth. The resulting application credential is saved to `~/.kimi-bridge/feishu/credentials.json`, and the registering user's `open_id` is added to the allowlist automatically.
 
-Afterward, confirm bot capability and the remaining console settings on the Feishu open platform, publish an app version, and confirm the intended user can reach the bot. Receiving voice messages requires `ffmpeg` on PATH.
+Afterward, confirm bot capability and the remaining console settings on the Feishu open platform, publish an app version, and confirm the intended user can reach the bot. Native voice transcription and outbound video covers require `ffmpeg` on PATH.
 
 ### QQ
 
