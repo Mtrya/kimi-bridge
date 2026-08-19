@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -47,6 +47,8 @@ OFFICIAL_KIMI_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.sh"
 # /install.ps1 is the deprecated Python kimi-cli installer; Kimi Code lives
 # under /kimi-code/ on both platforms.
 OFFICIAL_KIMI_WINDOWS_INSTALLER_URL = "https://code.kimi.com/kimi-code/install.ps1"
+OFFICIAL_KIMI_RELEASES_REPOSITORY = "MoonshotAI/kimi-code"
+OFFICIAL_KIMI_RELEASE_TAG_PREFIX = "@moonshot-ai/kimi-code@"
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 PROBE_MODEL_ALIAS = "compatibility/probe"
 PROBE_PROVIDER_ID = "compatibility"
@@ -209,7 +211,9 @@ class GitHubAutomation(Protocol):
         self, summary: CompatibilitySummary
     ) -> Literal["closed", "recorded"] | None: ...
 
-    def promote_version(self, summary: CompatibilitySummary) -> str | None: ...
+    def promote_versions(
+        self, summaries: Sequence[CompatibilitySummary]
+    ) -> str | None: ...
 
     def record_drift(self, summary: CompatibilitySummary) -> str: ...
 
@@ -312,12 +316,24 @@ def _update_lock_version(
 
 def prepare_compatibility_release(
     *,
-    kimi_code_version: str,
+    kimi_code_versions: Sequence[str],
     pyproject: str,
     uv_lock: str,
     compatibility_map: str,
 ) -> tuple[str, dict[str, str]]:
     """Build the three files for the next patch compatibility release."""
+
+    promoted_versions = tuple(
+        sorted(
+            {
+                normalize_kimi_code_version(version)
+                for version in kimi_code_versions
+            },
+            key=kimi_code_version_sort_key,
+        )
+    )
+    if not promoted_versions:
+        raise RuntimeError("no Kimi Code versions were selected for promotion")
 
     project_payload = _parse_toml(pyproject, "pyproject.toml")
     project = project_payload.get("project")
@@ -353,13 +369,20 @@ def prepare_compatibility_release(
     versions = latest.get("kimi_code")
     if not isinstance(versions, list):
         raise RuntimeError("compatibility map is malformed")
-    if kimi_code_version in versions:
-        raise RuntimeError("Kimi Code version is already supported")
+    already_supported = sorted(
+        set(versions).intersection(promoted_versions),
+        key=kimi_code_version_sort_key,
+    )
+    if already_supported:
+        raise RuntimeError(
+            "Kimi Code versions are already supported: "
+            + ", ".join(already_supported)
+        )
     releases.append(
         {
             "bridge": next_version,
             "kimi_code": sorted(
-                {*versions, kimi_code_version},
+                {*versions, *promoted_versions},
                 key=kimi_code_version_sort_key,
             ),
         }
@@ -376,6 +399,126 @@ def prepare_compatibility_release(
             json.dumps(payload, indent=2) + "\n"
         ),
     }
+
+
+def select_kimi_code_versions(
+    releases: Sequence[Mapping[str, Any]],
+    drift_issues: Sequence[Mapping[str, Any]],
+    *,
+    supported_versions: Collection[str] = SUPPORTED_KIMI_CODE_VERSIONS,
+) -> tuple[str, ...]:
+    """Select every unrecorded official release in the current support era."""
+
+    supported = {
+        normalize_kimi_code_version(version) for version in supported_versions
+    }
+    if not supported:
+        raise RuntimeError("the current bridge has no supported Kimi Code versions")
+    official: set[str] = set()
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        tag = release.get("tag_name")
+        if not isinstance(tag, str) or not tag.startswith(
+            OFFICIAL_KIMI_RELEASE_TAG_PREFIX
+        ):
+            continue
+        official.add(
+            normalize_kimi_code_version(
+                tag.removeprefix(OFFICIAL_KIMI_RELEASE_TAG_PREFIX)
+            )
+        )
+    if not official:
+        raise RuntimeError("the official Kimi Code repository has no releases")
+
+    recorded: dict[str, bool] = {}
+    marker = re.compile(r"<!-- version:([^\s]+) failure-digest:")
+    for issue in drift_issues:
+        if DRIFT_MARKER not in str(issue.get("body", "")):
+            continue
+        match = marker.search(str(issue.get("body", "")))
+        if match is None:
+            continue
+        try:
+            version = normalize_kimi_code_version(match.group(1))
+        except ValueError:
+            continue
+        recorded[version] = recorded.get(version, False) or issue.get("state") == "open"
+
+    support_floor = min(supported, key=kimi_code_version_sort_key)
+    missing = {
+        version
+        for version in official
+        if kimi_code_version_sort_key(version)
+        >= kimi_code_version_sort_key(support_floor)
+        and version not in supported
+        and (version not in recorded or recorded[version])
+    }
+    selected = missing or {max(official, key=kimi_code_version_sort_key)}
+    return tuple(sorted(selected, key=kimi_code_version_sort_key))
+
+
+def discover_kimi_code_versions(
+    repository: str,
+    token: str,
+    *,
+    api_url: str = "https://api.github.com",
+    client: httpx.Client | None = None,
+) -> tuple[str, ...]:
+    """Fetch official releases and drift history for the canary matrix."""
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    github = client or httpx.Client(
+        base_url=api_url, headers=headers, timeout=30.0
+    )
+    owns_client = client is None
+    try:
+        releases: list[Mapping[str, Any]] = []
+        page = 1
+        while True:
+            response = github.get(
+                f"/repos/{OFFICIAL_KIMI_RELEASES_REPOSITORY}/releases",
+                params={"per_page": 100, "page": page},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("GitHub releases response was not a list")
+            releases.extend(item for item in payload if isinstance(item, dict))
+            if len(payload) < 100:
+                break
+            page += 1
+
+        issues: list[Mapping[str, Any]] = []
+        page = 1
+        while True:
+            response = github.get(
+                f"/repos/{repository}/issues",
+                params={
+                    "state": "all",
+                    "labels": DRIFT_LABEL,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            response.raise_for_status()
+            issues_payload = response.json()
+            if not isinstance(issues_payload, list):
+                raise RuntimeError("GitHub issues response was not a list")
+            issues.extend(
+                item for item in issues_payload if isinstance(item, dict)
+            )
+            if len(issues_payload) < 100:
+                break
+            page += 1
+        return select_kimi_code_versions(releases, issues)
+    finally:
+        if owns_client:
+            github.close()
 
 
 def redact(value: str, *, limit: int = 2000) -> str:
@@ -597,16 +740,35 @@ async def check_live(
             )
             async with supervisor:
                 product = supervisor.executable_identity.product.value
-                reported_version = supervisor.executable_identity.version
+                if version is None:
+                    reported_version = supervisor.executable_identity.version
                 probe = await probe_kimi_compatibility(
                     supervisor, root / "workspace"
                 )
             artifacts = _write_probe_artifacts(probe, artifact_directory)
+            checks = list(probe.checks)
+            report_version = probe.version
+            if version is not None:
+                report_version = version
+                checks.append(
+                    _check(
+                        "cli.version.requested",
+                        "cli",
+                        probe.version == version,
+                        (
+                            f"official installer provided requested version {version}"
+                            if probe.version == version
+                            else "official installer provided "
+                            f"{probe.version} instead of requested version {version}"
+                        ),
+                        "KimiServerSupervisor.executable_identity",
+                    )
+                )
             return build_report(
                 mode="live",
                 product=probe.product,
-                version=probe.version,
-                checks=probe.checks,
+                version=report_version,
+                checks=checks,
                 artifacts=artifacts,
                 platform=report_platform,
             )
@@ -791,6 +953,22 @@ def summarize_reports(
     )
 
 
+def summarize_report_batches(
+    reports: Sequence[CompatibilityReport],
+) -> tuple[CompatibilitySummary, ...]:
+    """Summarize one legacy latest-version set or many explicit version sets."""
+
+    grouped: dict[str, list[CompatibilityReport]] = {}
+    for report in reports:
+        grouped.setdefault(report.version, []).append(report)
+    if len(grouped) <= 1:
+        return (summarize_reports(reports),)
+    return tuple(
+        summarize_reports(grouped[version])
+        for version in sorted(grouped, key=kimi_code_version_sort_key)
+    )
+
+
 def synchronize_reports(
     reports: Sequence[CompatibilityReport], automation: GitHubAutomation
 ) -> tuple[str, ...]:
@@ -802,18 +980,22 @@ def synchronize_reports(
     preparation because the fix may have dropped older Kimi compatibility.
     """
 
-    summary = summarize_reports(reports)
+    summaries = summarize_report_batches(reports)
     actions: list[str] = []
-    if summary.compatible:
-        recovery = automation.recover_drift_issue(summary)
-        if recovery == "closed":
-            actions.append("closed-recovered-drift-issue")
-        if recovery is None and not summary.supported:
-            promotion = automation.promote_version(summary)
-            if promotion is not None:
-                actions.append(promotion)
-    else:
-        actions.append(automation.record_drift(summary))
+    promotable: list[CompatibilitySummary] = []
+    for summary in summaries:
+        if summary.compatible:
+            recovery = automation.recover_drift_issue(summary)
+            if recovery == "closed":
+                actions.append("closed-recovered-drift-issue")
+            if recovery is None and not summary.supported:
+                promotable.append(summary)
+        else:
+            actions.append(automation.record_drift(summary))
+    if promotable:
+        promotion = automation.promote_versions(promotable)
+        if promotion is not None:
+            actions.append(promotion)
     return tuple(actions)
 
 
@@ -825,8 +1007,12 @@ class DryRunAutomation:
     ) -> Literal["closed", "recorded"] | None:
         return None
 
-    def promote_version(self, summary: CompatibilitySummary) -> str | None:
-        return f"would-promote-{summary.version}"
+    def promote_versions(
+        self, summaries: Sequence[CompatibilitySummary]
+    ) -> str | None:
+        return "would-promote-" + ",".join(
+            summary.version for summary in summaries
+        )
 
     def record_drift(self, summary: CompatibilitySummary) -> str:
         return "would-record-drift"
@@ -875,12 +1061,10 @@ class GitHubApiAutomation:
     def recover_drift_issue(
         self, summary: CompatibilitySummary
     ) -> Literal["closed", "recorded"] | None:
-        issue = self._find_drift_issue()
+        issue = self._find_drift_issue(summary.version, state="open")
         if issue is None:
-            return None
-        body = str(issue.get("body", ""))
-        if f"<!-- version:{summary.version} " not in body:
-            return None
+            recorded = self._find_drift_issue(summary.version, state="all")
+            return "recorded" if recorded is not None else None
         self._invalidate_promotion(summary)
         if issue.get("state") != "open":
             return "recorded"
@@ -904,14 +1088,13 @@ class GitHubApiAutomation:
         )
         return "closed"
 
-    def promote_version(self, summary: CompatibilitySummary) -> str | None:
-        state_marker = (
-            f"<!-- version:{summary.version} "
-            f"report-digest:{summary.report_digest} -->"
+    def promote_versions(
+        self, summaries: Sequence[CompatibilitySummary]
+    ) -> str | None:
+        ordered = tuple(
+            sorted(summaries, key=lambda item: kimi_code_version_sort_key(item.version))
         )
         pull = self._find_promotion_pull()
-        if pull is not None and state_marker in str(pull.get("body", "")):
-            return "unchanged-promotion-pr"
         paths = (
             "pyproject.toml",
             "uv.lock",
@@ -937,15 +1120,32 @@ class GitHubApiAutomation:
         versions = latest.get("kimi_code")
         if not isinstance(versions, list):
             raise RuntimeError("compatibility map is malformed")
-        if summary.version in versions:
+        missing = tuple(
+            summary for summary in ordered if summary.version not in versions
+        )
+        if not missing:
             return None
+        versions_to_promote = tuple(summary.version for summary in missing)
+        combined_digest = _digest(
+            [(summary.version, summary.report_digest) for summary in missing]
+        )
+        state_marker = (
+            f"<!-- versions:{','.join(versions_to_promote)} "
+            f"report-digest:{combined_digest} -->"
+        )
+        if pull is not None and state_marker in str(pull.get("body", "")):
+            return "unchanged-promotion-pr"
         next_version, release_files = prepare_compatibility_release(
-            kimi_code_version=summary.version,
+            kimi_code_versions=versions_to_promote,
             pyproject=_decode_content(current["pyproject.toml"]),
             uv_lock=_decode_content(current["uv.lock"]),
             compatibility_map=_decode_content(
                 current["src/kimi_bridge/compatibility-map.json"]
             ),
+        )
+        rendered_versions = ", ".join(versions_to_promote)
+        promotion_subject = (
+            "versions are" if len(versions_to_promote) > 1 else "version is"
         )
         self._set_automation_branch(base_sha)
         for path, content in release_files.items():
@@ -955,23 +1155,22 @@ class GitHubApiAutomation:
                 json={
                     "message": (
                         f"Prepare kimi-bridge {next_version} for "
-                        f"Kimi Code {summary.version}"
+                        f"Kimi Code {rendered_versions}"
                     ),
                     "content": base64.b64encode(content.encode()).decode(),
                     "sha": current[path]["sha"],
                     "branch": AUTOMATION_BRANCH,
                 },
             )
-        title = (
-            f"Prepare kimi-bridge {next_version} for Kimi Code {summary.version}"
-        )
+        title = f"Prepare kimi-bridge {next_version} for Kimi Code {rendered_versions}"
         body = (
             f"{PROMOTION_MARKER}\n{state_marker}\n\n"
             f"The credential-free compatibility canary passed for kimi-code "
-            f"{summary.version} on {', '.join(summary.platforms)}. This PR "
-            f"prepares kimi-bridge {next_version} so the promoted version is "
-            f"available through the packaged compatibility map.\n\n"
-            f"Report digest: `{summary.report_digest}`."
+            f"{rendered_versions} on {', '.join(missing[0].platforms)}. This PR "
+            f"prepares kimi-bridge {next_version} so the promoted Kimi Code "
+            f"{promotion_subject} available through the packaged compatibility "
+            f"map.\n\n"
+            f"Report digest: `{combined_digest}`."
             + self._run_link_suffix()
         )
         if pull is None:
@@ -999,7 +1198,7 @@ class GitHubApiAutomation:
 
     def record_drift(self, summary: CompatibilitySummary) -> str:
         self._invalidate_promotion(summary)
-        issue = self._find_drift_issue()
+        issue = self._find_drift_issue(summary.version, state="open")
         state_marker = (
             f"<!-- version:{summary.version} "
             f"failure-digest:{summary.failure_digest} -->"
@@ -1092,9 +1291,18 @@ class GitHubApiAutomation:
         if pull is None:
             return
         body = str(pull.get("body", ""))
+        plural_marker = re.search(r"<!-- versions:([^\s]+) ", body)
+        plural_versions = (
+            plural_marker.group(1).split(",")
+            if plural_marker is not None
+            else []
+        )
         if (
             PROMOTION_MARKER not in body
-            or f"<!-- version:{summary.version} " not in body
+            or (
+                f"<!-- version:{summary.version} " not in body
+                and summary.version not in plural_versions
+            )
         ):
             return
         self._request(
@@ -1103,22 +1311,35 @@ class GitHubApiAutomation:
             json={"state": "closed"},
         )
 
-    def _find_drift_issue(self) -> dict[str, Any] | None:
-        issues = self._request(
-            "GET",
-            f"/repos/{self.repository}/issues",
-            params={"state": "all", "labels": DRIFT_LABEL, "per_page": 100},
-        )
-        if not isinstance(issues, list):
-            return None
-        for issue in issues:
-            if (
-                isinstance(issue, dict)
-                and "pull_request" not in issue
-                and DRIFT_MARKER in str(issue.get("body", ""))
-            ):
-                return issue
-        return None
+    def _find_drift_issue(
+        self, version: str, *, state: Literal["all", "open"]
+    ) -> dict[str, Any] | None:
+        page = 1
+        while True:
+            issues = self._request(
+                "GET",
+                f"/repos/{self.repository}/issues",
+                params={
+                    "state": state,
+                    "labels": DRIFT_LABEL,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            if not isinstance(issues, list):
+                return None
+            for issue in issues:
+                if (
+                    isinstance(issue, dict)
+                    and "pull_request" not in issue
+                    and DRIFT_MARKER in str(issue.get("body", ""))
+                    and f"<!-- version:{version} "
+                    in str(issue.get("body", ""))
+                ):
+                    return issue
+            if len(issues) < 100:
+                return None
+            page += 1
 
     def _ensure_drift_label(self) -> None:
         path = f"/repos/{self.repository}/labels/{DRIFT_LABEL}"
@@ -1412,9 +1633,13 @@ def _parser() -> argparse.ArgumentParser:
         "--report",
         type=Path,
         action="append",
-        required=True,
         dest="reports",
         help="path to one per-platform report; repeat for each platform",
+    )
+    sync.add_argument(
+        "--report-directory",
+        type=Path,
+        help="directory containing report.json files for one or more versions",
     )
     sync.add_argument(
         "--dry-run",
@@ -1429,6 +1654,15 @@ def _parser() -> argparse.ArgumentParser:
         default=os.environ.get("GITHUB_DEFAULT_BRANCH", "main"),
     )
     sync.add_argument("--run-url", default=os.environ.get("GITHUB_RUN_URL"))
+    discover = subparsers.add_parser(
+        "discover", help="print the official Kimi Code versions to canary"
+    )
+    discover.add_argument(
+        "--repository", default=os.environ.get("GITHUB_REPOSITORY")
+    )
+    discover.add_argument(
+        "--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    )
     return parser
 
 
@@ -1443,6 +1677,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(rendered, encoding="utf-8")
+        return 0
+
+    if args.command == "discover":
+        token = os.environ.get("GITHUB_TOKEN")
+        if not args.repository or not token:
+            raise SystemExit("discover requires GITHUB_REPOSITORY and GITHUB_TOKEN")
+        versions = discover_kimi_code_versions(
+            args.repository, token, api_url=args.api_url
+        )
+        print(json.dumps(versions, separators=(",", ":")))
         return 0
 
     if args.command == "check":
@@ -1461,8 +1705,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if report.compatible else 1
 
-    reports = [read_report(path) for path in args.reports]
-    summary = summarize_reports(reports)
+    report_paths = list(args.reports or [])
+    if args.report_directory is not None:
+        report_paths.extend(sorted(args.report_directory.rglob("report.json")))
+    if not report_paths:
+        raise SystemExit("sync requires --report or --report-directory")
+    reports = [read_report(path) for path in report_paths]
+    summaries = summarize_report_batches(reports)
     if args.dry_run:
         actions = synchronize_reports(reports, DryRunAutomation())
     else:
@@ -1476,14 +1725,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_url=args.run_url,
         ) as automation:
             actions = synchronize_reports(reports, automation)
-    outcome = "compatible" if summary.compatible else "incompatible"
-    print(
-        f"kimi-code {summary.version} on "
-        f"{', '.join(summary.platforms)}: {outcome}"
-    )
+    for summary in summaries:
+        outcome = "compatible" if summary.compatible else "incompatible"
+        print(
+            f"kimi-code {summary.version} on "
+            f"{', '.join(summary.platforms)}: {outcome}"
+        )
     if actions:
         print("\n".join(actions))
-    return 0 if summary.compatible else 1
+    return 0 if all(summary.compatible for summary in summaries) else 1
 
 
 if __name__ == "__main__":
