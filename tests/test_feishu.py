@@ -6,6 +6,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1435,21 +1436,25 @@ async def test_ffmpeg_converts_opus_to_16khz_mono_pcm(
     }
 
 
-async def test_ffmpeg_extracts_representative_video_cover(
+async def test_ffmpeg_extracts_video_cover_from_seekable_temporary_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    video_paths: list[Path] = []
     png = b"\x89PNG\r\n\x1a\nderived-cover"
 
     class FakeProcess:
         returncode = 0
 
-        async def communicate(self, data: bytes) -> tuple[bytes, bytes]:
-            assert data == b"video-bytes"
+        async def communicate(self, data: bytes | None) -> tuple[bytes, bytes]:
+            assert data is None
             return png, b""
 
     async def fake_create(*args: Any, **kwargs: Any) -> FakeProcess:
         calls.append((args, kwargs))
+        video_path = Path(args[5])
+        assert video_path.read_bytes() == b"video-bytes"
+        video_paths.append(video_path)
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
@@ -1463,7 +1468,7 @@ async def test_ffmpeg_extracts_representative_video_cover(
         "-loglevel",
         "error",
         "-i",
-        "pipe:0",
+        str(video_paths[0]),
         "-map",
         "0:v:0",
         "-vf",
@@ -1476,8 +1481,11 @@ async def test_ffmpeg_extracts_representative_video_cover(
         "image2pipe",
         "pipe:1",
     )
+    assert video_paths[0].name == "video.mp4"
+    assert video_paths[0].parent.name.startswith("kimi-bridge-feishu-cover-")
+    assert not video_paths[0].exists()
     assert kwargs == {
-        "stdin": asyncio.subprocess.PIPE,
+        "stdin": asyncio.subprocess.DEVNULL,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
     }
@@ -1486,19 +1494,26 @@ async def test_ffmpeg_extracts_representative_video_cover(
 async def test_ffmpeg_video_cover_decode_failure_is_explicit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    video_paths: list[Path] = []
+
     class FakeProcess:
         returncode = 1
 
-        async def communicate(self, _data: bytes) -> tuple[bytes, bytes]:
+        async def communicate(self, data: bytes | None) -> tuple[bytes, bytes]:
+            assert data is None
             return b"", b"invalid video"
 
-    async def fake_create(*_args: Any, **_kwargs: Any) -> FakeProcess:
+    async def fake_create(*args: Any, **_kwargs: Any) -> FakeProcess:
+        video_paths.append(Path(args[5]))
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
 
     with pytest.raises(FeishuAPIError, match="FFmpeg video-cover extraction failed"):
         await _extract_video_cover(b"invalid-video", "/fake/ffmpeg")
+
+    assert len(video_paths) == 1
+    assert not video_paths[0].exists()
 
 
 async def test_ffmpeg_timeout_kills_and_reaps_process(

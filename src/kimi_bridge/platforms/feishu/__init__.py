@@ -14,6 +14,8 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
 from ...interactions import InteractionOutcome, InteractionPrompt
@@ -420,7 +422,7 @@ class _LarkTransport:
 
 
 async def _run_ffmpeg(
-    data: bytes,
+    data: bytes | None,
     executable: str,
     *arguments: str,
     operation: str,
@@ -433,7 +435,11 @@ async def _run_ffmpeg(
             "-loglevel",
             "error",
             *arguments,
-            stdin=asyncio.subprocess.PIPE,
+            stdin=(
+                asyncio.subprocess.PIPE
+                if data is not None
+                else asyncio.subprocess.DEVNULL
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -488,25 +494,28 @@ async def _extract_video_cover(
     *,
     timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
 ) -> bytes:
-    return await _run_ffmpeg(
-        data,
-        executable,
-        "-i",
-        "pipe:0",
-        "-map",
-        "0:v:0",
-        "-vf",
-        FEISHU_VIDEO_COVER_FILTER,
-        "-frames:v",
-        "1",
-        "-c:v",
-        "png",
-        "-f",
-        "image2pipe",
-        "pipe:1",
-        operation="video-cover extraction",
-        timeout=timeout,
-    )
+    with TemporaryDirectory(prefix="kimi-bridge-feishu-cover-") as directory:
+        video_path = Path(directory) / "video.mp4"
+        video_path.write_bytes(data)
+        return await _run_ffmpeg(
+            None,
+            executable,
+            "-i",
+            str(video_path),
+            "-map",
+            "0:v:0",
+            "-vf",
+            FEISHU_VIDEO_COVER_FILTER,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-f",
+            "image2pipe",
+            "pipe:1",
+            operation="video-cover extraction",
+            timeout=timeout,
+        )
 
 
 class _LarkWebSocketRunner:
