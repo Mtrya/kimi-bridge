@@ -127,18 +127,18 @@ def _document_check(
     if check.state != "matched":
         return check
     text = source.text().casefold()
-    endpoint = (
-        r"/v2/users/\{[^}]+\}/messages"
+    endpoint, endpoint_label = (
+        (r"/v2/users/\{[^}]+\}/messages", "C2C message")
         if identifier == "qq.c2c-message"
-        else r"/v2/users/\{[^}]+\}/files"
+        else (r"/v2/users/\{[^}]+\}/files", "C2C rich-media file")
         if identifier == "qq.rich-media"
-        else None
+        else (None, "")
     )
     if endpoint is not None and re.search(endpoint, text) is None:
         return SourceCheck(
             identifier,
             "drift",
-            "official documentation source omitted the C2C endpoint shape",
+            f"official documentation source omitted the {endpoint_label} endpoint shape",
             (source.url,),
         )
     return check

@@ -127,15 +127,19 @@ class SourceMonitorReport:
 
     @property
     def alert_digest(self) -> str:
-        alerts = [
-            {
-                "platform": platform.platform,
-                **check.to_dict(),
-            }
-            for platform in self.platforms
-            for check in platform.checks
-            if check.state in {"drift", "unavailable"}
-        ]
+        alerts: list[dict[str, str]] = []
+        for platform in self.platforms:
+            for check in platform.checks:
+                if check.state not in {"drift", "unavailable"}:
+                    continue
+                alert = {
+                    "platform": platform.platform,
+                    "id": check.identifier,
+                    "state": check.state,
+                }
+                if check.state == "drift":
+                    alert["detail"] = check.detail
+                alerts.append(alert)
         return _digest(alerts)
 
     @property

@@ -107,7 +107,7 @@ async def inspect(fetcher: SourceFetcher) -> PlatformInspection:
                 (metadata.url,),
             )
         )
-        artifacts: list[FetchedSource] = []
+        artifacts: dict[str, FetchedSource] = {}
         for path in _SOURCE_PATHS:
             request = SourceRequest(f"{_RAW_ROOT}/{commit}/{path}", commit)
             source = await fetch_for_check(
@@ -118,9 +118,15 @@ async def inspect(fetcher: SourceFetcher) -> PlatformInspection:
                 checks,
             )
             if source is not None:
-                artifacts.append(source)
+                artifacts[path] = source
         if len(artifacts) == len(_SOURCE_PATHS):
-            checks.extend(_inspect_reference(label, artifacts))
+            checks.extend(
+                _inspect_reference(
+                    label,
+                    [artifacts[path] for path in _SOURCE_PATHS],
+                    artifacts["package.json"],
+                )
+            )
     return PlatformInspection("wechat", tuple(sources), tuple(checks))
 
 
@@ -138,7 +144,9 @@ def _commit_sha(source: FetchedSource) -> str | None:
 
 
 def _inspect_reference(
-    label: str, sources: list[FetchedSource]
+    label: str,
+    sources: list[FetchedSource],
+    package_manifest: FetchedSource,
 ) -> tuple[SourceCheck, ...]:
     combined = FetchedSource(
         sources[0].url,
@@ -167,14 +175,14 @@ def _inspect_reference(
             source_urls,
         ),
     ]
-    version = _package_version(sources[-1])
+    version = _package_version(package_manifest)
     if version is None:
         checks.append(
             SourceCheck(
                 f"wechat.{label}.version",
                 "drift",
                 "official package metadata omitted a semantic version",
-                (sources[-1].url,),
+                (package_manifest.url,),
             )
         )
     elif label == "pinned" and version != CHANNEL_VERSION:
@@ -183,7 +191,7 @@ def _inspect_reference(
                 "wechat.pinned.version",
                 "drift",
                 f"pinned source reports {version}, expected {CHANNEL_VERSION}",
-                (sources[-1].url,),
+                (package_manifest.url,),
             )
         )
     else:
@@ -192,7 +200,7 @@ def _inspect_reference(
                 f"wechat.{label}.version",
                 "matched",
                 f"official source reports channel version {version}",
-                (sources[-1].url,),
+                (package_manifest.url,),
             )
         )
     return tuple(checks)

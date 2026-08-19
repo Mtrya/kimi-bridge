@@ -387,12 +387,12 @@ class FakeGitHub:
         raise AssertionError(f"unexpected GitHub request: {request.method} {path}")
 
 
-def _report(state: str) -> SourceMonitorReport:
+def _report(state: str, *, detail: str = "example detail") -> SourceMonitorReport:
     source = SourceEvidence("https://pypi.org/example", "live", "a" * 64, 10, "text/plain")
     check = SourceCheck(
         "example.contract",
         state,
-        "example detail",
+        detail,
         (source.url,),
     )
     return SourceMonitorReport(
@@ -430,3 +430,13 @@ def test_report_round_trip_preserves_unverifiable_as_healthy(tmp_path: Path) -> 
 
     assert restored == report
     assert restored.healthy
+
+
+def test_alert_digest_ignores_transient_unavailable_details() -> None:
+    first = _report("unavailable", detail="HTTP 503")
+    second = _report("unavailable", detail="transport timeout")
+
+    assert first.alert_digest == second.alert_digest
+    assert _report("drift", detail="field a").alert_digest != _report(
+        "drift", detail="field b"
+    ).alert_digest

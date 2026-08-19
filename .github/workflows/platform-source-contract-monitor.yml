@@ -43,4 +43,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SYNC_MODE: ${{ github.ref != 'refs/heads/main' && '--dry-run' || '' }}
-        run: uv run --locked python scripts/check_platform_source_contracts.py sync $SYNC_MODE --report "$RUNNER_TEMP/platform-source-contract/report.json"
+        run: |
+          report="$RUNNER_TEMP/platform-source-contract/report.json"
+          if [ ! -f "$report" ]; then
+            echo "::error::monitor produced no report; skipping issue synchronization"
+            exit 1
+          fi
+          uv run --locked python scripts/check_platform_source_contracts.py sync $SYNC_MODE --report "$report"
