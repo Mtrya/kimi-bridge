@@ -177,17 +177,17 @@ async def test_feishu_reports_public_document_shape_loss_as_drift() -> None:
     assert check.state == "drift"
 
 
-async def test_qq_keeps_undocumented_file_data_unverifiable() -> None:
+async def test_qq_keeps_unsupported_file_data_unverifiable() -> None:
     commit = "b" * 40
     root = f"https://raw.githubusercontent.com/tencent-connect/bot-docs/{commit}"
     bodies = {
         "https://api.github.com/repos/tencent-connect/bot-docs/commits?per_page=1": _encoded(
             [{"sha": commit}]
         ),
-        f"{root}/docs/develop/api-v2/dev-prepare/access-token.md": b"https://bots.qq.com/app/getAppAccessToken appId clientSecret access_token expires_in",
-        f"{root}/docs/develop/api-v2/dev-prepare/event-emit/websocket.md": b"QQBot /gateway heartbeat_interval session_id",
+        f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/api-use.md": b"https://bots.qq.com/app/getAppAccessToken appId clientSecret access_token expires_in",
+        f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/event-emit.md": b"QQBot /gateway heartbeat_interval session_id",
         f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq",
-        f"{root}/docs/develop/api-v2/server-inter/message/rich-media.md": b"POST /v2/users/{user_openid}/files file_type file_info srv_send_msg msg_type media",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": "POST /v2/users/{user_openid}/files file_type file_info srv_send_msg msg_type media\n| file_data | | 否 | 【暂未支持】 |".encode(),
     }
 
     result = await qq_contract.inspect(MemoryFetcher(bodies))
@@ -197,6 +197,27 @@ async def test_qq_keeps_undocumented_file_data_unverifiable() -> None:
         check for check in result.checks if check.identifier == "qq.media.file-data"
     )
     assert file_data.state == "unverifiable"
+
+
+async def test_qq_recognizes_a_supported_public_file_data_contract() -> None:
+    commit = "b" * 40
+    root = f"https://raw.githubusercontent.com/tencent-connect/bot-docs/{commit}"
+    bodies = {
+        "https://api.github.com/repos/tencent-connect/bot-docs/commits?per_page=1": _encoded(
+            [{"sha": commit}]
+        ),
+        f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/api-use.md": b"https://bots.qq.com/app/getAppAccessToken appId clientSecret access_token expires_in",
+        f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/event-emit.md": b"QQBot /gateway heartbeat_interval session_id",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": b"POST /v2/users/{user_openid}/files file_type file_data file_info srv_send_msg msg_type media",
+    }
+
+    result = await qq_contract.inspect(MemoryFetcher(bodies))
+
+    file_data = next(
+        check for check in result.checks if check.identifier == "qq.media.file-data"
+    )
+    assert file_data.state == "matched"
 
 
 def _wechat_source_bodies(commit: str, version: str) -> dict[str, bytes]:
@@ -440,3 +461,15 @@ def test_alert_digest_ignores_transient_unavailable_details() -> None:
     assert _report("drift", detail="field a").alert_digest != _report(
         "drift", detail="field b"
     ).alert_digest
+
+
+def test_sync_exit_status_reports_automation_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "report.json"
+    checker.write_report(_report("drift"), path)
+
+    exit_code = checker.main(["sync", "--dry-run", "--report", str(path)])
+
+    assert exit_code == 0
+    assert "would-record-source-drift" in capsys.readouterr().out

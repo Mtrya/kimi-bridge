@@ -1428,7 +1428,7 @@ def test_sync_dry_run_predicts_the_decision_without_github(
         )
     )
     output = capsys.readouterr().out
-    assert exit_code == 1
+    assert exit_code == 0
     assert "incompatible" in output
     assert "would-record-drift" in output
 
