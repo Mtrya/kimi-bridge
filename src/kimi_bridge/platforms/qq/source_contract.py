@@ -25,7 +25,7 @@ _COMMIT = SourceRequest(
 _DOCUMENTS = (
     (
         "qq.access-token",
-        "docs/develop/api-v2/dev-prepare/access-token.md",
+        "docs/develop/api-v2/dev-prepare/interface-framework/api-use.md",
         (
             "https://bots.qq.com/app/getappaccesstoken",
             "appid",
@@ -36,7 +36,7 @@ _DOCUMENTS = (
     ),
     (
         "qq.gateway",
-        "docs/develop/api-v2/dev-prepare/event-emit/websocket.md",
+        "docs/develop/api-v2/dev-prepare/interface-framework/event-emit.md",
         (
             "/gateway",
             "heartbeat_interval",
@@ -51,7 +51,7 @@ _DOCUMENTS = (
     ),
     (
         "qq.rich-media",
-        "docs/develop/api-v2/server-inter/message/rich-media.md",
+        "docs/develop/api-v2/server-inter/message/send-receive/rich-media.md",
         ("file_type", "file_info", "srv_send_msg", "msg_type", "media"),
     ),
 )
@@ -146,10 +146,12 @@ def _document_check(
 
 def _file_data_check(source: FetchedSource) -> SourceCheck:
     try:
-        documented = "file_data" in source.text().casefold()
+        text = source.text().casefold()
     except UnicodeDecodeError:
-        documented = False
-    if documented:
+        text = ""
+    if "file_data" in text and not any(
+        "file_data" in line and "暂未支持" in line for line in text.splitlines()
+    ):
         return SourceCheck(
             "qq.media.file-data",
             "matched",
@@ -159,6 +161,6 @@ def _file_data_check(source: FetchedSource) -> SourceCheck:
     return SourceCheck(
         "qq.media.file-data",
         "unverifiable",
-        "file_data remains an authenticated runtime-only behavior absent from the public source",
+        "file_data remains an authenticated runtime-only behavior without a supported public source contract",
         (source.url,),
     )

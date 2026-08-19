@@ -1733,7 +1733,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if actions:
         print("\n".join(actions))
-    return 0 if all(summary.compatible for summary in summaries) else 1
+    # Contract health belongs to `check`; reaching here means synchronization worked.
+    return 0
 
 
 if __name__ == "__main__":

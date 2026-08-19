@@ -361,12 +361,6 @@ def render_issue_body(
             )
     if run_url:
         lines.extend(["", f"[Workflow run]({run_url})"])
-    lines.extend(
-        [
-            "",
-            "This monitor does not call authenticated platform APIs, exercise message delivery, or prepare a release.",
-        ]
-    )
     return "\n".join(lines) + "\n"
 
 
@@ -444,7 +438,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as automation:
             action = automation.synchronize(report)
     print(action)
-    return 0 if report.healthy else 1
+    # Contract health belongs to `check`; reaching here means synchronization worked.
+    return 0
 
 
 if __name__ == "__main__":
