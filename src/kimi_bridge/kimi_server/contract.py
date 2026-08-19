@@ -853,8 +853,36 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "turn.ended",
-        "ChatRouter.dispatch_event",
-        (_field("turnId", "integer", "number"),),
+        "ChatRouter.dispatch_event/session_notice_from_event",
+        (
+            _field("turnId", "integer", "number"),
+            _field(
+                "reason",
+                "string",
+                values=("completed", "cancelled", "failed", "blocked"),
+            ),
+            _field("error", "object", required=False),
+            _field("error.code", "string", required=False),
+            _field("error.message", "string", required=False),
+            _field("error.retryable", "boolean", required=False),
+        ),
+    ),
+    SessionEventContract(
+        "error",
+        "session_notice_from_event",
+        (
+            _field("code", "string"),
+            _field("message", "string"),
+            _field("retryable", "boolean"),
+        ),
+    ),
+    SessionEventContract(
+        "warning",
+        "session_notice_from_event",
+        (
+            _field("message", "string"),
+            _field("code", "string", required=False),
+        ),
     ),
     SessionEventContract(
         "prompt.completed",

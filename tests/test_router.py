@@ -4170,6 +4170,152 @@ async def test_turn_end_keeps_longer_stream_until_prompt_completion(
     assert client.snapshot_calls == ["session-1", "session-1"]
 
 
+@pytest.mark.parametrize("supports_edits", [True, False])
+async def test_runtime_failure_follows_partial_answer_once_and_allows_follow_up(
+    tmp_path: Path, supports_edits: bool
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=supports_edits)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        first_flush_min_chars=0,
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    runtime_error = {
+        "code": "provider.rate_limit",
+        "message": "The provider rate limit was reached",
+        "retryable": True,
+    }
+    try:
+        await router.handle_inbound(adapter, _message("first request"))
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", seq=1, turnId=7),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", seq=2, delta="partial answer", offset=0),
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=3,
+            turn_id=7,
+            prompt_id="prompt-1",
+            text="partial answer",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "turn.ended",
+                seq=3,
+                turnId=7,
+                reason="failed",
+                error=runtime_error,
+            ),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("error", seq=4, **runtime_error),
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=5,
+            prompt_id="prompt-1",
+            text="partial answer",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("prompt.completed", seq=5, promptId="prompt-1"),
+        )
+
+        texts = [text for _ref, _conversation, text in adapter.sent]
+        notices = [text for text in texts if text.startswith("Kimi runtime error")]
+        assert texts[0] == "partial answer"
+        assert len(notices) == 1
+        assert texts.index(notices[0]) > texts.index("partial answer")
+        assert "provider.rate_limit" in notices[0]
+        assert "The provider rate limit was reached" in notices[0]
+        assert "retry" in notices[0].lower()
+
+        await router.handle_inbound(adapter, _message("try again"))
+        assert [prompt[1] for prompt in client.prompts] == [
+            PromptContent(text="first request"),
+            PromptContent(text="try again"),
+        ]
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.started", seq=6, turnId=8),
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("assistant.delta", seq=7, delta="healthy response", offset=0),
+        )
+        client.snapshots["session-1"] = _in_flight_snapshot(
+            seq=8,
+            turn_id=8,
+            prompt_id="prompt-2",
+            text="healthy response",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("turn.ended", seq=8, turnId=8, reason="completed"),
+        )
+        client.snapshots["session-1"] = _completed_snapshot(
+            seq=9,
+            prompt_id="prompt-2",
+            text="healthy response",
+        )
+        await router.dispatch_event(
+            conversation_key,
+            _event("prompt.completed", seq=9, promptId="prompt-2"),
+        )
+    finally:
+        await router.close()
+
+    texts = [text for _ref, _conversation, text in adapter.sent]
+    assert "healthy response" in texts
+    assert len([text for text in texts if text.startswith("Kimi runtime error")]) == 1
+
+
+async def test_session_warning_is_visible_without_stopping_the_stream(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        active = router._active
+        assert active is not None
+        await router.dispatch_event(
+            conversation_key,
+            _event(
+                "warning",
+                seq=1,
+                code="agents-md-oversized",
+                message="Part of AGENTS.md was omitted",
+            ),
+        )
+
+        assert active.task is not None
+        assert not active.task.done()
+    finally:
+        await router.close()
+
+    assert len(adapter.final_texts) == 1
+    warning = adapter.final_texts[0][2]
+    assert warning.startswith("Kimi warning")
+    assert "agents-md-oversized" in warning
+    assert "Part of AGENTS.md was omitted" in warning
+
+
 async def test_turn_end_does_not_replace_stream_with_uncorrelated_history(
     tmp_path: Path,
 ) -> None:

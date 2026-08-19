@@ -25,7 +25,7 @@ kimi-bridge is a single-operator bridge between one instant-messaging adapter an
 
 ## Kimi Code boundary
 
-`src/kimi_bridge/kimi_server/` is the only package that knows Kimi Code CLI commands, REST paths, WebSocket envelopes, server materialization, bearer authentication, product identification, and the semantic compatibility contract. The router receives typed session, prompt, interaction, task, goal, model, skill, and tool operations instead of Kimi wire details.
+`src/kimi_bridge/kimi_server/` is the only package that knows Kimi Code CLI commands, REST paths, WebSocket envelopes, server materialization, bearer authentication, product identification, and the semantic compatibility contract. It reduces user-visible session warnings and terminal failures to typed safe fields instead of passing raw error payloads across the boundary. The router receives typed session, prompt, interaction, task, goal, model, skill, tool, and runtime-notice values instead of Kimi wire details.
 
 The supervisor identifies official Kimi Code before startup, launches `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child, captures its generated bearer token without exposing it, and checks the live server version. `kimi-bridge compat` reports the relationship between the installed Kimi Code version and the bridge compatibility map. The bridge does not provide a remote Kimi server mode.
 
