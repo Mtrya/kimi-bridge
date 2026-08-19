@@ -209,6 +209,13 @@ async def _send_with_retries(
         retryable = response.status_code == 429 or response.status_code >= 500
         if retryable:
             if attempt >= max_retries:
+                LOGGER.warning(
+                    "QQ %s request failed with HTTP %d after %d retries: %s",
+                    context,
+                    response.status_code,
+                    attempt,
+                    _content_preview(response.text),
+                )
                 raise QQTransportError(
                     f"QQ {context} request failed with HTTP {response.status_code}"
                 )
@@ -223,6 +230,15 @@ def _response_json(response: httpx.Response) -> object:
         return response.json()
     except (ValueError, json.JSONDecodeError):
         return None
+
+
+_USER_PATH_SEGMENT_RE = re.compile(r"(/v2/users/)[^/]+")
+
+
+def _redact_user_path(path: str) -> str:
+    """Keep C2C user identifiers out of logs and error messages."""
+
+    return _USER_PATH_SEGMENT_RE.sub(r"\1<redacted>", path)
 
 
 def _error_from_envelope(context: str, envelope: object) -> QQAPIError | None:
@@ -555,7 +571,7 @@ class QQBotAPI:
     ) -> Any:
         if self._closed:
             raise RuntimeError("QQ Bot API client is closed")
-        context = f"{method} {path}"
+        context = f"{method} {_redact_user_path(path)}"
 
         async def send() -> httpx.Response:
             headers = {
@@ -1155,6 +1171,7 @@ class _StreamState:
     last_source_text: str = ""
     pending_text: str | None = None
     finalized: bool = False
+    failed: bool = False
     idle_task: asyncio.Task[None] | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -1279,6 +1296,17 @@ class QQAdapter:
         if state.streamable and rendered:
             try:
                 await self._send_stream_rendered(state, rendered)
+            except QQTransportError:
+                LOGGER.warning(
+                    "QQ stream open failed with a transport error; sending a "
+                    "plain message instead"
+                )
+                state.failed = True
+                try:
+                    await self._replace_with_final(state, text)
+                except BaseException:
+                    self._streams.pop(ref, None)
+                    raise
             except BaseException:
                 self._streams.pop(ref, None)
                 raise
@@ -1332,13 +1360,24 @@ class QQAdapter:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
                 return
+            if state.failed:
+                state.last_source_text = text
+                self._schedule_idle_finalize(message)
+                return
             rendered = _sanitize_stable_markdown(text)
             if not rendered.startswith(state.last_rendered_text):
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
                 return
             if state.streamable and rendered != state.last_rendered_text:
-                await self._send_stream_rendered(state, rendered)
+                try:
+                    await self._send_stream_rendered(state, rendered)
+                except QQTransportError:
+                    LOGGER.warning(
+                        "QQ stream continuation failed with a transport "
+                        "error; the final text will be sent as a plain message"
+                    )
+                    state.failed = True
             state.last_source_text = text
             self._schedule_idle_finalize(message)
 
@@ -1488,6 +1527,9 @@ class QQAdapter:
             return
         if state.finalized:
             return
+        if state.failed:
+            await self._replace_with_final(state, state.last_source_text)
+            return
         if not state.streamable:
             await self._send_active_final(state, state.last_source_text)
             return
@@ -1498,14 +1540,23 @@ class QQAdapter:
         if not rendered.startswith(state.last_rendered_text):
             await self._replace_with_final(state, state.last_source_text)
             return
-        if rendered != state.last_rendered_text:
-            await self._send_stream_rendered(state, rendered)
+        try:
+            if rendered != state.last_rendered_text:
+                await self._send_stream_rendered(state, rendered)
+            if state.stream_msg_id is not None:
+                await self._finish_stream(state)
+        except QQTransportError:
+            LOGGER.warning(
+                "QQ stream frame failed with a transport error; delivering "
+                "the final text as a plain message"
+            )
+            state.failed = True
+            await self._replace_with_final(state, state.last_source_text)
+            return
         if state.stream_msg_id is None:
             await self._send_active_final(
                 state, state.last_source_text, use_reserved_reply=True
             )
-            return
-        await self._finish_stream(state)
 
     async def _send_stream_rendered(
         self, state: _StreamState, rendered: str
@@ -1592,6 +1643,7 @@ class QQAdapter:
             not withdrawn
             and state.stream_msg_id is not None
             and not state.finalized
+            and not state.failed
         ):
             try:
                 await self._finish_stream(state)

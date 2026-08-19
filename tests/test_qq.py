@@ -539,7 +539,9 @@ async def test_bot_api_retries_server_errors_but_not_semantic_codes() -> None:
     assert caught.value.code == 304003
 
 
-async def test_bot_api_raises_transport_error_after_server_retries_exhausted() -> None:
+async def test_bot_api_raises_transport_error_after_server_retries_exhausted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     attempts = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -555,6 +557,7 @@ async def test_bot_api_raises_transport_error_after_server_retries_exhausted() -
         sleep=no_sleep,
         max_retries=1,
     )
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
     try:
         with pytest.raises(QQTransportError, match="HTTP 503"):
             await api.get_gateway_url()
@@ -564,6 +567,38 @@ async def test_bot_api_raises_transport_error_after_server_retries_exhausted() -
         await http.aclose()
 
     assert attempts == 2
+    assert any(
+        record.name == "kimi_bridge.platforms.qq"
+        and "unavailable" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_bot_api_redacts_openid_in_retry_exhaustion_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"unavailable")
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    api, manager, http = _api_pair(handler, sleep=no_sleep, max_retries=1)
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
+    try:
+        with pytest.raises(QQTransportError) as caught:
+            await api.send_c2c_message("OPENID-SECRET", msg_type=0, content="hi")
+    finally:
+        await api.close()
+        await manager.close()
+        await http.aclose()
+
+    assert "OPENID-SECRET" not in str(caught.value)
+    assert "/v2/users/<redacted>/messages" in str(caught.value)
+    assert caplog.records
+    assert all(
+        "OPENID-SECRET" not in record.getMessage() for record in caplog.records
+    )
 
 
 async def test_bot_api_fetches_gateway_url() -> None:
@@ -897,6 +932,8 @@ class FakeQQBotAPI:
         self.fail_url_once = False
         self.fail_done_once = False
         self.fail_stream_once = False
+        self.fail_generating_transport = False
+        self.fail_done_transport = False
         self.fail_active_transport_once = False
         self.fail_withdraw = False
         self.block_done = False
@@ -978,6 +1015,16 @@ class FakeQQBotAPI:
         if self.block_done and input_state == STREAM_INPUT_STATE_DONE:
             self.done_started.set()
             await self.release_done.wait()
+        if self.fail_generating_transport and (
+            input_state == STREAM_INPUT_STATE_GENERATING
+        ):
+            raise QQTransportError(
+                "stream_messages request failed with HTTP 500"
+            )
+        if self.fail_done_transport and input_state == STREAM_INPUT_STATE_DONE:
+            raise QQTransportError(
+                "stream_messages request failed with HTTP 500"
+            )
         if self.fail_stream_once and input_state == STREAM_INPUT_STATE_GENERATING:
             self.fail_stream_once = False
             raise QQAPIError("stream_messages", 40000, "stream failed")
@@ -2126,6 +2173,95 @@ async def test_idle_timeout_contains_done_api_failure(
         if record.name == "kimi_bridge.platforms.qq"
     ]
     assert [record.args for record in records] == [(40006,)]
+
+
+async def test_stream_open_transport_failure_sends_plain_message() -> None:
+    api = FakeQQBotAPI()
+    api.fail_generating_transport = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "hello\n")
+
+    assert not api.stream_frames
+    assert api.active_sends[0]["markdown"] == {
+        "content": sanitize_markdown("hello\n")
+    }
+    assert api.active_sends[0]["msg_id"] == "MSGID-ANCHOR"
+    assert api.active_sends[0]["msg_seq"] == 1
+    assert adapter._streams[ref].finalized
+    await adapter.stop()
+
+
+async def test_stream_continuation_transport_failure_falls_back_to_plain() -> (
+    None
+):
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "hello\n")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+
+    api.fail_generating_transport = True
+    await adapter.edit_text(ref, "hello\nworld\n")
+    await _wait_for(lambda: len(sleep.calls) == 2)
+    sleep.release(1)
+    await _wait_for(lambda: len(api.active_sends) == 1)
+
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+    ]
+    assert api.withdrawals == [
+        {"openid": "OPENID-USER", "message_id": "stream-1"}
+    ]
+    assert api.active_sends[0]["markdown"] == {
+        "content": sanitize_markdown("hello\nworld\n")
+    }
+    assert adapter._streams[ref].finalized
+    await adapter.stop()
+
+
+async def test_idle_done_transport_failure_falls_back_without_retry_storm() -> (
+    None
+):
+    api = FakeQQBotAPI()
+    api.fail_done_transport = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(
+        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
+    )
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+
+    ref = await adapter.send_text(conversation, "hello")
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    sleep.release(0)
+    await _wait_for(lambda: len(api.active_sends) == 1)
+
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+    ]
+    assert api.withdrawals == [
+        {"openid": "OPENID-USER", "message_id": "stream-1"}
+    ]
+    assert api.active_sends[0]["markdown"] == {"content": "hello"}
+    assert adapter._streams[ref].finalized
+
+    await asyncio.sleep(0.05)
+    assert len(sleep.calls) == 1
+    await adapter.stop()
+    assert [frame["input_state"] for frame in api.stream_frames] == [
+        STREAM_INPUT_STATE_GENERATING,
+    ]
 
 
 async def test_typing_indicator_sent_on_inbound_and_keepalive() -> None:
