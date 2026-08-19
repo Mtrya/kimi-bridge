@@ -186,8 +186,8 @@ async def test_qq_keeps_unsupported_file_data_unverifiable() -> None:
         ),
         f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/api-use.md": b"https://bots.qq.com/app/getAppAccessToken appId clientSecret access_token expires_in",
         f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/event-emit.md": b"QQBot /gateway heartbeat_interval session_id",
-        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq",
-        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": "POST /v2/users/{user_openid}/files file_type file_info srv_send_msg msg_type media\n| file_data | | 否 | 【暂未支持】 |".encode(),
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq media file_info",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": "POST /v2/users/{user_openid}/files file_type file_info srv_send_msg\n| file_data | | 否 | 【暂未支持】 |".encode(),
     }
 
     result = await qq_contract.inspect(MemoryFetcher(bodies))
@@ -208,8 +208,8 @@ async def test_qq_recognizes_a_supported_public_file_data_contract() -> None:
         ),
         f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/api-use.md": b"https://bots.qq.com/app/getAppAccessToken appId clientSecret access_token expires_in",
         f"{root}/docs/develop/api-v2/dev-prepare/interface-framework/event-emit.md": b"QQBot /gateway heartbeat_interval session_id",
-        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq",
-        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": b"POST /v2/users/{user_openid}/files file_type file_data file_info srv_send_msg msg_type media",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/send.md": b"POST /v2/users/{user_openid}/messages msg_type content msg_id msg_seq media file_info",
+        f"{root}/docs/develop/api-v2/server-inter/message/send-receive/rich-media.md": b"POST /v2/users/{user_openid}/files file_type file_data file_info srv_send_msg",
     }
 
     result = await qq_contract.inspect(MemoryFetcher(bodies))
@@ -473,3 +473,17 @@ def test_sync_exit_status_reports_automation_success(
 
     assert exit_code == 0
     assert "would-record-source-drift" in capsys.readouterr().out
+
+
+def test_check_report_only_separates_alerts_from_execution_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def drift_report() -> SourceMonitorReport:
+        return _report("drift")
+
+    monkeypatch.setattr(checker, "run_live_check", drift_report)
+    path = tmp_path / "report.json"
+
+    assert checker.main(["check", "--report", str(path)]) == 1
+    assert checker.main(["check", "--report-only", "--report", str(path)]) == 0

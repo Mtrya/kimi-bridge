@@ -402,6 +402,11 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument(
         "--report", type=Path, default=Path("platform-source-report.json")
     )
+    check.add_argument(
+        "--report-only",
+        action="store_true",
+        help="return success after writing the report even when it contains alerts",
+    )
     sync = commands.add_parser("sync", help="synchronize the rolling drift issue")
     sync.add_argument("--report", type=Path, required=True)
     sync.add_argument("--dry-run", action="store_true")
@@ -421,7 +426,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for platform in report.platforms:
             print(f"{platform.platform}: {platform.outcome}")
         print(f"report: {report.report_digest}")
-        return 0 if report.healthy else 1
+        return 0 if args.report_only or report.healthy else 1
 
     report = read_report(args.report)
     if args.dry_run:
