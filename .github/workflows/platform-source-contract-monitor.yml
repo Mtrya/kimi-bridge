@@ -1,0 +1,46 @@
+name: Platform source contract monitor
+
+on:
+  schedule:
+    - cron: "47 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: platform-source-contract-monitor
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.event_name != 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - name: Inspect public official sources
+        id: monitor
+        continue-on-error: true
+        run: uv run --locked python scripts/check_platform_source_contracts.py check --report "$RUNNER_TEMP/platform-source-contract/report.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: platform-source-contract-report
+          path: ${{ runner.temp }}/platform-source-contract/report.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Synchronize rolling drift issue
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SYNC_MODE: ${{ github.ref != 'refs/heads/main' && '--dry-run' || '' }}
+        run: uv run --locked python scripts/check_platform_source_contracts.py sync $SYNC_MODE --report "$RUNNER_TEMP/platform-source-contract/report.json"
