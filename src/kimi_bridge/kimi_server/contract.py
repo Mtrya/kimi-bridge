@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 2
+KIMI_SEMANTIC_CONTRACT_VERSION = 3
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -25,6 +25,7 @@ class SchemaFieldContract:
     required: bool = True
     values: tuple[Any, ...] = ()
     format: str | None = None
+    required_if_parent_present: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +92,15 @@ def _field(
     required: bool = True,
     values: tuple[Any, ...] = (),
     format: str | None = None,
+    required_if_parent_present: bool = False,
 ) -> SchemaFieldContract:
     return SchemaFieldContract(
-        tuple(path.split(".")), types, required, values, format
+        tuple(path.split(".")),
+        types,
+        required,
+        values,
+        format,
+        required_if_parent_present,
     )
 
 
@@ -853,8 +860,51 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "turn.ended",
-        "ChatRouter.dispatch_event",
-        (_field("turnId", "integer", "number"),),
+        "ChatRouter.dispatch_event/session_notice_from_event",
+        (
+            _field("turnId", "integer", "number"),
+            _field(
+                "reason",
+                "string",
+                values=("completed", "cancelled", "failed", "blocked"),
+            ),
+            _field("error", "object", required=False),
+            _field(
+                "error.code",
+                "string",
+                required=False,
+                required_if_parent_present=True,
+            ),
+            _field(
+                "error.message",
+                "string",
+                required=False,
+                required_if_parent_present=True,
+            ),
+            _field(
+                "error.retryable",
+                "boolean",
+                required=False,
+                required_if_parent_present=True,
+            ),
+        ),
+    ),
+    SessionEventContract(
+        "error",
+        "session_notice_from_event",
+        (
+            _field("code", "string"),
+            _field("message", "string"),
+            _field("retryable", "boolean"),
+        ),
+    ),
+    SessionEventContract(
+        "warning",
+        "session_notice_from_event",
+        (
+            _field("message", "string"),
+            _field("code", "string", required=False),
+        ),
     ),
     SessionEventContract(
         "prompt.completed",
@@ -932,6 +982,8 @@ def kimi_semantic_contract() -> dict[str, Any]:
         }
         if item.format is not None:
             payload["format"] = item.format
+        if item.required_if_parent_present:
+            payload["required_if_parent_present"] = True
         return payload
 
     return {

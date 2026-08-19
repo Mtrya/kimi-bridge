@@ -39,12 +39,14 @@ from kimi_bridge.kimi_server import (
     PromptContent,
     PromptMedia,
     ServerConnection,
+    SessionNotice,
     SessionStatus,
     SessionUsage,
     SkillInfo,
     TaskInfo,
     ToolInfo,
     parse_server_startup_line,
+    session_notice_from_event,
 )
 
 
@@ -1333,6 +1335,167 @@ async def test_sequenced_error_before_ack_is_yielded_and_stream_continues() -> N
     assert await asyncio.wait_for(anext(events), 1) == error_event
     assert await asyncio.wait_for(anext(events), 1) == completed_event
     await events.aclose()
+
+
+async def test_replayed_sequenced_notice_is_not_yielded_twice() -> None:
+    error_event = _session_event(1, "epoch-1", "error")
+    error_event["payload"] = {
+        "type": "error",
+        "code": "provider.rate_limit",
+        "message": "The provider rate limit was reached",
+        "retryable": True,
+    }
+    completed_event = _session_event(2, "epoch-1", "prompt.completed")
+    accepted = {
+        "accepted": ["session-1"],
+        "not_found": [],
+        "resync_required": [],
+        "cursors": {},
+    }
+    first = FakeWebSocket(
+        subscribe_payload=accepted,
+        events=[error_event],
+        disconnect_after_events=True,
+    )
+    second = FakeWebSocket(
+        subscribe_payload=accepted,
+        events=[error_event, completed_event],
+    )
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False}), _envelope({"busy": False})]
+        ),
+        ws_connect=FakeWebSocketConnect([first, second]),
+        sleep=no_sleep,
+    )
+    events = client.subscribe_events("session-1")
+
+    assert await asyncio.wait_for(anext(events), 1) == error_event
+    assert await asyncio.wait_for(anext(events), 1) == completed_event
+    await events.aclose()
+
+    subscribe = next(frame for frame in second.sent if frame["type"] == "subscribe")
+    assert subscribe["payload"]["cursors"] == {
+        "session-1": {"seq": 1, "epoch": "epoch-1"}
+    }
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            {
+                "type": "warning",
+                "code": "agents-md-oversized",
+                "message": "Part of AGENTS.md was omitted",
+            },
+            SessionNotice(
+                "warning",
+                "Part of AGENTS.md was omitted",
+                code="agents-md-oversized",
+            ),
+        ),
+        (
+            {
+                "type": "error",
+                "code": "provider.rate_limit",
+                "message": "The provider rate limit was reached",
+                "retryable": True,
+            },
+            SessionNotice(
+                "error",
+                "The provider rate limit was reached",
+                code="provider.rate_limit",
+                retryable=True,
+            ),
+        ),
+        (
+            {
+                "type": "turn.ended",
+                "turnId": 4,
+                "reason": "failed",
+                "error": {
+                    "code": "quota.exhausted",
+                    "message": "Quota exhausted",
+                    "retryable": False,
+                    "details": {"private": "not forwarded"},
+                },
+            },
+            SessionNotice(
+                "error",
+                "Quota exhausted",
+                code="quota.exhausted",
+                retryable=False,
+            ),
+        ),
+    ],
+)
+def test_session_notice_from_event_decodes_safe_fields(
+    payload: dict[str, Any], expected: SessionNotice
+) -> None:
+    assert session_notice_from_event({"payload": payload}) == expected
+
+
+@pytest.mark.parametrize("reason", ["completed", "cancelled"])
+def test_session_notice_from_event_ignores_non_failure_turn_end(
+    reason: str,
+) -> None:
+    event = {
+        "payload": {"type": "turn.ended", "turnId": 4, "reason": reason}
+    }
+
+    assert session_notice_from_event(event) is None
+
+
+def test_session_notice_from_event_keeps_failure_without_error_details() -> None:
+    notice = session_notice_from_event(
+        {"payload": {"type": "turn.ended", "turnId": 4, "reason": "blocked"}}
+    )
+
+    assert notice is not None
+    assert notice.kind == "error"
+    assert notice.code is None
+    assert notice.retryable is None
+
+
+def test_session_notice_from_event_ignores_background_task_lifecycle() -> None:
+    event = {
+        "payload": {
+            "type": "background.task.terminated",
+            "taskId": "task-1",
+            "status": "failed",
+        }
+    }
+
+    assert session_notice_from_event(event) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "warning", "message": ""},
+        {"type": "error", "code": "bad", "message": "Broken"},
+        {"type": "turn.ended", "turnId": 4},
+        {
+            "type": "turn.ended",
+            "turnId": 4,
+            "reason": "failed",
+            "error": {"code": "bad", "message": "Broken"},
+        },
+        {"type": "turn.ended", "turnId": 4, "reason": "unknown"},
+    ],
+)
+def test_session_notice_from_event_rejects_contract_drift(
+    payload: dict[str, Any],
+) -> None:
+    with pytest.raises(KimiServerProtocolError):
+        session_notice_from_event({"payload": payload})
 
 
 async def test_unsequenced_websocket_error_before_ack_remains_fatal() -> None:

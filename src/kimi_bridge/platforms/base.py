@@ -130,6 +130,9 @@ class PlatformAdapter(Protocol):
     async def send_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef: ...
+    async def send_notice_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef: ...
     async def send_final_text(
         self, conversation: ConversationRef, text: str
     ) -> MessageRef: ...

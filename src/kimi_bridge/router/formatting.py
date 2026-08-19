@@ -9,6 +9,7 @@ from ..kimi_server import (
     GoalInfo,
     KimiServerProtocolError,
     ModelInfo,
+    SessionNotice,
     SessionProfile,
     SessionStatus,
     SessionUsage,
@@ -33,6 +34,15 @@ _TASK_STATUS_DISPLAY: dict[TaskStatus, tuple[int, str, str]] = {
     "cancelled": (2, "⏹️", "Cancelled"),
     "completed": (3, "✅", "Completed"),
 }
+
+
+def _format_session_notice(notice: SessionNotice) -> str:
+    label = "Kimi warning" if notice.kind == "warning" else "Kimi runtime error"
+    code = f" ({notice.code})" if notice.code is not None else ""
+    lines = [f"{label}{code}: {notice.message}"]
+    if notice.kind == "error" and notice.retryable:
+        lines.append("You can retry this request.")
+    return "\n\n".join(lines)
 
 
 def _conversation_key(message: InboundMessage | InboundInteraction) -> str:

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..interactions import ApprovalRequest, QuestionRequest
+from ..kimi_server import SessionNotice
 from ..platforms.base import (
     ActorRef,
     ConversationRef,
@@ -46,6 +47,7 @@ class _PendingFinalization:
     answer: _RenderState
     thinking: _RenderState
     turn_end_seq: int | None
+    notice: SessionNotice | None = None
 
 
 @dataclass(slots=True)
@@ -61,6 +63,10 @@ class _ActiveStream:
     )
     step: int | None = None
     pending_finalization: _PendingFinalization | None = None
+    pending_terminal_notice: SessionNotice | None = None
+    reported_terminal_notices: set[tuple[str | None, str]] = field(
+        default_factory=set
+    )
     task: asyncio.Task[None] | None = None
     interaction_task: asyncio.Task[None] | None = None
 

@@ -64,6 +64,17 @@ TaskKind = Literal["subagent", "bash", "tool"]
 SkillSource = Literal["project", "user", "extra", "builtin"]
 ToolSource = Literal["builtin", "skill", "mcp"]
 PromptMediaKind = Literal["image", "video"]
+SessionNoticeKind = Literal["error", "warning"]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionNotice:
+    """One safe user-visible notice from the Kimi session event stream."""
+
+    kind: SessionNoticeKind
+    message: str
+    code: str | None = None
+    retryable: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

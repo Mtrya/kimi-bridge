@@ -8,9 +8,11 @@ import logging
 from typing import Any, Literal
 
 from ..edit_budget import edit_interval
+from ..kimi_server import SessionNotice, session_notice_from_event
 from ..platforms.base import ConversationRef, MessageRef, PlatformAdapter
 from .formatting import (
     _chunk_text,
+    _format_session_notice,
     _in_flight_assistant_text,
     _in_flight_thinking_text,
     _persisted_assistant_text,
@@ -40,6 +42,15 @@ class _RenderingMixin:
         if not isinstance(payload, dict):
             return
         event_type = payload.get("type") or event.get("type")
+
+        notice = session_notice_from_event(event)
+        if notice is not None and notice.kind == "warning":
+            await self._send_session_notice(active, notice)
+            return
+        if event_type == "error":
+            assert notice is not None
+            await self._handle_terminal_notice(active, notice)
+            return
 
         if isinstance(event_type, str) and event_type.startswith("compaction."):
             self._dispatch_compaction_event(active.session_id, event_type, payload)
@@ -99,7 +110,7 @@ class _RenderingMixin:
             await self._maybe_flush(active, active.thinking)
             return
         if event_type == "turn.ended":
-            await self._finish_turn(active, event, payload)
+            await self._finish_turn(active, event, payload, notice=notice)
             return
         if event_type == "prompt.completed":
             await self._reconcile_completed_prompt(active, event, payload)
@@ -115,7 +126,18 @@ class _RenderingMixin:
             await self._flush(active, active.render)
             if self._thinking_enabled(active):
                 await self._flush(active, active.thinking)
+        if active.pending_finalization is not None:
+            await self._flush_pending_finalization(
+                active, active.pending_finalization
+            )
+        elif active.pending_terminal_notice is not None:
+            await self._flush_terminal_output(active)
+            await self._send_terminal_notice(
+                active, active.pending_terminal_notice
+            )
         active.pending_finalization = None
+        active.pending_terminal_notice = None
+        active.reported_terminal_notices.clear()
         active.step = None
         active.render = _RenderState(turn_id=turn_id, turn_active=True)
         active.thinking = _RenderState(
@@ -448,6 +470,8 @@ class _RenderingMixin:
         active: _ActiveStream,
         event: dict[str, Any],
         payload: dict[str, Any],
+        *,
+        notice: SessionNotice | None,
     ) -> None:
         answer = active.render
         thinking = active.thinking
@@ -474,10 +498,21 @@ class _RenderingMixin:
             thinking_text = _persisted_thinking_text(snapshot)
         _extend_provisional_text(answer, answer_text)
         _extend_provisional_text(thinking, thinking_text)
+        terminal_notice = _prefer_session_notice(
+            active.pending_terminal_notice, notice
+        )
+        active.pending_terminal_notice = None
+        if (
+            terminal_notice is not None
+            and _session_notice_fingerprint(terminal_notice)
+            in active.reported_terminal_notices
+        ):
+            terminal_notice = None
         active.pending_finalization = _PendingFinalization(
             answer=answer,
             thinking=thinking,
             turn_end_seq=turn_end_seq,
+            notice=terminal_notice,
         )
 
         if active.adapter.supports_edits:
@@ -527,50 +562,97 @@ class _RenderingMixin:
                 continue
             if answer_text is not None:
                 pending.answer.text = answer_text
-            thinking_enabled = self._thinking_enabled(active)
-            if thinking_enabled:
+            if self._thinking_enabled(active):
                 thinking_text = _persisted_thinking_text(
                     snapshot, prompt_id=prompt_id
                 )
                 if thinking_text is not None:
                     pending.thinking.text = thinking_text
-            has_thinking_output = thinking_enabled and bool(pending.thinking.text)
-            await self._flush(
-                active,
-                pending.answer,
-                final=not has_thinking_output,
-            )
-            if thinking_enabled:
-                await self._flush(
-                    active,
-                    pending.thinking,
-                    final=has_thinking_output,
-                )
+            await self._flush_pending_finalization(active, pending)
             active.pending_finalization = None
             return
 
-        if not active.adapter.supports_edits:
-            # Deferred rendering held the last step back for the reconciled
-            # text; emit the provisional buffer rather than losing it.
-            thinking_enabled = self._thinking_enabled(active)
-            has_thinking_output = thinking_enabled and bool(pending.thinking.text)
-            await self._flush(
-                active,
-                pending.answer,
-                final=not has_thinking_output,
-            )
-            if thinking_enabled:
-                await self._flush(
-                    active,
-                    pending.thinking,
-                    final=has_thinking_output,
-                )
+        # Deferred rendering held the last step back for the reconciled text,
+        # while editable rendering may still hold a terminal notice. Preserve
+        # both when the final snapshot never catches up.
+        await self._flush_pending_finalization(active, pending)
+        active.pending_finalization = None
         LOGGER.warning(
             "final snapshot did not catch up for session %s prompt %s; "
             "keeping provisional output",
             active.session_id,
             prompt_id,
         )
+
+    async def _handle_terminal_notice(
+        self, active: _ActiveStream, notice: SessionNotice
+    ) -> None:
+        fingerprint = _session_notice_fingerprint(notice)
+        if fingerprint in active.reported_terminal_notices:
+            return
+        pending = active.pending_finalization
+        if pending is not None:
+            pending.notice = _prefer_session_notice(pending.notice, notice)
+            return
+        if active.render.turn_active or active.thinking.turn_active:
+            active.pending_terminal_notice = _prefer_session_notice(
+                active.pending_terminal_notice, notice
+            )
+            return
+        await self._send_terminal_notice(active, notice)
+
+    async def _flush_pending_finalization(
+        self, active: _ActiveStream, pending: _PendingFinalization
+    ) -> None:
+        thinking_enabled = self._thinking_enabled(active)
+        has_thinking_output = thinking_enabled and bool(pending.thinking.text)
+        has_notice = pending.notice is not None
+        await self._flush(
+            active,
+            pending.answer,
+            final=not has_thinking_output and not has_notice,
+        )
+        if thinking_enabled:
+            await self._flush(
+                active,
+                pending.thinking,
+                final=has_thinking_output and not has_notice,
+            )
+        if pending.notice is not None:
+            await self._send_terminal_notice(active, pending.notice)
+
+    async def _flush_terminal_output(self, active: _ActiveStream) -> None:
+        await self._cancel_delayed_flush(active.render)
+        await self._cancel_delayed_flush(active.thinking)
+        await self._flush(active, active.render)
+        if self._thinking_enabled(active):
+            await self._flush(active, active.thinking)
+
+    async def _send_terminal_notice(
+        self, active: _ActiveStream, notice: SessionNotice
+    ) -> None:
+        if await self._send_session_notice(active, notice):
+            active.reported_terminal_notices.add(
+                _session_notice_fingerprint(notice)
+            )
+
+    async def _send_session_notice(
+        self, active: _ActiveStream, notice: SessionNotice
+    ) -> bool:
+        try:
+            await self._send_chunked(
+                active.adapter,
+                active.conversation,
+                _format_session_notice(notice),
+                terminal=notice.kind == "error",
+            )
+        except Exception:
+            LOGGER.exception(
+                "%s session notice send failed; keeping the Kimi event stream active",
+                active.adapter.name,
+            )
+            return False
+        return True
 
     async def _backfill_thinking(self, active: _ActiveStream | None) -> None:
         if active is None or not self._thinking_enabled(active):
@@ -616,6 +698,24 @@ class _RenderingMixin:
                     await self._flush(active, active.thinking)
             return
 
+        pending = active.pending_finalization
+        if pending is not None:
+            prompt_id = pending.answer.prompt_id
+            answer_text = _persisted_assistant_text(
+                snapshot, prompt_id=prompt_id
+            )
+            if answer_text is not None:
+                pending.answer.text = answer_text
+            if self._thinking_enabled(active):
+                thinking_text = _persisted_thinking_text(
+                    snapshot, prompt_id=prompt_id
+                )
+                if thinking_text is not None:
+                    pending.thinking.text = thinking_text
+            await self._flush_pending_finalization(active, pending)
+            active.pending_finalization = None
+            return
+
         if not active.render.turn_active and not active.thinking.turn_active:
             return
         answer_text = _persisted_assistant_text(snapshot)
@@ -644,10 +744,18 @@ class _RenderingMixin:
             )
 
     async def _send_chunked(
-        self, adapter: PlatformAdapter, conversation: ConversationRef, text: str
+        self,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        text: str,
+        *,
+        terminal: bool = True,
     ) -> None:
         for chunk in _chunk_text(text, adapter.message_limit):
-            await adapter.send_final_text(conversation, chunk)
+            if terminal:
+                await adapter.send_final_text(conversation, chunk)
+            else:
+                await adapter.send_notice_text(conversation, chunk)
 
 
 def _optional_int(value: Any) -> int | None:
@@ -673,3 +781,19 @@ def _max_seq(first: int | None, second: int | None) -> int | None:
 def _extend_provisional_text(render: _RenderState, candidate: str | None) -> None:
     if candidate is not None and candidate.startswith(render.text):
         render.text = candidate
+
+
+def _session_notice_fingerprint(notice: SessionNotice) -> tuple[str | None, str]:
+    return notice.code, notice.message
+
+
+def _prefer_session_notice(
+    current: SessionNotice | None, candidate: SessionNotice | None
+) -> SessionNotice | None:
+    if current is None:
+        return candidate
+    if candidate is None:
+        return current
+    if current.code is None and candidate.code is not None:
+        return candidate
+    return current

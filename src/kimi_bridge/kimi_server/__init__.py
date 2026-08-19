@@ -16,6 +16,7 @@ from .contract import (
     kimi_semantic_contract,
 )
 from .supervisor import KimiServerSupervisor, parse_server_startup_line
+from .events import session_notice_from_event
 from .probe import probe_kimi_compatibility
 from .types import (
     GoalBudget,
@@ -35,6 +36,8 @@ from .types import (
     PromptMedia,
     PromptMediaKind,
     ServerConnection,
+    SessionNotice,
+    SessionNoticeKind,
     SessionProfile,
     SessionStatus,
     SessionUsage,
@@ -77,6 +80,8 @@ __all__ = [
     "PromptMedia",
     "PromptMediaKind",
     "ServerConnection",
+    "SessionNotice",
+    "SessionNoticeKind",
     "SessionProfile",
     "SessionStatus",
     "SessionUsage",
@@ -91,4 +96,5 @@ __all__ = [
     "kimi_semantic_contract",
     "parse_server_startup_line",
     "probe_kimi_compatibility",
+    "session_notice_from_event",
 ]

@@ -477,6 +477,11 @@ class TelegramAdapter:
     ) -> MessageRef:
         return await self.send_text(conversation, text)
 
+    async def send_notice_text(
+        self, conversation: ConversationRef, text: str
+    ) -> MessageRef:
+        return await self.send_text(conversation, text)
+
     async def edit_text(self, message: MessageRef, text: str) -> None:
         self._validate_conversation(message.conversation)
         await self._edit_message(message, _message_text(text))

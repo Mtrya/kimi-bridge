@@ -456,6 +456,10 @@ def _field_matches(
         return False
     if requirement.required and not any(required for _schema, required in states):
         return False
+    if requirement.required_if_parent_present and not _field_required_in_parent(
+        schema, requirement.path
+    ):
+        return False
     if (
         "any" in requirement.types
         and not requirement.values
@@ -480,6 +484,35 @@ def _field_matches(
         )
         for candidate, _required in states
     )
+
+
+def _field_required_in_parent(
+    schema: Mapping[str, Any], path: tuple[str, ...]
+) -> bool:
+    if len(path) < 2 or path[-1] in ("[]", "{}"):
+        return False
+    parents = _field_states(schema, path[:-1])
+    return any(
+        _schema_requires_field(parent, path[-1])
+        for parent, _required in parents
+    )
+
+
+def _schema_requires_field(schema: Mapping[str, Any], field: str) -> bool:
+    alternatives = _schema_alternatives(schema)
+    if len(alternatives) > 1 or alternatives[0] != dict(schema):
+        return any(
+            _schema_requires_field(alternative, field)
+            for alternative in alternatives
+        )
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        return any(
+            isinstance(item, dict) and _schema_requires_field(item, field)
+            for item in all_of
+        )
+    required = schema.get("required")
+    return isinstance(required, list) and field in required
 
 
 def _field_states(
