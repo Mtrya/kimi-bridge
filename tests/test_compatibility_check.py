@@ -57,6 +57,7 @@ prepare_compatibility_release = checker.prepare_compatibility_release
 read_report = checker.read_report
 redact = checker.redact
 select_kimi_code_versions = checker.select_kimi_code_versions
+summarize_report_batches = checker.summarize_report_batches
 summarize_reports = checker.summarize_reports
 synchronize_reports = checker.synchronize_reports
 write_report = checker.write_report
@@ -788,6 +789,44 @@ async def test_live_checker_rejects_malformed_explicit_version_before_download()
     assert report.failures[0]["id"] == "input.version"
 
 
+async def test_live_checker_attributes_probe_failure_to_requested_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = checker.InstalledKimi(
+        tmp_path / "kimi",
+        {"KIMI_CODE_HOME": str(tmp_path / "kimi-home")},
+    )
+
+    class FakeSupervisor:
+        executable_identity = SimpleNamespace(
+            product=SimpleNamespace(value="kimi-code"),
+            version="0.37.1",
+        )
+
+        async def __aenter__(self) -> FakeSupervisor:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    async def failed_probe(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(
+        checker, "install_official_kimi", lambda *_args, **_kwargs: installed
+    )
+    monkeypatch.setattr(
+        checker, "KimiServerSupervisor", lambda **_kwargs: FakeSupervisor()
+    )
+    monkeypatch.setattr(checker, "probe_kimi_compatibility", failed_probe)
+
+    report = await check_live(version="0.37.2")
+
+    assert not report.compatible
+    assert report.product == "kimi-code"
+    assert report.version == "0.37.2"
+
+
 @pytest.mark.skipif(
     os.name != "posix", reason="spawns a shebang script as the fake kimi"
 )
@@ -822,20 +861,20 @@ class FakeGitHub:
     def __init__(self) -> None:
         self.branch_exists = False
         self.project_version = COMPATIBILITY_MAP[-1].bridge
-        self.pyproject = (
+        self.base_pyproject = (
             "[build-system]\nrequires = []\n\n"
             "[project]\n"
             'name = "kimi-bridge"\n'
             f'version = "{self.project_version}"\n'
         )
-        self.uv_lock = (
+        self.base_uv_lock = (
             "version = 1\n\n"
             "[[package]]\n"
             'name = "kimi-bridge"\n'
             f'version = "{self.project_version}"\n'
             'source = { editable = "." }\n'
         )
-        self.branch_content = {
+        self.base_content = {
             "schema_version": 1,
             "releases": [
                 {
@@ -847,6 +886,9 @@ class FakeGitHub:
                 }
             ],
         }
+        self.pyproject = self.base_pyproject
+        self.uv_lock = self.base_uv_lock
+        self.branch_content = json.loads(json.dumps(self.base_content))
         self.pulls: list[dict[str, Any]] = []
         self.issues: list[dict[str, Any]] = []
         self.comments: list[str] = []
@@ -886,11 +928,11 @@ class FakeGitHub:
             if method == "GET":
                 self.content_refs.append(str(request.url.params["ref"]))
                 if content_path == "pyproject.toml":
-                    value = self.pyproject
+                    value = self.base_pyproject
                 elif content_path == "uv.lock":
-                    value = self.uv_lock
+                    value = self.base_uv_lock
                 else:
-                    value = json.dumps(self.branch_content) + "\n"
+                    value = json.dumps(self.base_content) + "\n"
                 content = base64.b64encode(
                     value.encode()
                 ).decode()
@@ -971,6 +1013,12 @@ class FakeGitHub:
     @staticmethod
     def _json(value: Any, *, status: int = 200) -> httpx.Response:
         return httpx.Response(status, json=value)
+
+    def merge_promotion(self) -> None:
+        self.base_pyproject = self.pyproject
+        self.base_uv_lock = self.uv_lock
+        self.base_content = json.loads(json.dumps(self.branch_content))
+        self.pulls.clear()
 
 
 def test_prepare_compatibility_release_accepts_reordered_commented_toml() -> None:
@@ -1127,7 +1175,7 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert len(fake.pulls) == 1
     assert fake.content_updates == 3
     assert fake.ci_dispatches == 1
-    fake.pulls.clear()
+    fake.merge_promotion()
     assert synchronize_reports(compatible_unknown, automation) == ()
     assert fake.content_updates == 3
 
@@ -1193,6 +1241,53 @@ def test_batch_promotion_preserves_every_passing_version(
         key=kimi_code_version_sort_key,
     )
     assert all(version in fake.pulls[0]["body"] for version in versions)
+    assert synchronize_reports(reports, automation) == (
+        "unchanged-promotion-pr",
+    )
+
+    drifted = [
+        report
+        for version in versions
+        for report in _reports_for_all_platforms(
+            version,
+            failing={"windows": _failing_check()} if version == versions[1] else None,
+        )
+    ]
+    assert "created-drift-issue" in synchronize_reports(drifted, automation)
+    assert fake.pulls[0]["state"] == "closed"
+
+
+def test_batch_promotion_describes_only_versions_missing_from_base(
+    unlisted_kimi_code_version: str,
+) -> None:
+    major = unlisted_kimi_code_version.split(".", 1)[0]
+    existing, missing = (f"{major}.0.0", f"{major}.0.1")
+    fake = FakeGitHub()
+    fake.base_content["releases"][-1]["kimi_code"] = sorted(
+        {*SUPPORTED_KIMI_CODE_VERSIONS, existing},
+        key=kimi_code_version_sort_key,
+    )
+    fake.branch_content = json.loads(json.dumps(fake.base_content))
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = GitHubApiAutomation(
+        "Mtrya/kimi-bridge", "token", client=client
+    )
+    reports = [
+        report
+        for version in (existing, missing)
+        for report in _reports_for_all_platforms(version)
+    ]
+
+    assert synchronize_reports(reports, automation) == (
+        "created-promotion-pr",
+    )
+    assert missing in fake.pulls[0]["title"]
+    assert existing not in fake.pulls[0]["title"]
+    assert f"<!-- versions:{missing} " in fake.pulls[0]["body"]
+    assert f"<!-- versions:{existing}," not in fake.pulls[0]["body"]
 
 
 def test_recovered_unknown_version_does_not_prepare_automatic_release(
@@ -1352,6 +1447,33 @@ def test_strict_gating_treats_version_skew_as_drift() -> None:
         item["id"] == "aggregation.version" and item["platform"] == "all"
         for item in skewed.failures
     )
+
+
+def test_partial_multi_version_reports_never_create_a_mixed_summary() -> None:
+    reports = [
+        build_report(
+            mode="live",
+            product="kimi-code",
+            version="0.37.1",
+            checks=(_passing_check(),),
+            platform="linux",
+        ),
+        build_report(
+            mode="live",
+            product="kimi-code",
+            version="0.37.2",
+            checks=(_passing_check(),),
+            platform="macos",
+        ),
+    ]
+
+    summaries = summarize_report_batches(reports)
+
+    assert tuple(summary.version for summary in summaries) == (
+        "0.37.1",
+        "0.37.2",
+    )
+    assert all(not summary.compatible for summary in summaries)
 
 
 def test_summarize_reports_rejects_duplicate_platforms() -> None:

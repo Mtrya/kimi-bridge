@@ -740,7 +740,8 @@ async def check_live(
             )
             async with supervisor:
                 product = supervisor.executable_identity.product.value
-                reported_version = supervisor.executable_identity.version
+                if version is None:
+                    reported_version = supervisor.executable_identity.version
                 probe = await probe_kimi_compatibility(
                     supervisor, root / "workspace"
                 )
@@ -957,11 +958,11 @@ def summarize_report_batches(
 ) -> tuple[CompatibilitySummary, ...]:
     """Summarize one legacy latest-version set or many explicit version sets."""
 
-    if len(reports) <= len(CANARY_PLATFORMS):
-        return (summarize_reports(reports),)
     grouped: dict[str, list[CompatibilityReport]] = {}
     for report in reports:
         grouped.setdefault(report.version, []).append(report)
+    if len(grouped) <= 1:
+        return (summarize_reports(reports),)
     return tuple(
         summarize_reports(grouped[version])
         for version in sorted(grouped, key=kimi_code_version_sort_key)
@@ -1093,17 +1094,7 @@ class GitHubApiAutomation:
         ordered = tuple(
             sorted(summaries, key=lambda item: kimi_code_version_sort_key(item.version))
         )
-        versions_to_promote = tuple(summary.version for summary in ordered)
-        combined_digest = _digest(
-            [(summary.version, summary.report_digest) for summary in ordered]
-        )
-        state_marker = (
-            f"<!-- versions:{','.join(versions_to_promote)} "
-            f"report-digest:{combined_digest} -->"
-        )
         pull = self._find_promotion_pull()
-        if pull is not None and state_marker in str(pull.get("body", "")):
-            return "unchanged-promotion-pr"
         paths = (
             "pyproject.toml",
             "uv.lock",
@@ -1129,14 +1120,23 @@ class GitHubApiAutomation:
         versions = latest.get("kimi_code")
         if not isinstance(versions, list):
             raise RuntimeError("compatibility map is malformed")
-        if all(version in versions for version in versions_to_promote):
+        missing = tuple(
+            summary for summary in ordered if summary.version not in versions
+        )
+        if not missing:
             return None
+        versions_to_promote = tuple(summary.version for summary in missing)
+        combined_digest = _digest(
+            [(summary.version, summary.report_digest) for summary in missing]
+        )
+        state_marker = (
+            f"<!-- versions:{','.join(versions_to_promote)} "
+            f"report-digest:{combined_digest} -->"
+        )
+        if pull is not None and state_marker in str(pull.get("body", "")):
+            return "unchanged-promotion-pr"
         next_version, release_files = prepare_compatibility_release(
-            kimi_code_versions=[
-                version
-                for version in versions_to_promote
-                if version not in versions
-            ],
+            kimi_code_versions=versions_to_promote,
             pyproject=_decode_content(current["pyproject.toml"]),
             uv_lock=_decode_content(current["uv.lock"]),
             compatibility_map=_decode_content(
@@ -1166,7 +1166,7 @@ class GitHubApiAutomation:
         body = (
             f"{PROMOTION_MARKER}\n{state_marker}\n\n"
             f"The credential-free compatibility canary passed for kimi-code "
-            f"{rendered_versions} on {', '.join(ordered[0].platforms)}. This PR "
+            f"{rendered_versions} on {', '.join(missing[0].platforms)}. This PR "
             f"prepares kimi-bridge {next_version} so the promoted Kimi Code "
             f"{promotion_subject} available through the packaged compatibility "
             f"map.\n\n"
