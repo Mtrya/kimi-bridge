@@ -22,13 +22,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --dev
+      - name: Discover unrecorded Kimi Code releases
+        id: versions
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: echo "versions=$(uv run --locked python scripts/check_kimi_compatibility.py discover)" >> "$GITHUB_OUTPUT"
+
   canary:
+    needs: discover
     if: github.event_name != 'schedule' || github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        version: ${{ fromJSON(needs.discover.outputs.versions) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -39,20 +61,20 @@ jobs:
       - name: Run isolated credential-free canary
         id: canary
         # On main an incompatible result still writes a report and the
-        # synchronize job turns it into the rolling drift issue; branch
+        # synchronize job turns it into a drift issue; branch
         # dispatches have no synchronize job, so they fail loudly here.
         continue-on-error: ${{ github.ref == 'refs/heads/main' }}
-        run: uv run --locked python scripts/check_kimi_compatibility.py check --report "${{ runner.temp }}/kimi-compatibility/report.json" --artifacts "${{ runner.temp }}/kimi-compatibility/artifacts"
+        run: uv run --locked python scripts/check_kimi_compatibility.py check --version "${{ matrix.version }}" --report "${{ runner.temp }}/kimi-compatibility/report.json" --artifacts "${{ runner.temp }}/kimi-compatibility/artifacts"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: kimi-compatibility-report-${{ matrix.os }}
+          name: kimi-compatibility-report-${{ matrix.os }}-${{ matrix.version }}
           path: ${{ runner.temp }}/kimi-compatibility/
           if-no-files-found: error
           retention-days: 14
 
   synchronize:
-    needs: canary
+    needs: [discover, canary]
     if: always() && needs.canary.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -71,12 +93,12 @@ jobs:
           pattern: kimi-compatibility-report-*
           path: ${{ runner.temp }}/kimi-compatibility
       - run: uv sync --locked --dev
-      - name: Synchronize promotion or rolling drift issue
+      - name: Synchronize promotions or drift issues
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_DEFAULT_BRANCH: main
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # Promotion PRs and the rolling drift issue are shared state;
+          # Promotion PRs and open drift issues are shared state;
           # anywhere but main the same decision runs as a prediction.
           SYNC_MODE: ${{ github.ref != 'refs/heads/main' && '--dry-run' || '' }}
-        run: uv run --locked python scripts/check_kimi_compatibility.py sync $SYNC_MODE --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-ubuntu-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-macos-latest/report.json" --report "$RUNNER_TEMP/kimi-compatibility/kimi-compatibility-report-windows-latest/report.json"
+        run: uv run --locked python scripts/check_kimi_compatibility.py sync $SYNC_MODE --report-directory "$RUNNER_TEMP/kimi-compatibility"

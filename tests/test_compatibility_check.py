@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -55,6 +56,7 @@ install_official_kimi = checker.install_official_kimi
 prepare_compatibility_release = checker.prepare_compatibility_release
 read_report = checker.read_report
 redact = checker.redact
+select_kimi_code_versions = checker.select_kimi_code_versions
 summarize_reports = checker.summarize_reports
 synchronize_reports = checker.synchronize_reports
 write_report = checker.write_report
@@ -936,21 +938,34 @@ class FakeGitHub:
             return self._json({"name": "upstream-drift"})
         if path.endswith("/issues"):
             if method == "GET":
-                return self._json(self.issues)
+                state = request.url.params.get("state", "open")
+                return self._json(
+                    [
+                        issue
+                        for issue in self.issues
+                        if state == "all" or issue.get("state") == state
+                    ]
+                )
             issue = {
-                "number": 2,
+                "number": len(self.issues) + 2,
                 "state": "open",
                 "title": payload["title"],
                 "body": payload["body"],
             }
             self.issues.append(issue)
             return self._json(issue, status=201)
-        if path.endswith("/issues/2/comments"):
+        issue_match = re.search(r"/issues/(\d+)(/comments)?$", path)
+        if issue_match is not None and issue_match.group(2):
             self.comments.append(payload["body"])
             return self._json({"id": len(self.comments)}, status=201)
-        if path.endswith("/issues/2"):
-            self.issues[0].update(payload)
-            return self._json(self.issues[0])
+        if issue_match is not None:
+            issue = next(
+                item
+                for item in self.issues
+                if item["number"] == int(issue_match.group(1))
+            )
+            issue.update(payload)
+            return self._json(issue)
         raise AssertionError(f"unexpected GitHub request: {method} {path}")
 
     @staticmethod
@@ -985,7 +1000,7 @@ def test_prepare_compatibility_release_accepts_reordered_commented_toml() -> Non
     )
 
     version, files = prepare_compatibility_release(
-        kimi_code_version="0.29.3",
+        kimi_code_versions=("0.29.3", "0.29.4"),
         pyproject=pyproject,
         uv_lock=uv_lock,
         compatibility_map=compatibility_map,
@@ -995,6 +1010,74 @@ def test_prepare_compatibility_release_accepts_reordered_commented_toml() -> Non
     assert "version = '1.2.4' # release identity" in files["pyproject.toml"]
     assert 'version = "9.0.0"' in files["uv.lock"]
     assert 'version = "1.2.4" # release identity' in files["uv.lock"]
+    promoted = json.loads(
+        files["src/kimi_bridge/compatibility-map.json"]
+    )["releases"][-1]["kimi_code"]
+    assert promoted == ["0.29.2", "0.29.3", "0.29.4"]
+
+
+def test_release_discovery_preserves_intermediate_versions() -> None:
+    releases = [
+        {
+            "tag_name": f"{checker.OFFICIAL_KIMI_RELEASE_TAG_PREFIX}{version}",
+            "draft": False,
+            "prerelease": False,
+        }
+        for version in ("0.37.2", "0.37.1", "0.37.0", "0.36.1", "0.36.0")
+    ]
+
+    assert select_kimi_code_versions(
+        releases,
+        (),
+        supported_versions={"0.36.0", "0.36.1", "0.37.2"},
+    ) == ("0.37.0", "0.37.1")
+
+
+def test_release_discovery_rechecks_open_drift_but_not_closed_drift() -> None:
+    releases = [
+        {
+            "tag_name": f"{checker.OFFICIAL_KIMI_RELEASE_TAG_PREFIX}{version}",
+            "draft": False,
+            "prerelease": False,
+        }
+        for version in ("0.37.2", "0.37.1", "0.37.0", "0.36.0")
+    ]
+    issues = [
+        {
+            "state": "closed",
+            "body": (
+                f"{checker.DRIFT_MARKER}\n"
+                "<!-- version:0.37.0 failure-digest:old -->"
+            ),
+        },
+        {
+            "state": "open",
+            "body": (
+                f"{checker.DRIFT_MARKER}\n"
+                "<!-- version:0.37.1 failure-digest:current -->"
+            ),
+        },
+    ]
+
+    assert select_kimi_code_versions(
+        releases, issues, supported_versions={"0.36.0", "0.37.2"}
+    ) == ("0.37.1",)
+
+
+def test_release_discovery_keeps_canarying_latest_when_nothing_is_missing() -> None:
+    releases = [
+        {
+            "tag_name": (
+                f"{checker.OFFICIAL_KIMI_RELEASE_TAG_PREFIX}0.37.2"
+            ),
+            "draft": False,
+            "prerelease": False,
+        }
+    ]
+
+    assert select_kimi_code_versions(
+        releases, (), supported_versions={"0.37.2"}
+    ) == ("0.37.2",)
 
 
 def test_github_promotion_drift_dedup_and_recovery(
@@ -1075,6 +1158,41 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert synchronize_reports(recovered, automation) == ()
     assert len(fake.comments) == 1
     assert fake.pulls == []
+
+    assert synchronize_reports(broken, automation) == ("created-drift-issue",)
+    assert len(fake.issues) == 2
+    assert fake.issues[0]["state"] == "closed"
+    assert fake.issues[1]["state"] == "open"
+
+
+def test_batch_promotion_preserves_every_passing_version(
+    unlisted_kimi_code_version: str,
+) -> None:
+    major = unlisted_kimi_code_version.split(".", 1)[0]
+    versions = (f"{major}.0.0", f"{major}.0.1", f"{major}.0.2")
+    fake = FakeGitHub()
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = GitHubApiAutomation(
+        "Mtrya/kimi-bridge", "token", client=client
+    )
+    reports = [
+        report
+        for version in versions
+        for report in _reports_for_all_platforms(version)
+    ]
+
+    assert synchronize_reports(reports, automation) == (
+        "created-promotion-pr",
+    )
+    assert len(fake.pulls) == 1
+    assert fake.branch_content["releases"][-1]["kimi_code"] == sorted(
+        {*SUPPORTED_KIMI_CODE_VERSIONS, *versions},
+        key=kimi_code_version_sort_key,
+    )
+    assert all(version in fake.pulls[0]["body"] for version in versions)
 
 
 def test_recovered_unknown_version_does_not_prepare_automatic_release(
@@ -1158,6 +1276,33 @@ def test_sync_dry_run_predicts_the_decision_without_github(
     assert exit_code == 1
     assert "incompatible" in output
     assert "would-record-drift" in output
+
+
+def test_sync_report_directory_batches_versions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    unlisted_kimi_code_version: str,
+) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    major = unlisted_kimi_code_version.split(".", 1)[0]
+    versions = (f"{major}.0.0", f"{major}.0.1")
+    for version in versions:
+        for report in _reports_for_all_platforms(version):
+            write_report(
+                report,
+                tmp_path / version / report.platform / "report.json",
+            )
+
+    exit_code = checker.main(
+        ["sync", "--dry-run", "--report-directory", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert f"would-promote-{versions[0]},{versions[1]}" in output
+    assert all(f"kimi-code {version}" in output for version in versions)
 
 
 def test_strict_gating_blocks_promotion_without_every_platform(
