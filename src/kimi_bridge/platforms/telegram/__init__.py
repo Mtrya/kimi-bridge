@@ -14,7 +14,7 @@ from typing import Any, Protocol, cast
 
 import httpx
 
-from ..interactions import (
+from ...interactions import (
     ApprovalDecision,
     ApprovalPrompt,
     ApprovalResponse,
@@ -30,7 +30,7 @@ from ..interactions import (
     SingleChoiceAnswer,
     SkippedAnswer,
 )
-from .base import (
+from ..base import (
     ActorRef,
     ConversationRef,
     InboundAudio,
