@@ -92,7 +92,7 @@ allowed_users = ["<real Feishu open_id>"]
 
 Replace the marker with a real identity before startup. The pair is used only when `~/.kimi-bridge/feishu/credentials.json` (or the configured path) is absent. A fallback configured in TOML uses the standard Feishu API domain; a QR-managed record preserves the Feishu/Lark domain returned during registration.
 
-Feishu accepts direct messages from allowlisted users. Use the stable identity issued for the same app and tenant, not a display name. Selecting Feishu also requires a working `ffmpeg` executable on PATH for inbound voice messages.
+Feishu accepts direct messages from allowlisted users. Use the stable identity issued for the same app and tenant, not a display name. Selecting Feishu also requires a working `ffmpeg` executable on PATH for native voice transcription and outbound video covers.
 
 ## QQ examples
 

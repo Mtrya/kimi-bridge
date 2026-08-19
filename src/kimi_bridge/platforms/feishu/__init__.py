@@ -14,7 +14,6 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from importlib.resources import files
 from typing import Any, Protocol
 
 from ...interactions import InteractionOutcome, InteractionPrompt
@@ -63,6 +62,7 @@ FEISHU_IMAGE_MEDIA_TYPES = frozenset(
     }
 )
 VIDEO_COVER_NAME = "video-cover.png"
+FEISHU_VIDEO_COVER_FILTER = "thumbnail=30,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2"
 FEISHU_FFMPEG_EXECUTABLE = "ffmpeg"
 
 
@@ -419,10 +419,11 @@ class _LarkTransport:
         return text.strip() if isinstance(text, str) else ""
 
 
-async def _convert_opus_to_pcm(
+async def _run_ffmpeg(
     data: bytes,
     executable: str,
-    *,
+    *arguments: str,
+    operation: str,
     timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
 ) -> bytes:
     try:
@@ -431,43 +432,81 @@ async def _convert_opus_to_pcm(
             "-hide_banner",
             "-loglevel",
             "error",
-            "-i",
-            "pipe:0",
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-acodec",
-            "pcm_s16le",
-            "-f",
-            "s16le",
-            "pipe:1",
+            *arguments,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            pcm, _stderr = await asyncio.wait_for(
+            output, _stderr = await asyncio.wait_for(
                 process.communicate(data), timeout=timeout
             )
         except TimeoutError as exc:
             process.kill()
             await process.wait()
-            raise FeishuAPIError(
-                "FFmpeg Opus-to-PCM conversion timed out"
-            ) from exc
+            raise FeishuAPIError(f"FFmpeg {operation} timed out") from exc
         except asyncio.CancelledError:
             process.kill()
             await process.wait()
             raise
     except OSError as exc:
-        raise FeishuAPIError(
-            "Could not run FFmpeg for Opus-to-PCM conversion"
-        ) from exc
-    if process.returncode != 0 or not pcm:
-        raise FeishuAPIError("FFmpeg Opus-to-PCM conversion failed")
-    return pcm
+        raise FeishuAPIError(f"Could not run FFmpeg for {operation}") from exc
+    if process.returncode != 0 or not output:
+        raise FeishuAPIError(f"FFmpeg {operation} failed")
+    return output
+
+
+async def _convert_opus_to_pcm(
+    data: bytes,
+    executable: str,
+    *,
+    timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
+) -> bytes:
+    return await _run_ffmpeg(
+        data,
+        executable,
+        "-i",
+        "pipe:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-acodec",
+        "pcm_s16le",
+        "-f",
+        "s16le",
+        "pipe:1",
+        operation="Opus-to-PCM conversion",
+        timeout=timeout,
+    )
+
+
+async def _extract_video_cover(
+    data: bytes,
+    executable: str,
+    *,
+    timeout: float = FEISHU_FFMPEG_TIMEOUT_SECONDS,
+) -> bytes:
+    return await _run_ffmpeg(
+        data,
+        executable,
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-vf",
+        FEISHU_VIDEO_COVER_FILTER,
+        "-frames:v",
+        "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+        operation="video-cover extraction",
+        timeout=timeout,
+    )
 
 
 class _LarkWebSocketRunner:
@@ -751,12 +790,12 @@ class FeishuAdapter:
                 {"image_key": image_key},
             )
         elif file.media_type == "video/mp4":
-            file_key = await self._transport.upload_file(file, "mp4")
             cover = OutboundFile(
                 name=VIDEO_COVER_NAME,
-                data=_load_video_cover(),
+                data=await _extract_video_cover(file.data, self._ffmpeg_executable),
                 media_type="image/png",
             )
+            file_key = await self._transport.upload_file(file, "mp4")
             image_key = await self._transport.upload_image(cover)
             message_id = await self._transport.send_media(
                 receive_id,
@@ -1111,15 +1150,6 @@ def _post_content(text: str) -> dict[str, Any]:
             "content": [[{"tag": "md", "text": text}]],
         }
     }
-
-
-def _load_video_cover() -> bytes:
-    return (
-        files("kimi_bridge")
-        .joinpath("assets")
-        .joinpath(VIDEO_COVER_NAME)
-        .read_bytes()
-    )
 
 
 def _feishu_file_type(filename: str) -> str:

@@ -501,7 +501,7 @@ def _check_ffmpeg(
             DoctorCheck(
                 "ffmpeg",
                 CheckStatus.ERROR,
-                "not found on PATH; required for Feishu inbound voice",
+                "not found on PATH; required for Feishu voice transcription and outbound video covers",
             )
         )
         return
@@ -518,7 +518,7 @@ def _check_ffmpeg(
         DoctorCheck(
             "ffmpeg",
             CheckStatus.OK,
-            f"available for Feishu inbound voice ({executable_path})",
+            f"available for Feishu voice transcription and outbound video covers ({executable_path})",
         )
     )
 

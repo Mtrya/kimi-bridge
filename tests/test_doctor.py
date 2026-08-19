@@ -533,7 +533,7 @@ def test_missing_ffmpeg_is_blocking_only_for_feishu(tmp_path: Path) -> None:
 
     assert report.exit_code == 1
     assert _status(report, "ffmpeg") is CheckStatus.ERROR
-    assert "required for Feishu inbound voice" in _detail(report, "ffmpeg")
+    assert "required for Feishu voice transcription and outbound video covers" in _detail(report, "ffmpeg")
     assert ("/fake/ffmpeg", "-version") not in runner.calls
 
 

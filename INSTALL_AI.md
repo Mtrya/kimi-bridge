@@ -98,7 +98,7 @@ Treat `compat` as a Kimi Code version classification, not as platform permission
 
 Ask which platform only after host and Kimi Code readiness is established. One process runs exactly one adapter.
 
-- **Feishu:** application-registration QR or complete TOML app credentials. It needs bot capability, platform permissions, long-connection events, app publication, a bridge-side user allowlist, and FFmpeg for inbound voice.
+- **Feishu:** application-registration QR or complete TOML app credentials. It needs bot capability, platform permissions, long-connection events, app publication, a bridge-side user allowlist, and FFmpeg for native voice transcription and outbound video covers.
 - **QQ:** official bot credential-bind QR or complete TOML AppID/AppSecret. It is C2C private chat, forces `auto`, and has no approvals, questions, or separate thinking stream.
 - **WeChat:** supported iLink bot QR authorization. It handles private chats, forces `auto`, and has no approvals, questions, separate thinking stream, groups, or proactive delivery. It accepts inbound image/voice/file/video and sends outbound image/video/file.
 - **Telegram:** experimental private-chat adapter with its own bot-token flow; startup takes over long polling and discards pending updates.
@@ -337,7 +337,7 @@ Resolve every `ERROR` and investigate every `WARN`. Common branches:
 - incomplete Feishu/QQ TOML pair: provide both values or use the matching QR login;
 - malformed existing managed file: repair it or run `login --replace`; do not expect TOML fallback;
 - missing/empty allowlist: if the QR login returned no identity, obtain the real platform identity and add it manually;
-- missing Feishu FFmpeg: install it and confirm it is on PATH;
+- missing Feishu FFmpeg: install it, confirm it is on PATH, and rerun `doctor`;
 - missing WeChat authorization or media dependency: return to the WeChat QR branch or repair the installation;
 - legacy or missing `kimi`: return to Kimi Code preflight;
 - Kimi configuration failure: run `kimi doctor config` directly and prove the real prompt again.

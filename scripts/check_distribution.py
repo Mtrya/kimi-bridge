@@ -17,7 +17,6 @@ from pathlib import Path
 
 
 REQUIRED_PACKAGE_FILES = {
-    "kimi_bridge/assets/video-cover.png",
     "kimi_bridge/compatibility-map.json",
 }
 REQUIRED_SOURCE_FILES = {

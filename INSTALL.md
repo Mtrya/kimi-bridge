@@ -49,7 +49,7 @@ kimi-bridge feishu login
 
 在浏览器中打开命令输出的 URL。页面可以创建新应用或选择已有应用，并预填 bridge 所需的 tenant 权限、`im.message.receive_v1` 事件和 `card.action.trigger` 回调，按页面提示确认即可。这是应用注册，不是用户 OAuth；得到的应用凭据保存到 `~/.kimi-bridge/feishu/credentials.json`，注册人的 `open_id` 自动加入白名单。
 
-授权后还需在飞书开放平台确认机器人能力和其余控制台设置，发布应用版本并确认目标用户可用。接收语音消息需要 `ffmpeg` 在 PATH 中。
+授权后还需在飞书开放平台确认机器人能力和其余控制台设置，发布应用版本并确认目标用户可用。使用飞书适配器时，`ffmpeg` 必须在 PATH 中，用于接收语音消息时的飞书原生转写，以及为发送的视频生成封面。
 
 ### QQ
 
