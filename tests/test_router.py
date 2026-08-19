@@ -1557,7 +1557,7 @@ async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(
         state_store=store,
         default_workspace=tmp_path,
         model="kimi-code/k3",
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
     )
     try:
         await router.handle_inbound(adapter, _message("/skills"))
@@ -2319,7 +2319,7 @@ async def test_goal_resume_uses_ready_stream_without_second_submit(
         state_store=store,
         default_workspace=tmp_path,
         model="kimi-code/k3",
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
     )
     try:
         await router.handle_inbound(adapter, _message("/goal resume"))
@@ -3818,7 +3818,7 @@ async def test_delta_throttle_final_edit_and_router_chunking(
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
         edit_throttle_seconds=1.5,
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
         sleep=controlled_sleep,
         clock=lambda: now[0],
     )
@@ -3871,14 +3871,59 @@ async def test_delta_throttle_final_edit_and_router_chunking(
     )
 
 
-async def test_first_answer_flush_waits_for_the_configured_delay(
+async def test_first_answer_flush_waits_for_min_chars(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    delays: list[float] = []
+    now = [100.0]
+
+    async def controlled_sleep(delay: float) -> None:
+        delays.append(delay)
+        await asyncio.Event().wait()
+
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        first_flush_min_chars=6,
+        sleep=controlled_sleep,
+        clock=lambda: now[0],
+    )
+    conversation = _message("").conversation
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        client.emit("session-1", _event("turn.started"))
+        # A long thinking phase before the first answer delta must not
+        # expire the opening-chunk hold: the backstop deadline is armed
+        # lazily by the first sub-threshold delta, not at turn.started.
+        now[0] += 60.0
+        client.emit("session-1", _event("assistant.delta", delta="abc", offset=0))
+        await _wait_for(lambda: bool(delays))
+        assert adapter.sent == []
+
+        # Crossing the character threshold flushes the merged opening chunk
+        # immediately and cancels the backstop.
+        client.emit("session-1", _event("assistant.delta", delta="def", offset=3))
+        await _wait_for(lambda: len(adapter.sent) == 1)
+    finally:
+        await router.close()
+
+    assert delays == [15.0]
+    assert adapter.sent == [
+        (MessageRef(conversation, "message-1"), conversation, "abcdef")
+    ]
+
+
+async def test_first_answer_flush_backstop_releases_short_opening_chunk(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
     adapter = FakeAdapter()
     release_flush = asyncio.Event()
     delays: list[float] = []
-    now = [100.0]
 
     async def controlled_sleep(delay: float) -> None:
         delays.append(delay)
@@ -3889,8 +3934,8 @@ async def test_first_answer_flush_waits_for_the_configured_delay(
         state_store=StateStore(tmp_path / "state.json"),
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
+        first_flush_max_delay_seconds=5.0,
         sleep=controlled_sleep,
-        clock=lambda: now[0],
     )
     conversation = _message("").conversation
     try:
@@ -3900,31 +3945,36 @@ async def test_first_answer_flush_waits_for_the_configured_delay(
         await _wait_for(lambda: bool(delays))
         assert adapter.sent == []
 
-        # Deltas arriving inside the delay window join the opening chunk
-        # instead of rescheduling it.
-        client.emit("session-1", _event("assistant.delta", delta="def", offset=3))
-        await asyncio.sleep(0)
-        assert adapter.sent == []
-
         release_flush.set()
         await _wait_for(lambda: len(adapter.sent) == 1)
     finally:
         await router.close()
 
-    assert delays == [8.0]
+    assert delays == [5.0]
     assert adapter.sent == [
-        (MessageRef(conversation, "message-1"), conversation, "abcdef")
+        (MessageRef(conversation, "message-1"), conversation, "abc")
     ]
 
 
-async def test_first_flush_delay_must_be_non_negative(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="first_flush_delay_seconds"):
+async def test_first_flush_min_chars_must_be_non_negative(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="first_flush_min_chars"):
         ChatRouter(
             FakeKimiClient(),  # type: ignore[arg-type]
             state_store=StateStore(tmp_path / "state.json"),
             default_workspace=tmp_path / "workspace",
             model="kimi-code/k3",
-            first_flush_delay_seconds=-1,
+            first_flush_min_chars=-1,
+        )
+
+
+async def test_first_flush_max_delay_must_be_non_negative(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="first_flush_max_delay_seconds"):
+        ChatRouter(
+            FakeKimiClient(),  # type: ignore[arg-type]
+            state_store=StateStore(tmp_path / "state.json"),
+            default_workspace=tmp_path / "workspace",
+            model="kimi-code/k3",
+            first_flush_max_delay_seconds=-1,
         )
 
 
@@ -3947,7 +3997,7 @@ async def test_feishu_edit_budget_uses_adaptive_intervals_and_stops_at_limit(
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
         edit_throttle_seconds=1.0,
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
         max_output_seconds=77.0,
         sleep=advancing_sleep,
         clock=lambda: now[0],
@@ -4014,7 +4064,7 @@ async def test_platform_edit_failure_does_not_stop_event_stream(
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
         edit_throttle_seconds=1.0,
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
         clock=lambda: now[0],
     )
     try:
@@ -4055,7 +4105,7 @@ async def test_turn_end_keeps_longer_stream_until_prompt_completion(
         state_store=StateStore(tmp_path / "state.json"),
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
     )
     conversation_key = "feishu:cli_bot:ou_user"
     try:
@@ -4239,7 +4289,7 @@ async def test_late_prompt_completion_does_not_edit_a_new_turn(
         state_store=StateStore(tmp_path / "state.json"),
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
     )
     conversation_key = "feishu:cli_bot:ou_user"
     try:
@@ -4486,7 +4536,7 @@ async def test_thinking_backfill_has_independent_throttle_and_disable_freezes(
         default_workspace=tmp_path / "workspace",
         model="kimi-code/k3",
         edit_throttle_seconds=1.5,
-        first_flush_delay_seconds=0,
+        first_flush_min_chars=0,
         sleep=controlled_sleep,
         clock=lambda: now[0],
     )
@@ -4580,6 +4630,7 @@ async def test_thinking_retry_resync_final_flush_chunk_growth_and_turn_reset(
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
+        first_flush_min_chars=0,
     )
     try:
         await router.handle_inbound(adapter, _message("continue"))
