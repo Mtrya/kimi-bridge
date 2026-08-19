@@ -574,6 +574,33 @@ async def test_bot_api_raises_transport_error_after_server_retries_exhausted(
     )
 
 
+async def test_bot_api_redacts_openid_in_retry_exhaustion_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"unavailable")
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    api, manager, http = _api_pair(handler, sleep=no_sleep, max_retries=1)
+    caplog.set_level(logging.WARNING, logger="kimi_bridge.platforms.qq")
+    try:
+        with pytest.raises(QQTransportError) as caught:
+            await api.send_c2c_message("OPENID-SECRET", msg_type=0, content="hi")
+    finally:
+        await api.close()
+        await manager.close()
+        await http.aclose()
+
+    assert "OPENID-SECRET" not in str(caught.value)
+    assert "/v2/users/<redacted>/messages" in str(caught.value)
+    assert caplog.records
+    assert all(
+        "OPENID-SECRET" not in record.getMessage() for record in caplog.records
+    )
+
+
 async def test_bot_api_fetches_gateway_url() -> None:
     requests: list[httpx.Request] = []
 

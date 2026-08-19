@@ -101,7 +101,7 @@ Feishu renders approvals and questions as interactive cards. Telegram renders ap
 
 Answers stream through editable messages where the platform supports edits and are split at the platform text limit. Bridge-generated command, status, validation, and error replies are final messages.
 
-`/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
+`/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary, and replaces the stream with a regular message when the stream endpoint keeps failing. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
 
 ## Inbound and outbound media
 

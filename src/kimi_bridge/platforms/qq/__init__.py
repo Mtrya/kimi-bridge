@@ -232,6 +232,15 @@ def _response_json(response: httpx.Response) -> object:
         return None
 
 
+_USER_PATH_SEGMENT_RE = re.compile(r"(/v2/users/)[^/]+")
+
+
+def _redact_user_path(path: str) -> str:
+    """Keep C2C user identifiers out of logs and error messages."""
+
+    return _USER_PATH_SEGMENT_RE.sub(r"\1<redacted>", path)
+
+
 def _error_from_envelope(context: str, envelope: object) -> QQAPIError | None:
     if not isinstance(envelope, dict):
         return None
@@ -562,7 +571,7 @@ class QQBotAPI:
     ) -> Any:
         if self._closed:
             raise RuntimeError("QQ Bot API client is closed")
-        context = f"{method} {path}"
+        context = f"{method} {_redact_user_path(path)}"
 
         async def send() -> httpx.Response:
             headers = {
