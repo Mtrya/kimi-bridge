@@ -98,7 +98,7 @@ kimi-bridge
 
 前台验证通过后，再决定是否常驻：
 
-- **Linux**：从 [systemd 用户单元模板](docs/kimi-bridge.service) 开始，用 `command -v kimi-bridge` 和 `command -v kimi` 取得的绝对路径填写；
+- **Linux**：从 [systemd 用户单元模板](docs/kimi-bridge.service) 开始，用 `command -v kimi-bridge` 和 `command -v kimi` 取得的绝对路径填写；模板内置内存上限，并发会话很多时调高；
 - **macOS**：配置用户级 `launchd` LaunchAgent，使用实际的 `kimi-bridge`、`kimi` 和配置绝对路径；
 - **Windows**：创建当前用户的 Task Scheduler 任务，使用与凭据文件相同的用户账户。
 
