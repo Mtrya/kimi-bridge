@@ -117,7 +117,6 @@ def _session_status_from_wire(value: dict[str, Any]) -> SessionStatus:
         swarm_mode=bool(value["swarm_mode"]),
         context_tokens=int(value["context_tokens"]),
         context_limit=_optional_int(value.get("max_context_tokens")),
-        context_usage=float(value["context_usage"]),
     )
 
 

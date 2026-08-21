@@ -164,7 +164,6 @@ _STATUS_FIELDS = (
     _field("swarm_mode", "boolean"),
     _field("context_tokens", "integer"),
     _field("max_context_tokens", "integer", required=False),
-    _field("context_usage", "number", "integer"),
 )
 _TASK_FIELDS = (
     _field("id", "string"),

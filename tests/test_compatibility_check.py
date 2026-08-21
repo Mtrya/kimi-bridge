@@ -193,7 +193,6 @@ async def test_live_probe_monitors_create_time_model_persistence(
                 swarm_mode=False,
                 context_tokens=0,
                 context_limit=262_144,
-                context_usage=0,
             )
 
         async def probe_subscription(self, _session_id: str) -> None:
