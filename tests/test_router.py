@@ -243,7 +243,6 @@ class FakeKimiClient:
             swarm_mode=False,
             context_tokens=context_tokens,
             context_limit=context_limit,
-            context_usage=(context_tokens / context_limit if context_limit else 0),
         )
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:

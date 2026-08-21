@@ -559,7 +559,7 @@ async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> N
     assert resolved.capabilities == ("image_in", "video_in")
 
 
-async def test_session_status_accepts_an_unknown_context_limit() -> None:
+async def test_session_status_accepts_unknown_context_metrics() -> None:
     status = {
         "busy": False,
         "model": "removed-model",
@@ -568,7 +568,6 @@ async def test_session_status_accepts_an_unknown_context_limit() -> None:
         "plan_mode": False,
         "swarm_mode": False,
         "context_tokens": 0,
-        "context_usage": 0,
     }
     http = FakeHttpClient([_envelope(status), _envelope(status)])
     client = KimiServerClient(
@@ -586,7 +585,6 @@ async def test_session_status_accepts_an_unknown_context_limit() -> None:
         swarm_mode=False,
         context_tokens=0,
         context_limit=None,
-        context_usage=0,
     )
     assert await client.get_session_usage("session-1") == SessionUsage(
         None, None, None, None, 0, None
@@ -796,7 +794,6 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
         swarm_mode=False,
         context_tokens=30,
         context_limit=100,
-        context_usage=0.3,
     )
     assert await client.get_session_usage("session-1") == SessionUsage(
         None, None, None, None, 30, 100

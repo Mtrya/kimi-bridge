@@ -148,7 +148,6 @@ class SessionStatus:
     swarm_mode: bool
     context_tokens: int
     context_limit: int | None
-    context_usage: float
 
 
 @dataclass(frozen=True, slots=True)
