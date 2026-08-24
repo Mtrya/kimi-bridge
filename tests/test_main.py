@@ -147,11 +147,13 @@ async def test_runtime_threads_server_http_timeout_to_client(
             pass
 
     config_path = tmp_path / "config.toml"
+    workspace = (tmp_path / "workspace").as_posix()
+    state_path = (tmp_path / "state.json").as_posix()
     config_path.write_text(
         "\n".join(
             [
-                f'default_workspace = "{tmp_path / "workspace"}"',
-                f'state_path = "{tmp_path / "state.json"}"',
+                f'default_workspace = "{workspace}"',
+                f'state_path = "{state_path}"',
                 "[kimi_server]",
                 "port = 43123",
                 "http_timeout_seconds = 75",
