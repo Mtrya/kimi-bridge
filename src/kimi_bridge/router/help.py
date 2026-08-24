@@ -142,15 +142,16 @@ Example:
 - `/compact`""",
     ),
     "/history": CommandHelp(
-        syntax="/history [count]",
+        syntax="/history [count] [--full]",
         summary="show the newest session messages",
         section="Sessions",
-        details="""**/history [count]**
+        details="""**/history [count] [--full]**
 
-Show the newest messages in the bound session's authoritative history — the post-undo, post-compaction view the agent currently sees. Every role is kept in order; thinking is skipped; non-text content becomes `[attachment: <name>]` placeholders.
+Show the newest visible messages in the bound session's authoritative history — the post-undo, post-compaction view the agent currently sees. Thinking, tool calls, and tool results are omitted; other non-text content becomes `[attachment: <name>]` placeholders.
 
 Arguments:
 - `count` — messages to show, 1-50.
+- `--full` — show complete message bodies instead of truncating each one to 500 characters.
 
 Defaults: `10` when omitted.
 
@@ -158,7 +159,8 @@ Side effects: none. `/undo` and `/switch` confirmations automatically include th
 
 Example:
 - `/history`
-- `/history 20`""",
+- `/history 20`
+- `/history 20 --full`""",
     ),
     "/undo": CommandHelp(
         syntax="/undo [count]",

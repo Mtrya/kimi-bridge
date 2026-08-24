@@ -505,31 +505,43 @@ def _persisted_assistant_message(
     return None
 
 
-def _format_history(snapshot: dict[str, Any], count: int) -> str | None:
+def _format_history(
+    snapshot: dict[str, Any],
+    count: int,
+    *,
+    max_message_chars: int | None = HISTORY_MESSAGE_LIMIT,
+) -> str | None:
     """Format the newest ``count`` snapshot messages for chat display.
 
     The snapshot is the server's authoritative post-undo/post-compaction
-    view, so this reflects what the agent currently sees. Every role is
-    kept in order; thinking parts are skipped; non-text content parts
-    become ``[attachment: <name>]`` placeholders.
+    view, so this reflects what the agent currently sees. Internal thinking
+    and tool parts are skipped; non-text content parts become
+    ``[attachment: <name>]`` placeholders.
     """
 
     messages = snapshot.get("messages")
     items = messages.get("items", []) if isinstance(messages, dict) else []
     entries = [item for item in items if isinstance(item, dict)]
-    if not entries:
-        return None
-    recent = entries[-count:]
-    header = f"Last {len(recent)} {'message' if len(recent) == 1 else 'messages'}:"
-    blocks = [header]
-    for item in recent:
+    recent: list[str] = []
+    for item in reversed(entries):
+        body = _history_item_text(item, max_message_chars=max_message_chars)
+        if body is None:
+            continue
         role = item.get("role")
         label = role if isinstance(role, str) and role else "unknown"
-        blocks.append(f"[{label}]\n{_history_item_text(item)}")
-    return "\n\n".join(blocks)
+        recent.append(f"[{label}]\n{body}")
+        if len(recent) == count:
+            break
+    if not recent:
+        return None
+    recent.reverse()
+    noun = "message" if len(recent) == 1 else "messages"
+    return "\n\n".join([f"**Last {len(recent)} {noun}:**", *recent])
 
 
-def _history_item_text(item: dict[str, Any]) -> str:
+def _history_item_text(
+    item: dict[str, Any], *, max_message_chars: int | None
+) -> str | None:
     content = item.get("content")
     parts = content if isinstance(content, list) else []
     texts: list[str] = []
@@ -542,7 +554,7 @@ def _history_item_text(item: dict[str, Any]) -> str:
             text = part.get("text")
             if isinstance(text, str) and text:
                 texts.append(text)
-        elif part_type == "thinking":
+        elif part_type in {"thinking", "tool_use", "tool_result"}:
             continue
         else:
             name = (
@@ -556,7 +568,7 @@ def _history_item_text(item: dict[str, Any]) -> str:
             attachments.append(f"[attachment: {label}]")
     body = "\n".join([*texts, *attachments]).strip()
     if not body:
-        body = "(no text content)"
-    if len(body) > HISTORY_MESSAGE_LIMIT:
-        body = body[:HISTORY_MESSAGE_LIMIT] + "…"
+        return None
+    if max_message_chars is not None and len(body) > max_message_chars:
+        body = body[:max_message_chars] + "…"
     return body

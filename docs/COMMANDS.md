@@ -17,7 +17,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/title [text]` | Show the current title or rename the session. |
 | `/usage` | Show live token and context-window values when exposed by Kimi. |
 | `/compact` | Start context compaction. |
-| `/history [count]` | Show the newest session messages (default `10`, max `50`); thinking is skipped and attachments become placeholders. |
+| `/history [count] [--full]` | Show the newest visible session messages (default `10`, max `50`); thinking and tool traffic are omitted, attachments become placeholders, and `--full` removes the default 500-character per-message limit. |
 | `/undo [count]` | Undo a positive number of history steps; default `1`; the confirmation recaps the newest 2 messages. |
 | `/mode <manual\|auto\|yolo>` | Set the session permission mode where the adapter supports it. |
 | `/model [alias]` | Show the current model and catalog aliases, or select an alias. |
