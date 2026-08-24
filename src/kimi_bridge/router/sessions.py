@@ -341,6 +341,10 @@ class _SessionMixin:
             active.interaction_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await active.interaction_task
+        if active.failure_notice_task is not None:
+            active.failure_notice_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active.failure_notice_task
         if active.task is not None:
             stream_task = active.task
             active.task = None
@@ -433,9 +437,38 @@ class _SessionMixin:
         active = self._active
         if active is not None and active.task is task:
             active.task = None
+        else:
+            active = None
         if task.cancelled():
             return
         try:
             task.result()
         except Exception:
             LOGGER.exception("kimi event stream stopped unexpectedly")
+            if active is not None:
+                active.failure_notice_task = asyncio.create_task(
+                    self._report_stream_failure(active),
+                    name=f"kimi-stream-failure-notice-{active.session_id}",
+                )
+                active.failure_notice_task.add_done_callback(
+                    self._stream_failure_notice_done
+                )
+
+    async def _report_stream_failure(self, active: _ActiveStream) -> None:
+        await self._send_chunked(
+            active.adapter,
+            active.conversation,
+            "Kimi event delivery stopped unexpectedly. Check the bridge logs and "
+            "send a regular message to retry.",
+        )
+
+    def _stream_failure_notice_done(self, task: asyncio.Task[None]) -> None:
+        active = self._active
+        if active is not None and active.failure_notice_task is task:
+            active.failure_notice_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            LOGGER.exception("failed to report stopped kimi event stream")

@@ -1021,6 +1021,32 @@ async def test_close_after_runtime_stream_failure_is_clean(tmp_path: Path) -> No
     await router.close()
 
 
+async def test_runtime_stream_failure_is_reported_to_chat(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("start the stream"))
+        client.fail_stream(
+            "session-1",
+            KimiServerProtocolError("persistent WebSocket contract failure"),
+        )
+
+        await _wait_for(lambda: len(adapter.final_texts) == 1)
+
+        assert "event delivery stopped" in adapter.final_texts[0][2]
+        assert "retry" in adapter.final_texts[0][2]
+        assert router._active is not None
+        assert router._active.task is None
+    finally:
+        await router.close()
+
+
 async def test_bridge_commands_switch_stop_and_mode(
     tmp_path: Path,
 ) -> None:
@@ -1830,15 +1856,23 @@ async def test_compact_edits_progress_for_api_and_stream_failures(
         await _wait_for(lambda: len(client.compact_calls) == 2)
         client.fail_stream("session-control", RuntimeError("socket lost"))
         await command
+        await _wait_for(
+            lambda: any(
+                "event delivery stopped" in text
+                for _ref, _conversation, text in adapter.final_texts
+            )
+        )
     finally:
         await router.close()
 
-    assert len(adapter.sent) == 2
+    assert len(adapter.sent) == 3
     assert len(adapter.edits) == 2
     assert adapter.edits[0][0] == adapter.sent[0][0]
     assert "No messages to compact" in adapter.edits[0][1]
     assert adapter.edits[1][0] == adapter.sent[1][0]
     assert "event stream failed" in adapter.edits[1][1]
+    assert "event delivery stopped" in adapter.final_texts[0][2]
+    assert "retry" in adapter.final_texts[0][2]
 
 
 @pytest.mark.parametrize(
@@ -1922,14 +1956,23 @@ async def test_compact_non_editable_renders_api_and_stream_failures(
         await _wait_for(lambda: len(client.compact_calls) == 2)
         client.fail_stream("session-control", RuntimeError("socket lost"))
         await command
+        await _wait_for(
+            lambda: any(
+                "event delivery stopped" in text
+                for _ref, _conversation, text in adapter.final_texts
+            )
+        )
     finally:
         await router.close()
 
     assert adapter.edits == []
-    assert [text for _ref, _conversation, text in adapter.final_texts] == [
+    replies = [text for _ref, _conversation, text in adapter.final_texts]
+    assert replies[:2] == [
         "Compaction failed: kimi server API error 40910: No messages to compact",
         "Compaction failed: kimi event stream failed: socket lost",
     ]
+    assert "event delivery stopped" in replies[2]
+    assert "retry" in replies[2]
 
 
 async def test_compact_and_undo_validate_arguments_and_busy_state(

@@ -144,11 +144,13 @@ class FakeWebSocket:
         events: Iterable[dict[str, Any]] = (),
         events_before_ack: bool = False,
         disconnect_after_events: bool = False,
+        mismatched_subscribe_ack: bool = False,
     ) -> None:
         self._subscribe_payload = subscribe_payload
         self._events = list(events)
         self._events_before_ack = events_before_ack
         self._disconnect_after_events = disconnect_after_events
+        self._mismatched_subscribe_ack = mismatched_subscribe_ack
         self._incoming: asyncio.Queue[str | BaseException] = asyncio.Queue()
         self._incoming.put_nowait(
             json.dumps(
@@ -203,7 +205,11 @@ class FakeWebSocket:
                 json.dumps(
                     {
                         "type": "ack",
-                        "id": frame["id"],
+                        "id": (
+                            "mismatched-request"
+                            if self._mismatched_subscribe_ack
+                            else frame["id"]
+                        ),
                         "code": 0,
                         "msg": "success",
                         "payload": self._subscribe_payload,
@@ -1381,6 +1387,126 @@ async def test_replayed_sequenced_notice_is_not_yielded_twice() -> None:
     assert subscribe["payload"]["cursors"] == {
         "session-1": {"seq": 1, "epoch": "epoch-1"}
     }
+
+
+async def test_reconnect_recovers_from_one_mismatched_ack_with_cursor() -> None:
+    accepted = {
+        "accepted": ["session-1"],
+        "not_found": [],
+        "resync_required": [],
+        "cursors": {},
+    }
+    first_event = _session_event(1, "epoch-1", "turn.started")
+    second_event = _session_event(2, "epoch-1", "turn.ended")
+    first = FakeWebSocket(
+        subscribe_payload=accepted,
+        events=[first_event],
+        disconnect_after_events=True,
+    )
+    mismatched = FakeWebSocket(
+        subscribe_payload=accepted,
+        mismatched_subscribe_ack=True,
+    )
+    recovered = FakeWebSocket(
+        subscribe_payload=accepted,
+        events=[first_event, second_event],
+    )
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient(
+            [
+                _envelope({"busy": False}),
+                _envelope({"busy": False}),
+                _envelope({"busy": False}),
+            ]
+        ),
+        ws_connect=FakeWebSocketConnect([first, mismatched, recovered]),
+        sleep=record_sleep,
+    )
+    events = client.subscribe_events("session-1")
+
+    assert await asyncio.wait_for(anext(events), 1) == first_event
+    assert await asyncio.wait_for(anext(events), 1) == second_event
+    await events.aclose()
+
+    for socket in (mismatched, recovered):
+        subscribe = next(
+            frame for frame in socket.sent if frame["type"] == "subscribe"
+        )
+        assert subscribe["payload"]["cursors"] == {
+            "session-1": {"seq": 1, "epoch": "epoch-1"}
+        }
+    assert sleeps == [0.25, 0.5]
+
+
+async def test_initial_mismatched_ack_remains_fatal() -> None:
+    socket = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "not_found": [],
+            "resync_required": [],
+            "cursors": {},
+        },
+        mismatched_subscribe_ack=True,
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    events = client.subscribe_events("session-1")
+
+    with pytest.raises(KimiServerProtocolError, match="expected ack for request"):
+        await asyncio.wait_for(anext(events), 1)
+    await events.aclose()
+
+
+async def test_persistent_reconnect_ack_mismatches_remain_fatal() -> None:
+    accepted = {
+        "accepted": ["session-1"],
+        "not_found": [],
+        "resync_required": [],
+        "cursors": {},
+    }
+    first_event = _session_event(1, "epoch-1", "turn.started")
+    first = FakeWebSocket(
+        subscribe_payload=accepted,
+        events=[first_event],
+        disconnect_after_events=True,
+    )
+    mismatched = [
+        FakeWebSocket(
+            subscribe_payload=accepted,
+            mismatched_subscribe_ack=True,
+        )
+        for _index in range(3)
+    ]
+
+    async def no_sleep(_delay: float) -> None:
+        pass
+
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False}) for _index in range(4)]
+        ),
+        ws_connect=FakeWebSocketConnect([first, *mismatched]),
+        sleep=no_sleep,
+    )
+    events = client.subscribe_events("session-1")
+
+    assert await asyncio.wait_for(anext(events), 1) == first_event
+    with pytest.raises(KimiServerProtocolError, match="repeatedly sent mismatched"):
+        await asyncio.wait_for(anext(events), 1)
+    await events.aclose()
 
 
 @pytest.mark.parametrize(

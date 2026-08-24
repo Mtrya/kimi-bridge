@@ -78,7 +78,7 @@ This section records the authoritative credential flows behind the QR controls. 
 
 ## Runtime lifecycle
 
-The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, and then starts that adapter. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path`; Kimi owns its own sessions and model/profile state.
+The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, and then starts that adapter. The Kimi client reconnects transient WebSocket failures with the last accepted event cursor; persistent protocol failures remain terminal. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path`; Kimi owns its own sessions and model/profile state.
 
 Always complete an allowlisted `/status` and normal-prompt message round trip in the foreground before creating a persistent service. Linux may use a systemd user unit; macOS may use a user `launchd` agent; Windows may use a current-user Task Scheduler task. Any service definition must reference local paths without embedding secrets.
 
