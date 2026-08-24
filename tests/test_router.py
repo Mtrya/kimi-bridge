@@ -1856,6 +1856,12 @@ async def test_compact_edits_progress_for_api_and_stream_failures(
         await _wait_for(lambda: len(client.compact_calls) == 2)
         client.fail_stream("session-control", RuntimeError("socket lost"))
         await command
+        await _wait_for(
+            lambda: any(
+                "event delivery stopped" in text
+                for _ref, _conversation, text in adapter.final_texts
+            )
+        )
     finally:
         await router.close()
 
@@ -1950,6 +1956,12 @@ async def test_compact_non_editable_renders_api_and_stream_failures(
         await _wait_for(lambda: len(client.compact_calls) == 2)
         client.fail_stream("session-control", RuntimeError("socket lost"))
         await command
+        await _wait_for(
+            lambda: any(
+                "event delivery stopped" in text
+                for _ref, _conversation, text in adapter.final_texts
+            )
+        )
     finally:
         await router.close()
 
