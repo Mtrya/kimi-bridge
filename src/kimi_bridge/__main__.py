@@ -75,7 +75,10 @@ async def run(config_path: str | Path) -> None:
     _install_shutdown_signal_handlers(asyncio.get_running_loop(), stop_requested)
 
     async with supervisor:
-        async with KimiServerClient(supervisor=supervisor) as client:
+        async with KimiServerClient(
+            supervisor=supervisor,
+            timeout=config.kimi_server.http_timeout_seconds,
+        ) as client:
             await client.check_server_version()
             model = await client.get_default_model()
             transcriber = None

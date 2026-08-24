@@ -69,6 +69,7 @@ class _ActiveStream:
     )
     task: asyncio.Task[None] | None = None
     interaction_task: asyncio.Task[None] | None = None
+    failure_notice_task: asyncio.Task[None] | None = None
 
 
 @dataclass(slots=True)

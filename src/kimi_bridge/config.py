@@ -26,7 +26,7 @@ _LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 PlatformName: TypeAlias = Literal["feishu", "telegram", "qq", "wechat"]
 _PLATFORMS = {"feishu", "telegram", "qq", "wechat"}
 _KNOWN_SUB_KEYS = {
-    "kimi_server": frozenset({"port"}),
+    "kimi_server": frozenset({"port", "http_timeout_seconds"}),
     "feishu": frozenset(
         {"app_id", "app_secret", "allowed_users", "storage_path"}
     ),
@@ -102,6 +102,7 @@ class KimiServerConfig:
     """Configuration that affects the bridge-managed kimi server."""
 
     port: int | None = None
+    http_timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +209,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
 
         [kimi_server]
         port = 58628
+        http_timeout_seconds = 30
 
         [feishu]
         app_id = "cli_..."  # optional complete TOML fallback
@@ -327,6 +329,14 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
             raise TypeError("kimi_server.port must be an integer")
         if not 1 <= port <= 65535:
             raise ValueError("kimi_server.port must be between 1 and 65535")
+    http_timeout = server_raw.get("http_timeout_seconds", 30.0)
+    if isinstance(http_timeout, bool) or not isinstance(http_timeout, (int, float)):
+        raise TypeError("kimi_server.http_timeout_seconds must be a number")
+    http_timeout_seconds = float(http_timeout)
+    if not math.isfinite(http_timeout_seconds) or http_timeout_seconds <= 0:
+        raise ValueError(
+            "kimi_server.http_timeout_seconds must be positive and finite"
+        )
 
     feishu_raw = raw.get("feishu", {})
     if not isinstance(feishu_raw, dict):
@@ -478,7 +488,10 @@ def _load_config_from_raw(raw: Mapping[str, object]) -> Config:
         interaction_timeout_seconds=interaction_timeout_seconds,
         inbox_subdir=inbox_subdir,
         session_list_limit=session_list_limit,
-        kimi_server=KimiServerConfig(port=port),
+        kimi_server=KimiServerConfig(
+            port=port,
+            http_timeout_seconds=http_timeout_seconds,
+        ),
         feishu=FeishuConfig(
             app_id=app_id,
             app_secret=app_secret,

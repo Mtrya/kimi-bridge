@@ -72,6 +72,11 @@ from .wire import (
 
 LOGGER = logging.getLogger(__name__)
 _MAIN_AGENT_ID = "main"
+_MAX_CONSECUTIVE_ACK_MISMATCHES = 3
+
+
+class _WebSocketAckMismatch(KimiServerProtocolError):
+    """A reconnect handshake received a frame for a different request."""
 
 
 class KimiServerClient:
@@ -731,6 +736,8 @@ class KimiServerClient:
         ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
         cursor: _EventCursor | None = None
         reconnect_delay = self._reconnect_initial_backoff
+        subscribed_once = False
+        consecutive_ack_mismatches = 0
 
         async with self._subscription_lock:
             while not self._closed:
@@ -789,6 +796,8 @@ class KimiServerClient:
                                 cursor = _cursor_from_mapping(acknowledged)
 
                         ready.set()
+                        subscribed_once = True
+                        consecutive_ack_mismatches = 0
                         reconnect_delay = self._reconnect_initial_backoff
                         must_reconnect = False
                         while not self._closed:
@@ -885,9 +894,26 @@ class KimiServerClient:
                         "kimi server rejected the WebSocket upgrade; check the "
                         "bearer token"
                     ) from exc
-                except (ConnectionClosed, OSError, TimeoutError) as exc:
+                except (
+                    _WebSocketAckMismatch,
+                    ConnectionClosed,
+                    OSError,
+                    TimeoutError,
+                ) as exc:
                     if self._closed:
                         break
+                    if isinstance(exc, _WebSocketAckMismatch):
+                        if not subscribed_once:
+                            raise
+                        consecutive_ack_mismatches += 1
+                        if (
+                            consecutive_ack_mismatches
+                            >= _MAX_CONSECUTIVE_ACK_MISMATCHES
+                        ):
+                            raise KimiServerProtocolError(
+                                "kimi server repeatedly sent mismatched WebSocket "
+                                "acknowledgements while reconnecting"
+                            ) from exc
                     LOGGER.warning(
                         "kimi server WebSocket disconnected (%s); reconnecting "
                         "in %.2fs",
@@ -1097,8 +1123,9 @@ class KimiServerClient:
             if frame.get("type") == "error":
                 self._raise_ws_error(frame)
             if frame.get("type") != "ack" or frame.get("id") != request_id:
-                raise KimiServerProtocolError(
-                    f"expected ack for request {request_id!r}"
+                raise _WebSocketAckMismatch(
+                    f"expected ack for request {request_id!r}, got "
+                    f"type={frame.get('type')!r} id={frame.get('id')!r}"
                 )
             if frame.get("code") != 0:
                 raise KimiServerProtocolError(

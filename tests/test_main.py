@@ -101,6 +101,77 @@ async def test_signal_handlers_fall_back_when_loop_registration_unsupported(
     await asyncio.wait_for(stop_requested.wait(), timeout=1)
 
 
+async def test_runtime_threads_server_http_timeout_to_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeSupervisor:
+        def __init__(self, *, preferred_port: int | None) -> None:
+            captured["preferred_port"] = preferred_port
+
+        async def __aenter__(self) -> FakeSupervisor:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            pass
+
+    class FakeClient:
+        def __init__(self, *, supervisor: Any, timeout: float) -> None:
+            captured["supervisor"] = supervisor
+            captured["timeout"] = timeout
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            pass
+
+        async def check_server_version(self) -> None:
+            pass
+
+        async def get_default_model(self) -> str:
+            return "kimi-code/k3"
+
+    class StoppingAdapter:
+        name = "fake"
+        message_limit = 1000
+
+        async def start(self, *_handlers: Any) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+        async def stop(self) -> None:
+            pass
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f'default_workspace = "{tmp_path / "workspace"}"',
+                f'state_path = "{tmp_path / "state.json"}"',
+                "[kimi_server]",
+                "port = 43123",
+                "http_timeout_seconds = 75",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(main_module, "KimiServerSupervisor", FakeSupervisor)
+    monkeypatch.setattr(main_module, "KimiServerClient", FakeClient)
+    monkeypatch.setattr(main_module, "_build_adapter", lambda _config: StoppingAdapter())
+    monkeypatch.setattr(main_module, "_install_shutdown_signal_handlers", lambda *_args: None)
+
+    with pytest.raises(RuntimeError, match="fake adapter stopped unexpectedly"):
+        await main_module.run(config_path)
+
+    assert captured["preferred_port"] == 43123
+    assert captured["timeout"] == 75.0
+    assert captured["supervisor"].__class__ is FakeSupervisor
+
+
 def test_builds_only_selected_telegram_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, tuple[Any, ...]]] = []
 

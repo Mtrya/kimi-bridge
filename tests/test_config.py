@@ -39,15 +39,19 @@ def test_missing_config_uses_defaults(tmp_path: Path) -> None:
     assert load_config(tmp_path / "missing.toml") == Config()
 
 
-def test_loads_log_level_and_server_port(tmp_path: Path) -> None:
+def test_loads_log_level_and_server_settings(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
-        'log_level = "debug"\n\n[kimi_server]\nport = 43123\n',
+        'log_level = "debug"\n\n[kimi_server]\nport = 43123\nhttp_timeout_seconds = 75\n',
         encoding="utf-8",
     )
 
     assert load_config(path) == Config(
-        log_level="DEBUG", kimi_server=KimiServerConfig(port=43123)
+        log_level="DEBUG",
+        kimi_server=KimiServerConfig(
+            port=43123,
+            http_timeout_seconds=75.0,
+        ),
     )
 
 
@@ -368,6 +372,30 @@ def test_rejects_out_of_range_server_port(tmp_path: Path, port: int) -> None:
     path.write_text(f"[kimi_server]\nport = {port}\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="between 1 and 65535"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        ("false", TypeError),
+        ('"30"', TypeError),
+        ("0", ValueError),
+        ("-1", ValueError),
+        ("nan", ValueError),
+        ("inf", ValueError),
+    ],
+)
+def test_rejects_invalid_server_http_timeout(
+    tmp_path: Path, value: str, error: type[Exception]
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        f"[kimi_server]\nhttp_timeout_seconds = {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(error, match="kimi_server.http_timeout_seconds"):
         load_config(path)
 
 
