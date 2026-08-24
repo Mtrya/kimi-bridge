@@ -2037,6 +2037,22 @@ async def test_history_formats_recent_messages(tmp_path: Path) -> None:
             "content": [
                 {"type": "thinking", "thinking": "secret reasoning"},
                 {"type": "text", "text": "first answer"},
+                {
+                    "type": "tool_use",
+                    "tool_call_id": "tool-1",
+                    "tool_name": "Bash",
+                    "input": {"command": "pwd"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_call_id": "tool-1",
+                    "output": "/tmp/workspace",
+                }
             ],
         },
         {
@@ -2044,6 +2060,17 @@ async def test_history_formats_recent_messages(tmp_path: Path) -> None:
             "content": [
                 {"type": "text", "text": "with file"},
                 {"type": "image", "name": "pic.png"},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "tool_call_id": "tool-2",
+                    "tool_name": "ReadFile",
+                    "input": {"path": "notes.txt"},
+                }
             ],
         },
         _history_item("system", "compaction summary"),
@@ -2062,14 +2089,18 @@ async def test_history_formats_recent_messages(tmp_path: Path) -> None:
         await router.close()
 
     full, pair = [text for _ref, _conversation, text in adapter.sent]
-    assert full.startswith("Last 4 messages:")
+    assert full.startswith("**Last 4 messages:**")
     assert "[user]\nfirst question" in full
     assert "[assistant]\nfirst answer" in full
     assert "secret reasoning" not in full
+    assert "tool_use" not in full
+    assert "tool_result" not in full
+    assert "/tmp/workspace" not in full
     assert "[attachment: pic.png]" in full
     assert "[system]\ncompaction summary" in full
-    assert pair.startswith("Last 2 messages:")
+    assert pair.startswith("**Last 2 messages:**")
     assert "first question" not in pair
+    assert "with file" in pair
     assert "compaction summary" in pair
 
 
@@ -2088,18 +2119,55 @@ async def test_history_validates_arguments_and_empty_snapshot(
         model="kimi-code/k3",
     )
     try:
-        for command in ("/history 0", "/history 51", "/history nope"):
+        invalid_commands = (
+            "/history 0",
+            "/history 51",
+            "/history nope",
+            "/history 1 2",
+            "/history --full --full",
+            "/history --unknown",
+            "/history ١",
+        )
+        for command in invalid_commands:
             await router.handle_inbound(adapter, _message(command))
         await router.handle_inbound(adapter, _message("/history"))
+        client.snapshots["session-control"] = _history_snapshot(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "tool_call_id": "tool-1",
+                        "tool_name": "Bash",
+                        "input": {"command": "pwd"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": "tool-1",
+                        "output": "/tmp/workspace",
+                    }
+                ],
+            },
+        )
+        await router.handle_inbound(adapter, _message("/history --full"))
     finally:
         await router.close()
 
     texts = [text for _ref, _conversation, text in adapter.sent]
-    assert texts[:3] == ["Usage: /history [1-50]"] * 3
-    assert texts[3] == "No history yet."
+    assert texts[: len(invalid_commands)] == [
+        "Usage: /history [1-50] [--full]"
+    ] * len(invalid_commands)
+    assert texts[len(invalid_commands) :] == ["No history yet."] * 2
 
 
-async def test_history_truncates_long_messages(tmp_path: Path) -> None:
+async def test_history_defaults_to_truncation_and_supports_full_messages(
+    tmp_path: Path,
+) -> None:
     client = FakeKimiClient()
     client.sessions = [_control_session()]
     store = StateStore(tmp_path / "state.json")
@@ -2116,13 +2184,19 @@ async def test_history_truncates_long_messages(tmp_path: Path) -> None:
     )
     try:
         await router.handle_inbound(adapter, _message("/history 1"))
+        await router.handle_inbound(adapter, _message("/history --full 1"))
+        await router.handle_inbound(adapter, _message("/history 1 --full"))
     finally:
         await router.close()
 
-    (reply,) = [text for _ref, _conversation, text in adapter.sent]
-    assert reply.startswith("Last 1 message:")
-    assert "y" * 500 + "…" in reply
-    assert "y" * 501 not in reply
+    truncated, full_first, full_last = [
+        text for _ref, _conversation, text in adapter.sent
+    ]
+    assert truncated.startswith("**Last 1 message:**")
+    assert "y" * 500 + "…" in truncated
+    assert "y" * 501 not in truncated
+    assert full_first == full_last
+    assert full_first.endswith("y" * 600)
 
 
 async def test_undo_confirmation_includes_history_recap(tmp_path: Path) -> None:
@@ -2130,9 +2204,10 @@ async def test_undo_confirmation_includes_history_recap(tmp_path: Path) -> None:
     client.sessions = [_control_session()]
     store = StateStore(tmp_path / "state.json")
     _bind_control_session(store)
+    long_answer = "latest answer " + "z" * 600
     client.snapshots["session-control"] = _history_snapshot(
         _history_item("user", "latest question"),
-        _history_item("assistant", "latest answer"),
+        _history_item("assistant", long_answer),
     )
     adapter = FakeAdapter()
     router = ChatRouter(
@@ -2148,9 +2223,11 @@ async def test_undo_confirmation_includes_history_recap(tmp_path: Path) -> None:
 
     (reply,) = [text for _ref, _conversation, text in adapter.sent]
     assert reply.startswith("Undid 1 history step.")
-    assert "Last 2 messages:" in reply
+    assert "**Last 2 messages:**" in reply
     assert "[user]\nlatest question" in reply
     assert "[assistant]\nlatest answer" in reply
+    assert long_answer not in reply
+    assert reply.endswith("…")
 
 
 async def test_switch_confirmation_includes_history_recap(tmp_path: Path) -> None:
@@ -2176,7 +2253,7 @@ async def test_switch_confirmation_includes_history_recap(tmp_path: Path) -> Non
 
     texts = [text for _ref, _conversation, text in adapter.sent]
     recap = next(text for text in texts if text.startswith("Switched to session-login"))
-    assert "Last 2 messages:" in recap
+    assert "**Last 2 messages:**" in recap
     assert "[assistant]\nlogin answer" in recap
 
 

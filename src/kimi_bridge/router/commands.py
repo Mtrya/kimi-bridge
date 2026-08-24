@@ -21,6 +21,7 @@ from .help import command_help_details, render_help_index
 from .formatting import (
     HISTORY_DEFAULT_COUNT,
     HISTORY_MAX_COUNT,
+    HISTORY_MESSAGE_LIMIT,
     HISTORY_RECAP_COUNT,
     _effective_model,
     _find_model,
@@ -809,26 +810,34 @@ class _CommandMixin:
         conversation: ConversationRef,
         argument: str,
     ) -> None:
-        if not argument:
+        arguments = argument.split()
+        full = arguments.count("--full") == 1
+        if full:
+            arguments.remove("--full")
+        if not arguments:
             count = HISTORY_DEFAULT_COUNT
-        elif (
-            argument.isascii()
-            and argument.isdecimal()
-            and 1 <= int(argument) <= HISTORY_MAX_COUNT
+        elif len(arguments) == 1 and (
+            arguments[0].isascii()
+            and arguments[0].isdecimal()
+            and 1 <= int(arguments[0]) <= HISTORY_MAX_COUNT
         ):
-            count = int(argument)
+            count = int(arguments[0])
         else:
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Usage: /history [1-{HISTORY_MAX_COUNT}]",
+                f"Usage: /history [1-{HISTORY_MAX_COUNT}] [--full]",
             )
             return
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
         snapshot = await self._client.get_snapshot(binding.session_id)
-        formatted = _format_history(snapshot, count)
+        formatted = _format_history(
+            snapshot,
+            count,
+            max_message_chars=None if full else HISTORY_MESSAGE_LIMIT,
+        )
         await self._send_chunked(
             adapter, conversation, formatted or "No history yet."
         )
