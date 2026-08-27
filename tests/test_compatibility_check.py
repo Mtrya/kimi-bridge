@@ -1349,7 +1349,7 @@ def test_batch_promotion_describes_only_versions_missing_from_base(
     assert f"<!-- versions:{existing}," not in fake.pulls[0]["body"]
 
 
-def test_recovered_unknown_version_does_not_prepare_automatic_release(
+def test_recovered_unknown_version_promotes_latest_compatible_result(
     unlisted_kimi_code_version: str,
 ) -> None:
     fake = FakeGitHub()
@@ -1384,11 +1384,16 @@ def test_recovered_unknown_version_does_not_prepare_automatic_release(
     fake.pulls[0]["state"] = "open"
     assert synchronize_reports(recovered, automation) == (
         "closed-recovered-drift-issue",
+        "created-promotion-pr",
     )
     assert fake.issues[0]["state"] == "closed"
     assert fake.pulls[0]["state"] == "closed"
-    assert synchronize_reports(recovered, automation) == ()
-    assert len(fake.pulls) == 1
+    assert fake.pulls[1]["state"] == "open"
+    assert unlisted_kimi_code_version in fake.pulls[1]["title"]
+    assert synchronize_reports(recovered, automation) == (
+        "unchanged-promotion-pr",
+    )
+    assert len(fake.pulls) == 2
 
 
 def test_sync_dry_run_predicts_the_decision_without_github(
