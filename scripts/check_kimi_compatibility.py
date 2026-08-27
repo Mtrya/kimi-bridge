@@ -207,9 +207,7 @@ class CommandRunner(Protocol):
 class GitHubAutomation(Protocol):
     """Semantic operations needed by the synchronization decision."""
 
-    def recover_drift_issue(
-        self, summary: CompatibilitySummary
-    ) -> Literal["closed", "recorded"] | None: ...
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool: ...
 
     def promote_versions(
         self, summaries: Sequence[CompatibilitySummary]
@@ -975,9 +973,9 @@ def synchronize_reports(
     """Apply the quiet pass/promotion/drift/recovery decision tree.
 
     Promotion and recovery require every canary platform to be compatible
-    with the same kimi-code version; any platform failure records drift.
-    A version that recovers from recorded drift requires manual release
-    preparation because the fix may have dropped older Kimi compatibility.
+    with the same kimi-code version; any platform failure records drift. The
+    latest all-platform result is authoritative, so recovered versions remain
+    eligible for automatic promotion.
     """
 
     summaries = summarize_report_batches(reports)
@@ -985,10 +983,9 @@ def synchronize_reports(
     promotable: list[CompatibilitySummary] = []
     for summary in summaries:
         if summary.compatible:
-            recovery = automation.recover_drift_issue(summary)
-            if recovery == "closed":
+            if automation.recover_drift_issue(summary):
                 actions.append("closed-recovered-drift-issue")
-            if recovery is None and not summary.supported:
+            if not summary.supported:
                 promotable.append(summary)
         else:
             actions.append(automation.record_drift(summary))
@@ -1002,10 +999,8 @@ def synchronize_reports(
 class DryRunAutomation:
     """Predict the synchronization decision without touching GitHub."""
 
-    def recover_drift_issue(
-        self, summary: CompatibilitySummary
-    ) -> Literal["closed", "recorded"] | None:
-        return None
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
+        return False
 
     def promote_versions(
         self, summaries: Sequence[CompatibilitySummary]
@@ -1058,16 +1053,11 @@ class GitHubApiAutomation:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
-    def recover_drift_issue(
-        self, summary: CompatibilitySummary
-    ) -> Literal["closed", "recorded"] | None:
+    def recover_drift_issue(self, summary: CompatibilitySummary) -> bool:
         issue = self._find_drift_issue(summary.version, state="open")
         if issue is None:
-            recorded = self._find_drift_issue(summary.version, state="all")
-            return "recorded" if recorded is not None else None
+            return False
         self._invalidate_promotion(summary)
-        if issue.get("state") != "open":
-            return "recorded"
         number = int(issue["number"])
         self._request(
             "POST",
@@ -1075,8 +1065,8 @@ class GitHubApiAutomation:
             json={
                 "body": (
                     f"Compatibility recovered with kimi-code {summary.version} "
-                    f"on {', '.join(summary.platforms)}. A bridge release for "
-                    f"this recovered version must be prepared manually."
+                    f"on {', '.join(summary.platforms)}. The latest "
+                    f"all-platform result is eligible for automatic promotion."
                     + self._run_link_suffix()
                 )
             },
@@ -1086,7 +1076,7 @@ class GitHubApiAutomation:
             f"/repos/{self.repository}/issues/{number}",
             json={"state": "closed", "state_reason": "completed"},
         )
-        return "closed"
+        return True
 
     def promote_versions(
         self, summaries: Sequence[CompatibilitySummary]
