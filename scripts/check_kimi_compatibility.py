@@ -1512,6 +1512,9 @@ def _write_probe_config(kimi_home: Path) -> None:
     (kimi_home / "config.toml").write_text(
         f"""default_model = "{PROBE_MODEL_ALIAS}"
 
+[secondary_model]
+default_model = "{PROBE_MODEL_ALIAS}"
+
 [providers.{PROBE_PROVIDER_ID}]
 type = "openai"
 base_url = "http://127.0.0.1:1/v1"

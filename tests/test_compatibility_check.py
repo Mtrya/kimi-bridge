@@ -157,6 +157,7 @@ async def test_live_probe_monitors_create_time_model_persistence(
     class FakeProbeClient:
         def __init__(self) -> None:
             self.created_profiles: list[dict[str, Any]] = []
+            self.secondary_model_updates: list[str] = []
             self.subscription_calls = 0
 
         async def __aenter__(self) -> FakeProbeClient:
@@ -177,7 +178,11 @@ async def test_live_probe_monitors_create_time_model_persistence(
         async def get_default_model(self) -> str:
             return "kimi-code/k3"
 
+        async def get_secondary_model(self) -> Any:
+            return SimpleNamespace(default_model="kimi-code/k3")
+
         async def set_secondary_model(self, model: str) -> Any:
+            self.secondary_model_updates.append(model)
             return SimpleNamespace(default_model=model)
 
         async def create_session(
@@ -220,6 +225,7 @@ async def test_live_probe_monitors_create_time_model_persistence(
     )
 
     assert client.created_profiles == [{"model": "kimi-code/k3"}]
+    assert client.secondary_model_updates == ["kimi-code/k3"]
     assert client.subscription_calls == 2
     assert any(
         item.id == "runtime.behavior.secondary_model.persistence"
@@ -731,7 +737,7 @@ def test_installer_failure_is_redacted(tmp_path: Path) -> None:
     assert raised.value.category == "installer-download"
 
 
-def test_probe_config_defines_a_credential_free_default_model(
+def test_probe_config_defines_credential_free_primary_and_secondary_models(
     tmp_path: Path,
 ) -> None:
     checker._write_probe_config(tmp_path)
@@ -739,10 +745,12 @@ def test_probe_config_defines_a_credential_free_default_model(
     with (tmp_path / "config.toml").open("rb") as config_file:
         config = tomllib.load(config_file)
     alias = config["default_model"]
+    secondary_alias = config["secondary_model"]["default_model"]
     model = config["models"][alias]
     provider = config["providers"][model["provider"]]
 
     assert alias == checker.PROBE_MODEL_ALIAS
+    assert secondary_alias == checker.PROBE_MODEL_ALIAS
     assert model["model"]
     assert model["max_context_size"] > 0
     assert provider["type"] == "openai"
