@@ -36,6 +36,7 @@ from kimi_bridge.kimi_server import (
     KimiServerTransportError,
     ModelInfo,
     PromptContent,
+    SecondaryModelConfig,
     PromptMedia,
     SessionProfile,
     SessionStatus,
@@ -71,6 +72,8 @@ class FakeKimiClient:
         self.server_version = "0.28.1"
         self.server_version_checks = 0
         self.default_model = "kimi-code/k3"
+        self.secondary_model = SecondaryModelConfig(None, None, False)
+        self.secondary_model_updates: list[str] = []
         self.restarts = 0
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | PromptContent, dict[str, Any]]] = []
@@ -198,6 +201,21 @@ class FakeKimiClient:
 
     async def get_default_model(self) -> str:
         return self.default_model
+
+    async def get_secondary_model(self) -> SecondaryModelConfig:
+        return self.secondary_model
+
+    async def set_secondary_model(self, model: str) -> SecondaryModelConfig:
+        self.secondary_model_updates.append(model)
+        models = self.secondary_model.models
+        if models is not None and model not in dict(models):
+            models = (*models, (model, ""))
+        self.secondary_model = SecondaryModelConfig(
+            default_model=model,
+            models=models,
+            force=self.secondary_model.force,
+        )
+        return self.secondary_model
 
     async def restart_server(self) -> None:
         self.restarts += 1
@@ -1101,6 +1119,7 @@ async def test_bridge_commands_switch_stop_and_mode(
     for grammar in (
         "/mode <manual|auto|yolo>",
         "/model [alias]",
+        "/secondary-model [alias]",
         "/effort [effort]",
         "/plan [on|off]",
         "/status",
@@ -1316,6 +1335,54 @@ async def test_model_and_effort_commands_use_exact_catalog_and_profile_inheritan
         ),
     ]
     assert client.prompts[-1][2] == {"permission_mode": "manual"}
+
+
+async def test_secondary_model_command_updates_global_pool_without_a_session(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.models.append(
+        ModelInfo(
+            alias="kimi-code/fast",
+            provider="kimi-code",
+            display_name="Fast",
+            max_context_size=131_072,
+            capabilities=(),
+            support_efforts=(),
+            default_effort=None,
+        )
+    )
+    client.secondary_model = SecondaryModelConfig(
+        default_model="kimi-code/k3",
+        models=(("kimi-code/k3", "hard tasks"),),
+        force=False,
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/secondary-model"))
+        await router.handle_inbound(
+            adapter, _message("/secondary-model K3")
+        )
+        await router.handle_inbound(
+            adapter, _message("/secondary-model kimi-code/fast")
+        )
+        await router.handle_inbound(adapter, _message("/secondary-model"))
+    finally:
+        await router.close()
+
+    texts = [text for _message_ref, _conversation, text in adapter.sent]
+    listings = [text for text in texts if "Available models:" in text]
+    assert "kimi-code/k3 [default, pool]" in listings[0]
+    assert "kimi-code/fast [default, pool]" in listings[1]
+    assert any("Unknown model alias: K3" in text for text in texts)
+    assert client.secondary_model_updates == ["kimi-code/fast"]
+    assert client.sessions == []
 
 
 async def test_plan_is_explicit_idle_only_and_idempotent(tmp_path: Path) -> None:

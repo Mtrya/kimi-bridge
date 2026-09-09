@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 3
+KIMI_SEMANTIC_CONTRACT_VERSION = 4
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -197,12 +197,35 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "config",
-            "KimiServerClient.get_config/get_default_model",
+            "KimiServerClient.get_config/get_default_model/get_secondary_model",
             "GET",
             "/config",
             "/api/v1/config",
             response_fields=(
                 _field("default_model", "string", required=False),
+                _field("secondary_model", "object", required=False),
+            ),
+        ),
+        RestOperationContract(
+            "update_config",
+            "KimiServerClient.set_secondary_model",
+            "POST",
+            "/config",
+            "/api/v1/config",
+            request_examples=(
+                {"secondary_model": {"default_model": "kimi-code/k3"}},
+                {
+                    "secondary_model": {
+                        "default_model": "kimi-code/k3",
+                        "models": {"kimi-code/k3": ""},
+                    }
+                },
+            ),
+            request_fields=(
+                _field("secondary_model", "object", required=False),
+            ),
+            response_fields=(
+                _field("secondary_model", "object", required=False),
             ),
         ),
         RestOperationContract(

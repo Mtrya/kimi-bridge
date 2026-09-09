@@ -201,7 +201,7 @@ def _check_tool_install(artifact: Path) -> None:
                 f"unexpected installed version: {version.stdout.strip()}"
             )
         _run(
-            [str(executable), "compat", "--kimi-code", "0.34.0"],
+            [str(executable), "compat", "--kimi-code", "0.42.0"],
             environment,
         )
         doctor_environment = dict(environment)

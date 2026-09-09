@@ -218,6 +218,25 @@ Example:
 - `/model`
 - `/model kimi-code/k3`""",
     ),
+    "/secondary-model": CommandHelp(
+        syntax="/secondary-model [alias]",
+        summary="show or set the default model for subagents",
+        section="Control",
+        details="""**/secondary-model [alias]**
+
+Show the global default model for newly spawned subagents and the exact catalog aliases, or select one.
+
+Arguments:
+- `alias` — an exact alias from the live Kimi catalog, not a display name.
+
+Defaults: without `alias`, only shows the current selection and catalog. With no configured selection, subagents inherit their primary agent's model.
+
+Side effects: updates Kimi Code's global `[secondary_model]` configuration and affects later subagent spawns in every session, including sessions that are currently busy. Existing subagents and primary session models are unchanged. This command requires Kimi Code 0.42.0 or newer, where secondary models are always enabled.
+
+Example:
+- `/secondary-model`
+- `/secondary-model kimi-code/kimi-for-coding-highspeed`""",
+    ),
     "/effort": CommandHelp(
         syntax="/effort [effort]",
         summary="show or set thinking effort for the current model",

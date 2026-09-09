@@ -47,6 +47,7 @@ from .types import (
     PermissionMode,
     PromptContent,
     PromptMedia,
+    SecondaryModelConfig,
     ServerConnection,
     SessionProfile,
     SessionStatus,
@@ -62,6 +63,7 @@ from .wire import (
     _model_info_from_wire,
     _question_answer_to_wire,
     _question_request_from_wire,
+    _secondary_model_config_from_wire,
     _session_profile_from_wire,
     _session_status_from_wire,
     _skill_info_from_wire,
@@ -166,6 +168,32 @@ class KimiServerClient:
                 "kimi server configuration has no default_model"
             )
         return model
+
+    async def get_secondary_model(self) -> SecondaryModelConfig:
+        """Return the global model selection used for newly spawned subagents."""
+
+        config = await self.get_config()
+        return _secondary_model_config_from_wire(config.get("secondary_model"))
+
+    async def set_secondary_model(self, model: str) -> SecondaryModelConfig:
+        """Persist the global default model for newly spawned subagents."""
+
+        if not model:
+            raise ValueError("secondary model must be non-empty")
+        current = await self.get_secondary_model()
+        secondary_patch: dict[str, Any] = {"default_model": model}
+        if current.models is not None and model not in dict(current.models):
+            secondary_patch["models"] = {model: ""}
+        data = await self._request_operation(
+            "update_config",
+            json_body={"secondary_model": secondary_patch},
+        )
+        updated = _secondary_model_config_from_wire(data.get("secondary_model"))
+        if updated.default_model != model:
+            raise KimiServerProtocolError(
+                f"kimi server did not persist secondary model {model!r}"
+            )
+        return updated
 
     async def get_server_version(self) -> str:
         """Return the managed server's advertised version."""
