@@ -109,6 +109,15 @@ class ModelInfo:
 
 
 @dataclass(frozen=True, slots=True)
+class SecondaryModelConfig:
+    """Global subagent-model selection resolved by the managed server."""
+
+    default_model: str | None
+    models: tuple[tuple[str, str], ...] | None
+    force: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SessionUsage:
     """Usage available through the public server surfaces for a session."""
 

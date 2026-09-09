@@ -177,6 +177,9 @@ async def test_live_probe_monitors_create_time_model_persistence(
         async def get_default_model(self) -> str:
             return "kimi-code/k3"
 
+        async def set_secondary_model(self, model: str) -> Any:
+            return SimpleNamespace(default_model=model)
+
         async def create_session(
             self, _workspace: str, **profile: Any
         ) -> str:
@@ -218,6 +221,11 @@ async def test_live_probe_monitors_create_time_model_persistence(
 
     assert client.created_profiles == [{"model": "kimi-code/k3"}]
     assert client.subscription_calls == 2
+    assert any(
+        item.id == "runtime.behavior.secondary_model.persistence"
+        and item.status == "pass"
+        for item in result.checks
+    )
     model_check = next(
         item
         for item in result.checks

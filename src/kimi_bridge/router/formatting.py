@@ -9,6 +9,7 @@ from ..kimi_server import (
     GoalInfo,
     KimiServerProtocolError,
     ModelInfo,
+    SecondaryModelConfig,
     SessionNotice,
     SessionProfile,
     SessionStatus,
@@ -93,6 +94,24 @@ def _format_models(current_model: str, models: list[ModelInfo]) -> str:
         display_name = model.display_name or "display name unavailable"
         efforts = ", ".join(_model_effort_choices(model))
         lines.append(f"- {model.alias} — {display_name} — thinking efforts: {efforts}")
+    return "\n".join(lines)
+
+
+def _format_secondary_models(
+    config: SecondaryModelConfig, models: list[ModelInfo]
+) -> str:
+    current = config.default_model or "primary model (inherited)"
+    pool = dict(config.models) if config.models is not None else None
+    lines = [f"Secondary model: {current}", "Available models:"]
+    for model in models:
+        display_name = model.display_name or "display name unavailable"
+        labels: list[str] = []
+        if model.alias == config.default_model:
+            labels.append("default")
+        if pool is not None and model.alias in pool:
+            labels.append("pool")
+        marker = f" [{', '.join(labels)}]" if labels else ""
+        lines.append(f"- {model.alias}{marker} — {display_name}")
     return "\n".join(lines)
 
 

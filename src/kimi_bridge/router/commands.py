@@ -29,6 +29,7 @@ from .formatting import (
     _format_history,
     _format_mcp_tools,
     _format_models,
+    _format_secondary_models,
     _format_sessions,
     _format_skills,
     _format_status,
@@ -175,6 +176,9 @@ class _CommandMixin:
             return
         if command == "/model":
             await self._handle_model(conversation_key, adapter, conversation, argument)
+            return
+        if command == "/secondary-model":
+            await self._handle_secondary_model(adapter, conversation, argument)
             return
         if command == "/effort":
             await self._handle_effort(conversation_key, adapter, conversation, argument)
@@ -458,6 +462,41 @@ class _CommandMixin:
             return
         await self._client.update_profile(binding.session_id, thinking=argument)
         await self._send_chunked(adapter, conversation, f"Thinking effort: {argument}")
+
+    async def _handle_secondary_model(
+        self,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        if not argument:
+            config, models = await asyncio.gather(
+                self._client.get_secondary_model(),
+                self._client.list_models(),
+            )
+            await self._send_chunked(
+                adapter,
+                conversation,
+                _format_secondary_models(config, models),
+            )
+            return
+
+        models = await self._client.list_models()
+        if not any(model.alias == argument for model in models):
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Unknown model alias: {argument}\n"
+                "Use /secondary-model to list exact aliases.",
+            )
+            return
+        await self._client.set_secondary_model(argument)
+        await self._send_chunked(
+            adapter,
+            conversation,
+            f"Secondary model: {argument}\n"
+            "Saved in Kimi Code's global subagent model configuration.",
+        )
 
     async def _handle_plan(
         self,

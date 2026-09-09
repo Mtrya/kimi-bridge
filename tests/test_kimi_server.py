@@ -38,6 +38,7 @@ from kimi_bridge.kimi_server import (
     ModelInfo,
     PromptContent,
     PromptMedia,
+    SecondaryModelConfig,
     ServerConnection,
     SessionNotice,
     SessionStatus,
@@ -889,6 +890,88 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     }
     assert http.requests[10][2]["json"] == {"args": "focus tests"}
     assert http.requests[11][2]["params"] == {"session_id": "session-1"}
+
+
+async def test_secondary_model_config_supports_legacy_and_pool_shapes() -> None:
+    http = FakeHttpClient(
+        [
+            _envelope({}),
+            _envelope({"secondary_model": {"model": "kimi-code/legacy"}}),
+            _envelope(
+                {
+                    "secondary_model": {
+                        "defaultModel": "kimi-code/fast",
+                        "models": {
+                            "kimi-code/k3": "hard tasks",
+                            "kimi-code/fast": "fast tasks",
+                        },
+                        "force": False,
+                    }
+                }
+            ),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    assert await client.get_secondary_model() == SecondaryModelConfig(
+        default_model=None, models=None, force=False
+    )
+    assert await client.get_secondary_model() == SecondaryModelConfig(
+        default_model="kimi-code/legacy", models=None, force=False
+    )
+    assert await client.get_secondary_model() == SecondaryModelConfig(
+        default_model="kimi-code/fast",
+        models=(
+            ("kimi-code/k3", "hard tasks"),
+            ("kimi-code/fast", "fast tasks"),
+        ),
+        force=False,
+    )
+
+
+async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
+    http = FakeHttpClient(
+        [
+            _envelope(
+                {
+                    "secondary_model": {
+                        "defaultModel": "kimi-code/k3",
+                        "models": {"kimi-code/k3": "hard tasks"},
+                    }
+                }
+            ),
+            _envelope(
+                {
+                    "secondary_model": {
+                        "defaultModel": "kimi-code/fast",
+                        "models": {
+                            "kimi-code/k3": "hard tasks",
+                            "kimi-code/fast": "",
+                        },
+                    }
+                }
+            ),
+        ]
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http
+    )
+
+    updated = await client.set_secondary_model("kimi-code/fast")
+
+    assert updated.default_model == "kimi-code/fast"
+    assert http.requests[-1][0:2] == (
+        "POST",
+        "http://127.0.0.1:43123/api/v1/config",
+    )
+    assert http.requests[-1][2]["json"] == {
+        "secondary_model": {
+            "default_model": "kimi-code/fast",
+            "models": {"kimi-code/fast": ""},
+        }
+    }
 
 
 async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> None:

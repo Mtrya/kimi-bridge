@@ -81,6 +81,17 @@ async def probe_kimi_compatibility(
 
         workspace.mkdir(parents=True, exist_ok=True)
         default_model = await client.get_default_model()
+        secondary_model = await client.set_secondary_model(default_model)
+        if secondary_model.default_model != default_model:
+            raise RuntimeError("secondary model configuration did not persist")
+        runtime_checks.append(
+            _pass(
+                "runtime.behavior.secondary_model.persistence",
+                "runtime",
+                "the subagent model default persists through public v1",
+                "KimiServerClient.set_secondary_model",
+            )
+        )
         session_id = await client.create_session(
             str(workspace), model=default_model
         )

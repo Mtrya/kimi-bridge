@@ -24,6 +24,7 @@ from .types import (
     ModelInfo,
     PendingInteractionKind,
     PermissionMode,
+    SecondaryModelConfig,
     SessionProfile,
     SessionStatus,
     SessionUsage,
@@ -52,6 +53,52 @@ def _model_info_from_wire(value: dict[str, Any]) -> ModelInfo:
         default_effort=(
             str(default_effort) if default_effort is not None else None
         ),
+    )
+
+
+def _secondary_model_config_from_wire(value: object) -> SecondaryModelConfig:
+    if value is None:
+        return SecondaryModelConfig(default_model=None, models=None, force=False)
+    if not isinstance(value, dict):
+        raise KimiServerProtocolError(
+            "kimi server secondary_model configuration is not an object"
+        )
+
+    default_model = value.get("defaultModel")
+    if default_model is None:
+        default_model = value.get("default_model")
+    if default_model is None:
+        default_model = value.get("model")
+    if default_model is not None and (
+        not isinstance(default_model, str) or not default_model
+    ):
+        raise KimiServerProtocolError(
+            "kimi server secondary_model configuration has an invalid default model"
+        )
+
+    raw_models = value.get("models")
+    models: tuple[tuple[str, str], ...] | None = None
+    if raw_models is not None:
+        if not isinstance(raw_models, dict) or not all(
+            isinstance(alias, str)
+            and alias
+            and isinstance(description, str)
+            for alias, description in raw_models.items()
+        ):
+            raise KimiServerProtocolError(
+                "kimi server secondary_model configuration has an invalid model pool"
+            )
+        models = tuple(raw_models.items())
+
+    force = value.get("force", False)
+    if not isinstance(force, bool):
+        raise KimiServerProtocolError(
+            "kimi server secondary_model configuration has an invalid force value"
+        )
+    return SecondaryModelConfig(
+        default_model=default_model,
+        models=models,
+        force=force,
     )
 
 
