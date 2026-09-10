@@ -1149,15 +1149,26 @@ class _GatedSleep:
     def __init__(self) -> None:
         self.calls: list[float] = []
         self._gates: list[asyncio.Event] = []
+        self._waiting: dict[asyncio.Task[Any], asyncio.Event] = {}
 
     async def __call__(self, delay: float) -> None:
         gate = asyncio.Event()
         self.calls.append(delay)
         self._gates.append(gate)
-        await gate.wait()
+        task = asyncio.current_task()
+        assert task is not None
+        self._waiting[task] = gate
+        try:
+            await gate.wait()
+        finally:
+            self._waiting.pop(task, None)
 
     def release(self, index: int) -> None:
         self._gates[index].set()
+
+    async def release_task(self, task: asyncio.Task[None]) -> None:
+        await _wait_for(lambda: task in self._waiting)
+        self._waiting[task].set()
 
 
 def _make_qq_adapter(
@@ -2645,8 +2656,10 @@ async def test_stream_api_failure_abandons_frame_and_preserves_latest_text(
     if stage in {"open", "edit"}:
         api.stream_errors = [QQAPIError("stream_messages", 40054005, "dedup")]
     if flush == "idle":
-        await _wait_for(lambda: bool(sleep.calls))
-        sleep.release(len(sleep.calls) - 1)
+        # Earlier edits may have left cancelled timers in the call history.
+        idle_task = adapter._streams[ref].idle_task
+        assert idle_task is not None
+        await sleep.release_task(idle_task)
         await _wait_for(lambda: adapter._streams[ref].idle_task is None)
         assert adapter._streams[ref].finalized
     await adapter.send_text(conversation, "next segment")
