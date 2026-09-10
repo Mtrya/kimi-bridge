@@ -924,6 +924,16 @@ class FakeQQBotAPI:
 
     def __init__(self) -> None:
         self.active_sends: list[dict[str, Any]] = []
+        self.regular_attempts: list[dict[str, Any]] = []
+        self.regular_errors: list[Exception] = []
+        self.stream_attempts: list[dict[str, Any]] = []
+        self.stream_errors: list[Exception] = []
+        self.block_stream_response = False
+        self.stream_accepted = asyncio.Event()
+        self.release_stream_response = asyncio.Event()
+        self.block_regular_response = False
+        self.regular_accepted = asyncio.Event()
+        self.release_regular_response = asyncio.Event()
         self.stream_frames: list[dict[str, Any]] = []
         self.typing_calls: list[dict[str, Any]] = []
         self.uploads: list[dict[str, Any]] = []
@@ -979,6 +989,10 @@ class FakeQQBotAPI:
         event_id: str | None = None,
         msg_seq: int | None = None,
     ) -> dict[str, Any]:
+        self.regular_attempts.append({"msg_id": msg_id, "msg_seq": msg_seq,
+                                      "markdown": markdown})
+        if self.regular_errors:
+            raise self.regular_errors.pop(0)
         if self.fail_active_transport_once:
             self.fail_active_transport_once = False
             raise QQTransportError("active send failed")
@@ -996,6 +1010,9 @@ class FakeQQBotAPI:
         )
         message_id = f"active-{self._next_id}"
         self._next_id += 1
+        if self.block_regular_response:
+            self.regular_accepted.set()
+            await self.release_regular_response.wait()
         return {"id": message_id, "timestamp": "t"}
 
     async def send_c2c_stream_message(
@@ -1012,6 +1029,10 @@ class FakeQQBotAPI:
         input_mode: str = "replace",
         content_type: str = "markdown",
     ) -> dict[str, Any]:
+        self.stream_attempts.append({"msg_id": msg_id, "msg_seq": msg_seq,
+                                     "index": index, "input_state": input_state})
+        if self.stream_errors:
+            raise self.stream_errors.pop(0)
         if self.block_done and input_state == STREAM_INPUT_STATE_DONE:
             self.done_started.set()
             await self.release_done.wait()
@@ -1071,6 +1092,9 @@ class FakeQQBotAPI:
         )
         self._stream_contents[message_id] = content_raw
         self._stream_indexes[message_id] = index
+        if self.block_stream_response:
+            self.stream_accepted.set()
+            await self.release_stream_response.wait()
         return {"id": message_id, "timestamp": "t"}
 
     async def delete_c2c_message(self, openid: str, message_id: str) -> None:
@@ -1696,7 +1720,7 @@ async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> No
     assert api.stream_frames[-1]["content_raw"] == "hello\nworld\nagain\n"
 
 
-async def test_failed_stream_edit_does_not_commit_source_snapshot() -> None:
+async def test_failed_stream_edit_retains_latest_source_for_plain_delivery() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
@@ -1707,15 +1731,15 @@ async def test_failed_stream_edit_does_not_commit_source_snapshot() -> None:
     ref = await adapter.send_text(conversation, first)
     api.fail_stream_once = True
 
-    with pytest.raises(QQAPIError, match="stream failed"):
-        await adapter.edit_text(ref, final)
-
-    assert adapter._streams[ref].last_source_text == first
-
     await adapter.edit_text(ref, final)
-
+    assert adapter._streams[ref].failed
     assert adapter._streams[ref].last_source_text == final
-    assert len(api.stream_frames) == 2
+    await adapter.edit_text(ref, final + "latest")
+    await adapter.stop()
+    assert len(api.stream_frames) == 1
+    assert api.active_sends[-1]["markdown"] == {
+        "content": sanitize_markdown(final + "latest")
+    }
 
 
 async def test_stream_buffers_incomplete_line_until_it_becomes_stable() -> None:
@@ -1922,37 +1946,22 @@ async def test_active_fallback_coalesces_snapshots_into_one_final_send() -> None
     assert api.active_sends[-1]["markdown"] == {"content": "hello again!"}
 
 
-async def test_idle_transport_failure_retries_deferred_active_send(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_idle_transport_failure_retries_plain_delivery_once() -> None:
     api = FakeQQBotAPI()
     api.fail_active_transport_once = True
     sleep = _GatedSleep()
-    adapter = _make_qq_adapter(
-        api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0
-    )
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
     adapter._anchors[conversation] = _anchor(used=QQ_PASSIVE_REPLY_LIMIT)
-
     ref = await adapter.send_text(conversation, "complete answer")
     await _wait_for(lambda: len(sleep.calls) == 1)
-    caplog.set_level(logging.ERROR, logger="kimi_bridge.platforms.qq")
-
     sleep.release(0)
-    await _wait_for(lambda: len(sleep.calls) == 2)
-
-    assert not api.active_sends
-    assert not adapter._streams[ref].finalized
-
-    sleep.release(1)
-    await _wait_for(lambda: len(api.active_sends) == 1)
-    await adapter.stop()
-
+    await _wait_for(lambda: adapter._streams[ref].idle_task is None)
+    assert adapter._streams[ref].finalized
+    assert not api.stream_frames
+    assert len(sleep.calls) == 1
     assert api.active_sends[0]["markdown"] == {"content": "complete answer"}
-    assert any(
-        record.message == "QQ stream idle flush transport failed; retrying"
-        for record in caplog.records
-    )
+    await adapter.stop()
 
 
 async def test_non_monotonic_source_withdraws_partial_before_corrected_final() -> None:
@@ -2150,29 +2159,21 @@ async def test_idle_timeout_sends_done_frame() -> None:
     assert api.stream_frames[1]["content_raw"] != "hello"
 
 
-async def test_idle_timeout_contains_done_api_failure(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_idle_done_api_failure_delivers_plain_text() -> None:
     api = FakeQQBotAPI()
     api.fail_done_once = True
     sleep = _GatedSleep()
-    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep, idle_timeout=5.0)
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
     adapter._anchors[conversation] = _anchor()
-
     ref = await adapter.send_text(conversation, "hello")
     await _wait_for(lambda: len(sleep.calls) == 1)
-    caplog.set_level(logging.ERROR, logger="kimi_bridge.platforms.qq")
-
     sleep.release(0)
     await _wait_for(lambda: adapter._streams[ref].idle_task is None)
-
-    records = [
-        record
-        for record in caplog.records
-        if record.name == "kimi_bridge.platforms.qq"
-    ]
-    assert [record.args for record in records] == [(40006,)]
+    assert adapter._streams[ref].finalized
+    assert api.active_sends[0]["markdown"] == {"content": "hello"}
+    assert api.active_sends[0]["msg_seq"] == 2
+    await adapter.stop()
 
 
 async def test_stream_open_transport_failure_sends_plain_message() -> None:
@@ -2188,11 +2189,15 @@ async def test_stream_open_transport_failure_sends_plain_message() -> None:
     ref = await adapter.send_text(conversation, "hello\n")
 
     assert not api.stream_frames
+    assert not api.active_sends
+    await _wait_for(lambda: len(sleep.calls) == 1)
+    sleep.release(0)
+    await _wait_for(lambda: adapter._streams[ref].idle_task is None)
     assert api.active_sends[0]["markdown"] == {
         "content": sanitize_markdown("hello\n")
     }
     assert api.active_sends[0]["msg_id"] == "MSGID-ANCHOR"
-    assert api.active_sends[0]["msg_seq"] == 1
+    assert api.active_sends[0]["msg_seq"] == 2
     assert adapter._streams[ref].finalized
     await adapter.stop()
 
@@ -2609,3 +2614,320 @@ async def test_audio_mime_attachment_lands_in_audios_not_files() -> None:
     assert message.audios[0].media_type == "audio/mpeg"
     assert message.audios[0].name == "clip.mp3"
     assert message.audios[0].transcript is None
+
+
+@pytest.mark.parametrize("code", [40034021, 40054005, 40000])
+@pytest.mark.parametrize("stage", ["open", "edit", "buffered", "done"])
+@pytest.mark.parametrize("flush", ["idle", "next_segment"])
+async def test_stream_api_failure_abandons_frame_and_preserves_latest_text(
+    code: int,
+    stage: str,
+    flush: str,
+) -> None:
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    error = QQAPIError("stream_messages", code, "rejected")
+    if stage == "open":
+        api.stream_errors = [error]
+    source = "answer" if stage == "buffered" else "answer\n"
+    ref = await adapter.send_text(conversation, source)
+    if stage != "open":
+        api.stream_errors = [error]
+    if stage in {"open", "edit"}:
+        source += "latest\n"
+        await adapter.edit_text(ref, source)
+        source += "tail"
+        await adapter.edit_text(ref, source)
+    # A second call on the rejected stream would hit QQ's dedup guard.
+    if stage in {"open", "edit"}:
+        api.stream_errors = [QQAPIError("stream_messages", 40054005, "dedup")]
+    if flush == "idle":
+        await _wait_for(lambda: bool(sleep.calls))
+        sleep.release(len(sleep.calls) - 1)
+        await _wait_for(lambda: adapter._streams[ref].idle_task is None)
+        assert adapter._streams[ref].finalized
+    await adapter.send_text(conversation, "next segment")
+    assert ref not in adapter._streams
+    assert api.active_sends[0]["markdown"] == {"content": sanitize_markdown(source)}
+    assert api.active_sends[0]["msg_seq"] == 2
+    assert len(api.stream_attempts) == (1 if stage in {"open", "buffered"} else 2)
+    api.stream_errors.clear()
+    await adapter.stop()
+
+
+@pytest.mark.parametrize("warning_fails", [False, True])
+@pytest.mark.parametrize("transport", [False, True])
+async def test_plain_failure_is_bounded_warns_once_and_does_not_poison_next_turn(
+    warning_fails: bool,
+    transport: bool,
+) -> None:
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    api.stream_errors = [QQAPIError("stream_messages", 40054005, "dedup")]
+    api.regular_errors = [
+        QQTransportError("unavailable")
+        if transport
+        else QQAPIError("messages", 40000, "no")
+        for _ in range(3 if warning_fails else 2)
+    ]
+    ref = await adapter.send_text(conversation, "answer\n")
+    await _wait_for(lambda: bool(sleep.calls))
+    sleep.release(0)
+    await _wait_for(lambda: adapter._streams[ref].idle_task is None)
+    assert adapter._streams[ref].delivery_exhausted
+    assert [a["msg_seq"] for a in api.regular_attempts] == [2, 3, 4]
+    assert "could not deliver" in api.regular_attempts[-1]["markdown"]["content"]
+    await adapter.edit_text(ref, "answer\nlatest")
+    await adapter.edit_text(ref, "answer\nmore")
+    assert len(api.regular_attempts) == 3
+    assert len(sleep.calls) == 1
+    # A fresh inbound message renews the passive budget for the next turn.
+    adapter._anchors[conversation] = _anchor()
+    second = await adapter.send_text(conversation, "next turn\n")
+    assert ref not in adapter._streams
+    assert adapter._streams[second].stream_msg_id is not None
+    await adapter.stop()
+    assert len(api.regular_attempts) == 3
+
+
+async def test_next_segment_waits_for_idle_done_without_cancelling_request() -> None:
+    api = FakeQQBotAPI()
+    api.block_done = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = await adapter.send_text(conversation, "first\n")
+    await _wait_for(lambda: bool(sleep.calls))
+    sleep.release(0)
+    await asyncio.wait_for(api.done_started.wait(), 1)
+    idle = adapter._streams[first].idle_task
+    second = asyncio.create_task(adapter.send_text(conversation, "second\n"))
+    await asyncio.sleep(0)
+    assert not second.done()
+    assert idle is not None and not idle.cancelling()
+    api.release_done.set()
+    await second
+    assert [a["index"] for a in api.stream_attempts] == [0, 1, 0]
+    assert first not in adapter._streams
+    await adapter.stop()
+
+
+async def test_concurrent_opening_serializes_entire_conversation_lifecycle() -> None:
+    api = FakeQQBotAPI()
+    api.block_stream_response = True
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = asyncio.create_task(adapter.send_text(conversation, "first\n"))
+    await asyncio.wait_for(api.stream_accepted.wait(), 1)
+    second = asyncio.create_task(adapter.send_text(conversation, "second\n"))
+    await asyncio.sleep(0)
+    assert len(api.stream_attempts) == 1
+    assert not second.done()
+    api.block_stream_response = False
+    api.release_stream_response.set()
+    first_ref, _ = await asyncio.gather(first, second)
+    assert first_ref not in adapter._streams
+    assert [a["index"] for a in api.stream_attempts] == [0, 1, 0]
+    assert [a["msg_seq"] for a in api.stream_attempts] == [1, 1, 2]
+    await adapter.stop()
+
+
+@pytest.mark.parametrize("stage", ["open", "edit"])
+async def test_cancelled_frame_settles_and_is_not_replayed(stage: str) -> None:
+    api = FakeQQBotAPI()
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    if stage == "edit":
+        ref = await adapter.send_text(conversation, "first\n")
+    api.block_stream_response = True
+    source = "first\nlatest\n"
+    operation = (
+        adapter.send_text(conversation, source)
+        if stage == "open"
+        else adapter.edit_text(ref, source)
+    )
+    sending = asyncio.create_task(operation)
+    await asyncio.wait_for(api.stream_accepted.wait(), 1)
+    sending.cancel()
+    await asyncio.sleep(0)
+    sending.cancel()
+    await asyncio.sleep(0)
+    assert not sending.done()
+    api.block_stream_response = False
+    api.release_stream_response.set()
+    with pytest.raises(asyncio.CancelledError):
+        await sending
+    state = next(iter(adapter._streams.values()))
+    assert state.failed
+    assert state.last_source_text == source
+    assert state.next_index == (1 if stage == "open" else 2)
+    attempts = len(api.stream_attempts)
+    await adapter.send_text(conversation, "next")
+    assert len(api.stream_attempts) == attempts
+    assert api.active_sends[0]["markdown"] == {"content": sanitize_markdown(source)}
+    assert len(api.withdrawals) == 1
+    await adapter.stop()
+
+
+async def test_lost_open_response_times_out_and_falls_back_with_fresh_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(qq_module, "QQ_DELIVERY_TIMEOUT_SECONDS", 0.01)
+    api = FakeQQBotAPI()
+    api.block_stream_response = True
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    ref = await adapter.send_text(conversation, "answer\n")
+    assert adapter._streams[ref].failed
+    assert adapter._streams[ref].stream_msg_id is None
+    await adapter.send_text(conversation, "next")
+    assert len(api.stream_attempts) == 1
+    assert api.active_sends[0]["msg_seq"] == 2
+    assert api.active_sends[0]["markdown"] == {"content": "answer\n"}
+    api.block_stream_response = False
+    await adapter.stop()
+
+
+async def test_cancelling_pre_send_plain_fallback_preserves_committed_delivery() -> (
+    None
+):
+    api = FakeQQBotAPI()
+    api.block_regular_response = True
+    api.stream_errors = [QQAPIError("stream_messages", 40054005, "dedup")]
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = await adapter.send_text(conversation, "answer\n")
+    next_send = asyncio.create_task(adapter.send_text(conversation, "next"))
+    await asyncio.wait_for(api.regular_accepted.wait(), 1)
+    next_send.cancel()
+    await asyncio.sleep(0)
+    assert not next_send.done()
+    api.block_regular_response = False
+    api.release_regular_response.set()
+    with pytest.raises(asyncio.CancelledError):
+        await next_send
+    assert first not in adapter._streams
+    await adapter.send_text(conversation, "next\n")
+    assert len(api.active_sends) == 1
+    assert len(api.regular_attempts) == 1
+    await adapter.stop()
+
+
+@pytest.mark.parametrize("attachments", [None, [{"url": "http://invalid/file"}]])
+async def test_empty_inbound_does_not_replace_anchor_or_start_typing(
+    attachments: list[dict[str, str]] | None,
+) -> None:
+    api = FakeQQBotAPI()
+    gateway = FakeQQGateway()
+    adapter = _make_qq_adapter(api, gateway)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    anchor = _anchor()
+    adapter._anchors[conversation] = anchor
+    delivered: list[Any] = []
+
+    async def on_message(_sender: Any, message: Any) -> None:
+        delivered.append(message)
+
+    await adapter.start(on_message, _noop_on_interaction)
+    await gateway.emit(
+        QQGatewayEvent(
+            type="C2C_MESSAGE_CREATE",
+            data=_c2c_payload("EMPTY", "  \n", attachments=attachments),
+            seq=1,
+            event_id="empty-event",
+        )
+    )
+    assert adapter._anchors[conversation] is anchor
+    assert not delivered
+    assert not adapter._typing_tasks
+    assert not api.typing_calls
+    await adapter.stop()
+
+
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_shutdown_or_cancelled_waiter_preserves_in_flight_idle_frame(
+    cancel_waiter: bool,
+) -> None:
+    api = FakeQQBotAPI()
+    api.block_done = True
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = await adapter.send_text(conversation, "first\n")
+    await _wait_for(lambda: bool(sleep.calls))
+    sleep.release(0)
+    await asyncio.wait_for(api.done_started.wait(), 1)
+    idle = adapter._streams[first].idle_task
+    operation = (
+        adapter.send_text(conversation, "next") if cancel_waiter else adapter.stop()
+    )
+    waiter = asyncio.create_task(operation)
+    await asyncio.sleep(0)
+    if cancel_waiter:
+        waiter.cancel()
+        await asyncio.sleep(0)
+    assert not waiter.done()
+    assert not api.closed
+    assert idle is not None and not idle.cancelling()
+    api.release_done.set()
+    if cancel_waiter:
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        await adapter.stop()
+    else:
+        await waiter
+    assert [a["index"] for a in api.stream_attempts] == [0, 1]
+    assert not adapter._streams
+    assert api.closed
+
+
+async def test_plain_response_timeout_exhausts_budget_without_idle_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(qq_module, "QQ_DELIVERY_TIMEOUT_SECONDS", 0.01)
+    api = FakeQQBotAPI()
+    api.block_regular_response = True
+    api.stream_errors = [QQAPIError("stream_messages", 40034021, "busy")]
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    first = await adapter.send_text(conversation, "answer\n")
+    await _wait_for(lambda: bool(sleep.calls))
+    sleep.release(0)
+    await _wait_for(lambda: adapter._streams[first].idle_task is None)
+    assert adapter._streams[first].delivery_exhausted
+    assert len(api.regular_attempts) == 3  # Two attempts and one warning.
+    assert [a["msg_seq"] for a in api.regular_attempts] == [2, 3, 4]
+    assert len(sleep.calls) == 1
+    api.block_regular_response = False
+    await adapter.stop()
+    assert len(api.regular_attempts) == 3
+
+
+async def test_failed_open_fallback_uses_latest_valid_anchor() -> None:
+    api = FakeQQBotAPI()
+    api.stream_errors = [QQAPIError("stream_messages", 40054005, "dedup")]
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    await adapter.send_text(conversation, "answer\n")
+    replacement = _anchor()
+    replacement.msg_id = "NEW-ANCHOR"
+    adapter._anchors[conversation] = replacement
+    await adapter.send_text(conversation, "next")
+    assert api.active_sends[0]["msg_id"] == "NEW-ANCHOR"
+    assert api.active_sends[0]["msg_seq"] == 1
+    await adapter.stop()
