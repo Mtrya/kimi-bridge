@@ -114,6 +114,7 @@ QQ_PASSIVE_REPLY_WINDOW_SECONDS = 60 * 60
 QQ_TYPING_KEEPALIVE_SECONDS = 50
 QQ_TYPING_INPUT_SECONDS = 60
 QQ_STREAM_IDLE_TIMEOUT_SECONDS = 6.0
+QQ_DELIVERY_TIMEOUT_SECONDS = 60.0
 QQ_GATEWAY_SETUP_TIMEOUT_SECONDS = 30.0
 QQ_LOG_PREVIEW_LIMIT = 60
 QQ_URL_DEFANG_ERROR_CODE = 304003
@@ -1135,6 +1136,39 @@ def _dedupe_key(data: dict[str, Any], msg_id: str) -> str:
     return msg_id
 
 
+async def _settle_delivery_task(
+    task: asyncio.Task[None], *, ignore_task_cancellation: bool = False
+) -> None:
+    """Defer caller cancellation until the owned delivery has settled."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if not task.cancelled() or (caller is not None and caller.cancelling()):
+                cancelled = True
+        except Exception:
+            break
+    if cancelled:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            task.result()
+        raise asyncio.CancelledError
+    if not (task.cancelled() and ignore_task_cancellation):
+        task.result()
+
+
+async def _complete_delivery(operation: Callable[[], Awaitable[None]]) -> None:
+    async def bounded() -> None:
+        try:
+            async with asyncio.timeout(QQ_DELIVERY_TIMEOUT_SECONDS):
+                await operation()
+        except TimeoutError as error:
+            raise QQTransportError("QQ delivery timed out") from error
+
+    await _settle_delivery_task(asyncio.create_task(bounded(), name="qq-delivery"))
+
+
 @dataclass(slots=True)
 class _ReplyAnchor:
     """Passive-reply budget for the most recent inbound message per chat."""
@@ -1172,7 +1206,9 @@ class _StreamState:
     pending_text: str | None = None
     finalized: bool = False
     failed: bool = False
+    delivery_exhausted: bool = False
     idle_task: asyncio.Task[None] | None = None
+    idle_sending: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -1218,6 +1254,7 @@ class QQAdapter:
         self._on_interaction: InteractionHandler | None = None
         self._anchors: dict[ConversationRef, _ReplyAnchor] = {}
         self._streams: dict[MessageRef, _StreamState] = {}
+        self._conversation_locks: dict[ConversationRef, asyncio.Lock] = {}
         self._typing_tasks: dict[ConversationRef, asyncio.Task[None]] = {}
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -1250,18 +1287,10 @@ class QQAdapter:
             await self._gateway.stop()
             for conversation in tuple(self._typing_tasks):
                 await self._stop_typing(conversation)
-            for state in tuple(self._streams.values()):
-                idle_task = state.idle_task
-                if idle_task is not None and not idle_task.done():
-                    idle_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await idle_task
-            for message, state in tuple(self._streams.items()):
-                async with state.lock:
-                    if self._streams.get(message) is not state:
-                        continue
-                    await self._flush_stream_state(state)
-                    self._streams.pop(message, None)
+            for conversation in {ref.conversation for ref in self._streams}:
+                lock = self._conversation_locks.setdefault(conversation, asyncio.Lock())
+                async with lock:
+                    await self._flush_conversation_streams(conversation)
         finally:
             closers = [self._api.close()]
             if self._token_manager is not None:
@@ -1275,6 +1304,13 @@ class QQAdapter:
 
     async def send_text(self, conversation: ConversationRef, text: str) -> MessageRef:
         self._validate_conversation(conversation)
+        lock = self._conversation_locks.setdefault(conversation, asyncio.Lock())
+        async with lock:
+            return await self._open_text(conversation, text)
+
+    async def _open_text(self, conversation: ConversationRef, text: str) -> MessageRef:
+        if self._closed:
+            raise RuntimeError("QQ adapter is closed")
         await self._flush_conversation_streams(conversation)
         openid = conversation.conversation_id
         anchor = self._anchors.get(conversation)
@@ -1292,25 +1328,24 @@ class QQAdapter:
             last_source_text=text,
         )
         self._streams[ref] = state
-        rendered = _sanitize_stable_markdown(text)
-        if state.streamable and rendered:
+        async with state.lock:
             try:
-                await self._send_stream_rendered(state, rendered)
-            except QQTransportError:
-                LOGGER.warning(
-                    "QQ stream open failed with a transport error; sending a "
-                    "plain message instead"
-                )
+                rendered = _sanitize_stable_markdown(text)
+                if state.streamable and rendered:
+                    try:
+                        await self._send_stream_rendered(state, rendered)
+                    except QQError:
+                        LOGGER.warning(
+                            "QQ stream open failed; deferring plain delivery",
+                            exc_info=True,
+                        )
+                        state.failed = True
+            except asyncio.CancelledError:
+                # The request may have reached QQ. Never replay this stream.
                 state.failed = True
-                try:
-                    await self._replace_with_final(state, text)
-                except BaseException:
-                    self._streams.pop(ref, None)
-                    raise
-            except BaseException:
-                self._streams.pop(ref, None)
                 raise
-        self._schedule_idle_finalize(ref)
+            finally:
+                self._schedule_idle_finalize(ref)
         return ref
 
     async def send_final_text(
@@ -1365,8 +1400,11 @@ class QQAdapter:
             if self._streams.get(message) is not state:
                 LOGGER.debug("QQ edit_text ignored for a completed message")
                 return
+            if state.delivery_exhausted:
+                return
             if state.pending_text is None and text == state.last_source_text:
                 return
+            state.last_source_text = text
             if state.pending_text is not None:
                 state.pending_text = text
                 self._schedule_idle_finalize(message)
@@ -1387,14 +1425,19 @@ class QQAdapter:
             if state.streamable and rendered != state.last_rendered_text:
                 try:
                     await self._send_stream_rendered(state, rendered)
-                except QQTransportError:
+                except QQError:
                     LOGGER.warning(
-                        "QQ stream continuation failed with a transport "
-                        "error; the final text will be sent as a plain message"
+                        "QQ stream continuation failed; deferring plain delivery",
+                        exc_info=True,
                     )
                     state.failed = True
-            state.last_source_text = text
-            self._schedule_idle_finalize(message)
+                except asyncio.CancelledError:
+                    state.failed = True
+                    raise
+                finally:
+                    self._schedule_idle_finalize(message)
+            else:
+                self._schedule_idle_finalize(message)
 
     async def send_file(
         self, conversation: ConversationRef, file: OutboundFile
@@ -1481,107 +1524,141 @@ class QQAdapter:
 
     def _schedule_idle_finalize(self, message: MessageRef) -> None:
         state = self._streams.get(message)
-        if state is None:
+        if state is None or state.delivery_exhausted or self._closed:
             return
         if state.idle_task is not None and not state.idle_task.done():
+            # A request owns its lock and must settle before another flush.
+            if state.idle_sending:
+                return
             state.idle_task.cancel()
         state.idle_task = asyncio.create_task(
             self._finalize_after_idle(message), name="qq-stream-idle-finalize"
         )
 
+    async def _retire_idle_timer(self, state: _StreamState) -> None:
+        task = state.idle_task
+        if task is not None and not task.done():
+            if not state.idle_sending:
+                task.cancel()
+            # Do not let cancellation of this waiter cancel an in-flight flush.
+            await _settle_delivery_task(task, ignore_task_cancellation=True)
+
     async def _finalize_after_idle(self, message: MessageRef) -> None:
-        retry = False
+        state = self._streams.get(message)
+        if state is None:
+            return
         try:
             await self._sleep(self._idle_timeout)
-            state = self._streams.get(message)
-            if state is None:
-                return
             async with state.lock:
                 if self._streams.get(message) is not state:
                     return
+                state.idle_sending = True
                 await self._flush_stream_state(state)
         except asyncio.CancelledError:
             raise
-        except QQTransportError:
-            retry = True
-            LOGGER.error("QQ stream idle flush transport failed; retrying")
-        except QQAPIError as error:
-            LOGGER.error("QQ stream idle flush failed (code %d)", error.code)
         except Exception:
             LOGGER.exception("QQ stream idle flush failed")
         finally:
-            state = self._streams.get(message)
-            if state is not None and state.idle_task is asyncio.current_task():
+            if state.idle_task is asyncio.current_task():
+                state.idle_sending = False
                 state.idle_task = None
-            if retry and state is not None and not self._closed:
-                self._schedule_idle_finalize(message)
 
-    async def _flush_conversation_streams(
-        self, conversation: ConversationRef
-    ) -> None:
+    async def _flush_conversation_streams(self, conversation: ConversationRef) -> None:
         states = [
             (message, state)
             for message, state in self._streams.items()
             if message.conversation == conversation
         ]
         for message, state in states:
-            idle_task = state.idle_task
-            if idle_task is not None and not idle_task.done():
-                idle_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await idle_task
+            await self._retire_idle_timer(state)
             async with state.lock:
                 if self._streams.get(message) is not state:
                     continue
-                await self._flush_stream_state(state)
-                self._streams.pop(message, None)
+                try:
+                    await self._flush_stream_state(state)
+                except asyncio.CancelledError:
+                    self._schedule_idle_finalize(message)
+                    raise
+                finally:
+                    if state.finalized or state.delivery_exhausted:
+                        self._streams.pop(message, None)
 
     async def _flush_stream_state(self, state: _StreamState) -> None:
+        if state.delivery_exhausted:
+            return
         if state.pending_text is not None:
-            await self._replace_with_final(state, state.pending_text)
+            await self._deliver_plain(state, state.pending_text)
             return
         if state.finalized:
             return
-        if state.failed:
-            await self._replace_with_final(state, state.last_source_text)
-            return
-        if not state.streamable:
-            await self._send_active_final(state, state.last_source_text)
+        if state.failed or not state.streamable:
+            await self._deliver_plain(state, state.last_source_text)
             return
 
-        rendered = _sanitize_stable_markdown(
-            state.last_source_text, final=True
-        )
+        rendered = _sanitize_stable_markdown(state.last_source_text, final=True)
         if not rendered.startswith(state.last_rendered_text):
-            await self._replace_with_final(state, state.last_source_text)
+            await self._deliver_plain(state, state.last_source_text)
             return
         try:
             if rendered != state.last_rendered_text:
                 await self._send_stream_rendered(state, rendered)
             if state.stream_msg_id is not None:
                 await self._finish_stream(state)
-        except QQTransportError:
-            LOGGER.warning(
-                "QQ stream frame failed with a transport error; delivering "
-                "the final text as a plain message"
-            )
+        except QQError:
+            LOGGER.warning("QQ stream frame failed; delivering plain text", exc_info=True)
             state.failed = True
-            await self._replace_with_final(state, state.last_source_text)
+            await self._deliver_plain(state, state.last_source_text)
             return
+        except asyncio.CancelledError:
+            state.failed = True
+            raise
         if state.stream_msg_id is None:
-            await self._send_active_final(
-                state, state.last_source_text, use_reserved_reply=True
-            )
+            await self._deliver_plain(state, state.last_source_text)
 
-    async def _send_stream_rendered(
-        self, state: _StreamState, rendered: str
-    ) -> None:
+    async def _deliver_plain(self, state: _StreamState, source: str) -> None:
+        # Caller cancellation must not reset the attempt budget or interrupt
+        # the final warning. Each request below has its own bounded deadline.
+        await _settle_delivery_task(
+            asyncio.create_task(
+                self._try_deliver_plain(state, source), name="qq-plain-recovery"
+            )
+        )
+
+    async def _try_deliver_plain(self, state: _StreamState, source: str) -> None:
+        # Two delivery attempts, each with the transport's bounded retries.
+        # Keep the lock until recovery ends so later segments cannot overtake it.
+        for attempt in range(2):
+            try:
+                await _complete_delivery(lambda: self._replace_with_final(state, source))
+                return
+            except QQError:
+                state.failed = True
+                LOGGER.warning(
+                    "QQ plain delivery failed (attempt %d/2)",
+                    attempt + 1,
+                    exc_info=True,
+                )
+        state.delivery_exhausted = True
+        state.pending_text = None
+        LOGGER.error("QQ answer delivery exhausted; abandoning stream")
+        try:
+            async with asyncio.timeout(QQ_DELIVERY_TIMEOUT_SECONDS):
+                await self.send_notice_text(
+                    state.conversation,
+                    "QQ could not deliver part of this answer. Please ask me to resend it.",
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("QQ delivery warning could not be sent")
+
+    async def _send_stream_rendered(self, state: _StreamState, rendered: str) -> None:
+        await _complete_delivery(lambda: self._commit_stream_rendered(state, rendered))
+
+    async def _commit_stream_rendered(self, state: _StreamState, rendered: str) -> None:
         if not rendered.startswith(state.last_rendered_text):
             raise QQProtocolError("QQ rendered stream prefix changed")
-        continuation = (
-            state.last_text
-            + rendered[len(state.last_rendered_text) :]
-        )
+        continuation = state.last_text + rendered[len(state.last_rendered_text) :]
         await self._stop_typing(state.conversation)
         result, sent_text = await self._with_defang_retry(
             lambda content: self._api.send_c2c_stream_message(
@@ -1616,14 +1693,24 @@ class QQAdapter:
     ) -> None:
         await self._stop_typing(state.conversation)
         sanitized = sanitize_markdown(source)
+        msg_id = state.anchor_msg_id if use_reserved_reply else None
+        event_id = state.event_id if use_reserved_reply else None
+        msg_seq = state.msg_seq if use_reserved_reply else None
+        if state.failed:
+            anchor = self._anchors.get(state.conversation)
+            msg_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+            msg_id = anchor.msg_id if anchor is not None and msg_seq is not None else None
+            event_id = (
+                anchor.event_id if anchor is not None and msg_seq is not None else None
+            )
         result, sent_text = await self._with_defang_retry(
             lambda content: self._api.send_c2c_message(
                 state.openid,
                 msg_type=MSG_TYPE_MARKDOWN,
                 markdown={"content": content},
-                msg_id=state.anchor_msg_id if use_reserved_reply else None,
-                event_id=state.event_id if use_reserved_reply else None,
-                msg_seq=state.msg_seq if use_reserved_reply else None,
+                msg_id=msg_id,
+                event_id=event_id,
+                msg_seq=msg_seq,
             ),
             sanitized,
         )
@@ -1661,7 +1748,8 @@ class QQAdapter:
             and not state.failed
         ):
             try:
-                await self._finish_stream(state)
+                # The replacement transaction already owns a delivery deadline.
+                await self._commit_stream_finish(state)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1678,6 +1766,9 @@ class QQAdapter:
         )
 
     async def _finish_stream(self, state: _StreamState) -> None:
+        await _complete_delivery(lambda: self._commit_stream_finish(state))
+
+    async def _commit_stream_finish(self, state: _StreamState) -> None:
         if state.stream_msg_id is None:
             return
         await self._with_defang_retry(
@@ -1744,6 +1835,9 @@ class QQAdapter:
         images, videos, files, audios = await self._collect_attachments(
             data.get("attachments")
         )
+
+        if not text.strip() and not (images or videos or files or audios):
+            return
 
         self._anchors[conversation] = _ReplyAnchor(
             msg_id=msg_id, event_id=event_id, received_at=self._clock()
