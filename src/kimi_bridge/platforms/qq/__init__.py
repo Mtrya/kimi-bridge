@@ -71,6 +71,7 @@ from ..base import (
     MessageRef,
     OutboundFile,
 )
+from .markdown import split_markdown, stable_emphasis
 
 
 LOGGER = logging.getLogger(__name__)
@@ -973,44 +974,22 @@ def sanitize_markdown(text: str) -> str:
     unless forced with a trailing zero-width space. Headings, bold/italic,
     lists, and quotes pass through unchanged; invisible rendering aids keep
     punctuation and symbols inside emphasis spans while making their closing
-    markers unambiguous to QQ. If those rendering aids would exceed QQ's
-    message limit, formatting degrades without dropping content.
+    markers unambiguous to QQ. The adapter splits rendered text into native
+    messages, preserving emphasis and its rendering aids at each boundary.
     """
 
-    return _render_markdown(text, force_line_breaks=_force_line_breaks)
-
-
-def _render_markdown(
-    source: str, *, force_line_breaks: Callable[[str], str]
-) -> str:
-    rendered = _flatten_fenced_code(source)
+    rendered = _flatten_fenced_code(text)
     rendered = _flatten_tables(rendered)
     rendered = _strip_inline_code(rendered)
     rendered = _preserve_emphasis_closures(rendered)
     rendered = _preserve_emphasis_spacing(rendered)
-    rendered = force_line_breaks(rendered)
-    if len(rendered) <= QQ_TEXT_LIMIT:
-        return rendered
-
-    return _render_compact_markdown(source)
-
-
-def _render_compact_markdown(source: str) -> str:
-    compact = _strip_fenced_code(source)
-    compact = _strip_table_separators(compact)
-    compact = _strip_inline_code(compact)
-    compact = _preserve_emphasis_closures(compact)
-    compact = _preserve_emphasis_spacing(compact)
-    if len(compact) <= QQ_TEXT_LIMIT:
-        return compact
-    raise ValueError(
-        f"QQ text exceeds {QQ_TEXT_LIMIT} characters after rendering"
-    )
+    return _force_line_breaks(rendered)
 
 
 def _sanitize_stable_markdown(text: str, *, final: bool = False) -> str:
     source = text if final else _stable_markdown_source(text)
-    return _render_compact_markdown(source)
+    rendered = sanitize_markdown(source)
+    return rendered if final else stable_emphasis(rendered)
 
 
 def _stable_markdown_source(text: str) -> str:
@@ -1035,16 +1014,21 @@ def defang_urls(text: str) -> str:
     return _URL_RE.sub(lambda match: match.group(2).replace(".", "[.]"), text)
 
 
+def _qq_text_length(text: str) -> int:
+    # URL rejection retries can expand dotted addresses. Reserve only positive
+    # growth per URL; already accepted prefixes may retain their original URLs.
+    return len(text) + sum(
+        max(0, 2 * match.group(2).count(".") - len(match.group(1)))
+        for match in _URL_RE.finditer(text)
+    )
+
+
 def _flatten_fenced_code(text: str) -> str:
     def _replace(match: re.Match[str]) -> str:
         body = match.group(1).rstrip("\n")
         return "\n".join(f"    {line}" for line in body.splitlines())
 
     return _FENCE_RE.sub(_replace, text)
-
-
-def _strip_fenced_code(text: str) -> str:
-    return _FENCE_RE.sub(lambda match: match.group(1).rstrip("\n"), text)
 
 
 def _strip_inline_code(text: str) -> str:
@@ -1089,24 +1073,16 @@ def _flatten_tables(text: str) -> str:
     return "\n".join(lines)
 
 
-def _strip_table_separators(text: str) -> str:
-    return "\n".join(
-        line
-        for line in text.split("\n")
-        if not ("|" in line and _TABLE_SEPARATOR_RE.match(line))
-    )
-
-
 def _force_line_breaks(text: str) -> str:
+    # Include the trailing newline and paragraph boundaries: deciding from the
+    # next line would revise an already streamed prefix when that line arrives.
     lines = text.split("\n")
-    last = len(lines) - 1
-    forced = [
+    return "\n".join(
         line + _ZERO_WIDTH_SPACE
-        if index != last and line and lines[index + 1] != ""
+        if index < len(lines) - 1 and line and not line.endswith(_ZERO_WIDTH_SPACE)
         else line
         for index, line in enumerate(lines)
-    ]
-    return "\n".join(forced)
+    )
 
 
 def _require_response_id(data: dict[str, Any], context: str) -> str:
@@ -1189,7 +1165,7 @@ class _ReplyAnchor:
 
 @dataclass(slots=True)
 class _StreamState:
-    """Per-`MessageRef` `stream_messages` bookkeeping."""
+    """One physical QQ message belonging to a logical text stream."""
 
     conversation: ConversationRef
     openid: str
@@ -1202,11 +1178,22 @@ class _StreamState:
     next_index: int = 0
     last_text: str = ""
     last_rendered_text: str = ""
-    last_source_text: str = ""
+    desired_text: str = ""
     pending_text: str | None = None
     finalized: bool = False
     failed: bool = False
     delivery_exhausted: bool = False
+
+
+@dataclass(slots=True)
+class _TextStream:
+    conversation: ConversationRef
+    last_source_text: str
+    rendered_text: str = ""
+    finalized: bool = False
+    sealed_text: str = ""
+    sealed_parts: list[str] = field(default_factory=list)
+    segments: list[_StreamState] = field(default_factory=list)
     idle_task: asyncio.Task[None] | None = None
     idle_sending: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1216,7 +1203,7 @@ class QQAdapter:
     """C2C-only QQ official bot adapter: gateway inbound, streamed outbound."""
 
     name = "qq"
-    message_limit = QQ_TEXT_LIMIT
+    message_limit = None
     supports_edits = True
     supports_interactions = False
     message_edit_limit = None
@@ -1253,8 +1240,9 @@ class QQAdapter:
         self._on_message: InboundHandler | None = None
         self._on_interaction: InteractionHandler | None = None
         self._anchors: dict[ConversationRef, _ReplyAnchor] = {}
-        self._streams: dict[MessageRef, _StreamState] = {}
+        self._streams: dict[MessageRef, _TextStream] = {}
         self._conversation_locks: dict[ConversationRef, asyncio.Lock] = {}
+        self._outbound_locks: dict[ConversationRef, asyncio.Lock] = {}
         self._typing_tasks: dict[ConversationRef, asyncio.Task[None]] = {}
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -1312,41 +1300,119 @@ class QQAdapter:
         if self._closed:
             raise RuntimeError("QQ adapter is closed")
         await self._flush_conversation_streams(conversation)
-        openid = conversation.conversation_id
-        anchor = self._anchors.get(conversation)
-        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
-
         ref = MessageRef(conversation, f"text-{self._next_text_handle}")
         self._next_text_handle += 1
-        state = _StreamState(
-            conversation=conversation,
-            openid=openid,
-            anchor_msg_id=anchor.msg_id if anchor is not None else "",
-            event_id=anchor.event_id if anchor is not None else None,
-            msg_seq=reply_seq or 0,
-            streamable=anchor is not None and reply_seq is not None,
-            last_source_text=text,
+        state = _TextStream(
+            conversation, text, segments=[self._new_segment(conversation)]
         )
         self._streams[ref] = state
         async with state.lock:
             try:
-                rendered = _sanitize_stable_markdown(text)
-                if state.streamable and rendered:
-                    try:
-                        await self._send_stream_rendered(state, rendered)
-                    except QQError:
-                        LOGGER.warning(
-                            "QQ stream open failed; deferring plain delivery",
-                            exc_info=True,
-                        )
-                        state.failed = True
-            except asyncio.CancelledError:
-                # The request may have reached QQ. Never replay this stream.
-                state.failed = True
-                raise
+                await self._update_text_stream(state)
             finally:
                 self._schedule_idle_finalize(ref)
         return ref
+
+    def _new_segment(self, conversation: ConversationRef) -> _StreamState:
+        anchor = self._anchors.get(conversation)
+        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+        return _StreamState(
+            conversation=conversation,
+            openid=conversation.conversation_id,
+            anchor_msg_id=anchor.msg_id if anchor is not None else "",
+            event_id=anchor.event_id if anchor is not None else None,
+            msg_seq=reply_seq or 0,
+            streamable=anchor is not None and reply_seq is not None,
+        )
+
+    async def _update_text_stream(
+        self, stream: _TextStream, *, final: bool = False
+    ) -> None:
+        async with self._outbound_lock(stream.conversation):
+            await self._update_text_stream_locked(stream, final=final)
+
+    async def _update_text_stream_locked(
+        self, stream: _TextStream, *, final: bool = False
+    ) -> None:
+        stream.finalized = False
+        rendered = _sanitize_stable_markdown(stream.last_source_text, final=final)
+        if (
+            not final
+            and stream.rendered_text.startswith(rendered)
+            and rendered != stream.rendered_text
+        ):
+            # An idle flush may have sent a tail that is still buffered in the
+            # next growing snapshot. Do not retract it while waiting for a line.
+            return
+        # DONE must append a character even when the generating frame is full.
+        limit = QQ_TEXT_LIMIT - len(_QQ_STREAM_DONE_SUFFIX)
+        if stream.sealed_parts and rendered.startswith(stream.sealed_text):
+            remainder = rendered[len(stream.sealed_text) :]
+            parts = stream.sealed_parts + (
+                split_markdown(remainder, limit, measure=_qq_text_length)
+                if remainder
+                else []
+            )
+        else:
+            stream.sealed_text = ""
+            stream.sealed_parts = []
+            parts = split_markdown(rendered, limit, measure=_qq_text_length)
+        for index, part in enumerate(parts):
+            if index == len(stream.segments):
+                stream.segments.append(self._new_segment(stream.conversation))
+            state = stream.segments[index]
+            await self._update_segment(state, part)
+            if final or index < len(parts) - 1:
+                await self._flush_stream_state(state)
+        # A correction may shorten an answer that already occupied multiple messages.
+        for state in stream.segments[len(parts) :]:
+            if state.delivered_message_id is not None:
+                try:
+                    await self._api.delete_c2c_message(
+                        state.openid, state.delivered_message_id
+                    )
+                except QQError:
+                    LOGGER.warning(
+                        "QQ could not withdraw obsolete answer segment", exc_info=True
+                    )
+                    if state.stream_msg_id is not None and not state.finalized:
+                        try:
+                            await self._finish_stream(state)
+                        except QQError:
+                            LOGGER.warning(
+                                "QQ could not finish obsolete answer segment",
+                                exc_info=True,
+                            )
+        del stream.segments[len(parts) :]
+        stream.rendered_text = rendered
+        stream.finalized = final
+        if final and stable_emphasis(rendered) == rendered:
+            stream.sealed_text = rendered
+            stream.sealed_parts = parts
+
+    async def _update_segment(self, state: _StreamState, rendered: str) -> None:
+        if state.delivery_exhausted or rendered == state.desired_text:
+            return
+        state.desired_text = rendered
+        if state.pending_text is not None or state.finalized:
+            state.pending_text = rendered
+            return
+        if state.failed:
+            return
+        if not rendered.startswith(state.last_rendered_text):
+            state.pending_text = rendered
+            return
+        if state.streamable and rendered != state.last_rendered_text:
+            try:
+                await self._send_stream_rendered(state, rendered)
+            except QQError:
+                LOGGER.warning(
+                    "QQ stream frame failed; deferring plain delivery", exc_info=True
+                )
+                state.failed = True
+            except asyncio.CancelledError:
+                state.failed = True
+                raise
 
     async def send_final_text(
         self, conversation: ConversationRef, text: str
@@ -1366,28 +1432,46 @@ class QQAdapter:
         stop_typing: bool,
     ) -> MessageRef:
         self._validate_conversation(conversation)
+        async with self._outbound_lock(conversation):
+            return await self._send_regular_text_locked(
+                conversation, text, stop_typing=stop_typing
+            )
+
+    async def _send_regular_text_locked(
+        self,
+        conversation: ConversationRef,
+        text: str,
+        *,
+        stop_typing: bool,
+    ) -> MessageRef:
         if stop_typing:
             await self._stop_typing(conversation)
         openid = conversation.conversation_id
-        sanitized = sanitize_markdown(text)
-        anchor = self._anchors.get(conversation)
-        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
-        result, _sent_text = await self._with_defang_retry(
-            lambda content: self._api.send_c2c_message(
-                openid,
-                msg_type=MSG_TYPE_MARKDOWN,
-                markdown={"content": content},
-                msg_id=anchor.msg_id
-                if anchor is not None and reply_seq is not None
-                else None,
-                event_id=anchor.event_id
-                if anchor is not None and reply_seq is not None
-                else None,
-                msg_seq=reply_seq,
-            ),
-            sanitized,
+        parts = split_markdown(
+            sanitize_markdown(text), QQ_TEXT_LIMIT, measure=_qq_text_length
         )
-        message_id = _require_response_id(result, "messages")
+        message_id = ""
+        for sanitized in parts:
+            anchor = self._anchors.get(conversation)
+            reply_seq = (
+                anchor.reserve(now=self._clock()) if anchor is not None else None
+            )
+            result, _sent_text = await self._with_defang_retry(
+                lambda content: self._api.send_c2c_message(
+                    openid,
+                    msg_type=MSG_TYPE_MARKDOWN,
+                    markdown={"content": content},
+                    msg_id=anchor.msg_id
+                    if anchor is not None and reply_seq is not None
+                    else None,
+                    event_id=anchor.event_id
+                    if anchor is not None and reply_seq is not None
+                    else None,
+                    msg_seq=reply_seq,
+                ),
+                sanitized,
+            )
+            message_id = _require_response_id(result, "messages")
         return MessageRef(conversation, message_id)
 
     async def edit_text(self, message: MessageRef, text: str) -> None:
@@ -1400,43 +1484,12 @@ class QQAdapter:
             if self._streams.get(message) is not state:
                 LOGGER.debug("QQ edit_text ignored for a completed message")
                 return
-            if state.delivery_exhausted:
-                return
-            if state.pending_text is None and text == state.last_source_text:
+            if text == state.last_source_text:
                 return
             state.last_source_text = text
-            if state.pending_text is not None:
-                state.pending_text = text
-                self._schedule_idle_finalize(message)
-                return
-            if state.finalized:
-                state.pending_text = text
-                self._schedule_idle_finalize(message)
-                return
-            if state.failed:
-                state.last_source_text = text
-                self._schedule_idle_finalize(message)
-                return
-            rendered = _sanitize_stable_markdown(text)
-            if not rendered.startswith(state.last_rendered_text):
-                state.pending_text = text
-                self._schedule_idle_finalize(message)
-                return
-            if state.streamable and rendered != state.last_rendered_text:
-                try:
-                    await self._send_stream_rendered(state, rendered)
-                except QQError:
-                    LOGGER.warning(
-                        "QQ stream continuation failed; deferring plain delivery",
-                        exc_info=True,
-                    )
-                    state.failed = True
-                except asyncio.CancelledError:
-                    state.failed = True
-                    raise
-                finally:
-                    self._schedule_idle_finalize(message)
-            else:
+            try:
+                await self._update_text_stream(state)
+            finally:
                 self._schedule_idle_finalize(message)
 
     async def send_file(
@@ -1463,23 +1516,24 @@ class QQAdapter:
         if not isinstance(file_info, str) or not file_info:
             raise QQProtocolError("QQ media upload response omitted file_info")
 
-        anchor = self._anchors.get(conversation)
-        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
-        if anchor is not None and reply_seq is not None:
-            result = await self._api.send_c2c_message(
-                openid,
-                msg_type=MSG_TYPE_MEDIA,
-                media={"file_info": file_info},
-                msg_id=anchor.msg_id,
-                event_id=anchor.event_id,
-                msg_seq=reply_seq,
-            )
-        else:
-            result = await self._api.send_c2c_message(
-                openid, msg_type=MSG_TYPE_MEDIA, media={"file_info": file_info}
-            )
-        message_id = _require_response_id(result, "messages")
-        return MessageRef(conversation, message_id)
+        async with self._outbound_lock(conversation):
+            anchor = self._anchors.get(conversation)
+            reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+            if anchor is not None and reply_seq is not None:
+                result = await self._api.send_c2c_message(
+                    openid,
+                    msg_type=MSG_TYPE_MEDIA,
+                    media={"file_info": file_info},
+                    msg_id=anchor.msg_id,
+                    event_id=anchor.event_id,
+                    msg_seq=reply_seq,
+                )
+            else:
+                result = await self._api.send_c2c_message(
+                    openid, msg_type=MSG_TYPE_MEDIA, media={"file_info": file_info}
+                )
+            message_id = _require_response_id(result, "messages")
+            return MessageRef(conversation, message_id)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
@@ -1495,6 +1549,11 @@ class QQAdapter:
         self, message: MessageRef, outcome: InteractionOutcome
     ) -> None:
         return None
+
+    def _outbound_lock(self, conversation: ConversationRef) -> asyncio.Lock:
+        # Separate from lifecycle locks: opening a stream may await an idle
+        # flush, which must be able to acquire this outbound ordering lock.
+        return self._outbound_locks.setdefault(conversation, asyncio.Lock())
 
     def _validate_conversation(self, conversation: ConversationRef) -> None:
         if conversation.platform != "qq":
@@ -1524,7 +1583,7 @@ class QQAdapter:
 
     def _schedule_idle_finalize(self, message: MessageRef) -> None:
         state = self._streams.get(message)
-        if state is None or state.delivery_exhausted or self._closed:
+        if state is None or self._closed:
             return
         if state.idle_task is not None and not state.idle_task.done():
             # A request owns its lock and must settle before another flush.
@@ -1535,7 +1594,7 @@ class QQAdapter:
             self._finalize_after_idle(message), name="qq-stream-idle-finalize"
         )
 
-    async def _retire_idle_timer(self, state: _StreamState) -> None:
+    async def _retire_idle_timer(self, state: _TextStream) -> None:
         task = state.idle_task
         if task is not None and not task.done():
             if not state.idle_sending:
@@ -1553,7 +1612,7 @@ class QQAdapter:
                 if self._streams.get(message) is not state:
                     return
                 state.idle_sending = True
-                await self._flush_stream_state(state)
+                await self._update_text_stream(state, final=True)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1575,12 +1634,18 @@ class QQAdapter:
                 if self._streams.get(message) is not state:
                     continue
                 try:
-                    await self._flush_stream_state(state)
+                    await _settle_delivery_task(
+                        asyncio.create_task(
+                            self._update_text_stream(state, final=True),
+                            name="qq-text-finalize",
+                        )
+                    )
                 except asyncio.CancelledError:
-                    self._schedule_idle_finalize(message)
+                    if not state.finalized:
+                        self._schedule_idle_finalize(message)
                     raise
                 finally:
-                    if state.finalized or state.delivery_exhausted:
+                    if state.finalized:
                         self._streams.pop(message, None)
 
     async def _flush_stream_state(self, state: _StreamState) -> None:
@@ -1592,12 +1657,12 @@ class QQAdapter:
         if state.finalized:
             return
         if state.failed or not state.streamable:
-            await self._deliver_plain(state, state.last_source_text)
+            await self._deliver_plain(state, state.desired_text)
             return
 
-        rendered = _sanitize_stable_markdown(state.last_source_text, final=True)
+        rendered = state.desired_text
         if not rendered.startswith(state.last_rendered_text):
-            await self._deliver_plain(state, state.last_source_text)
+            await self._deliver_plain(state, state.desired_text)
             return
         try:
             if rendered != state.last_rendered_text:
@@ -1605,31 +1670,33 @@ class QQAdapter:
             if state.stream_msg_id is not None:
                 await self._finish_stream(state)
         except QQError:
-            LOGGER.warning("QQ stream frame failed; delivering plain text", exc_info=True)
+            LOGGER.warning(
+                "QQ stream frame failed; delivering plain text", exc_info=True
+            )
             state.failed = True
-            await self._deliver_plain(state, state.last_source_text)
+            await self._deliver_plain(state, state.desired_text)
             return
         except asyncio.CancelledError:
             state.failed = True
             raise
         if state.stream_msg_id is None:
-            await self._deliver_plain(state, state.last_source_text)
+            await self._deliver_plain(state, state.desired_text)
 
-    async def _deliver_plain(self, state: _StreamState, source: str) -> None:
+    async def _deliver_plain(self, state: _StreamState, rendered: str) -> None:
         # Caller cancellation must not reset the attempt budget or interrupt
         # the final warning. Each request below has its own bounded deadline.
         await _settle_delivery_task(
             asyncio.create_task(
-                self._try_deliver_plain(state, source), name="qq-plain-recovery"
+                self._try_deliver_plain(state, rendered), name="qq-plain-recovery"
             )
         )
 
-    async def _try_deliver_plain(self, state: _StreamState, source: str) -> None:
+    async def _try_deliver_plain(self, state: _StreamState, rendered: str) -> None:
         # Two delivery attempts, each with the transport's bounded retries.
         # Keep the lock until recovery ends so later segments cannot overtake it.
         for attempt in range(2):
             try:
-                await _complete_delivery(lambda: self._replace_with_final(state, source))
+                await _complete_delivery(lambda: self._replace_with_final(state, rendered))
                 return
             except QQError:
                 state.failed = True
@@ -1643,9 +1710,11 @@ class QQAdapter:
         LOGGER.error("QQ answer delivery exhausted; abandoning stream")
         try:
             async with asyncio.timeout(QQ_DELIVERY_TIMEOUT_SECONDS):
-                await self.send_notice_text(
+                # Recovery already owns the conversation's outbound lock.
+                await self._send_regular_text_locked(
                     state.conversation,
                     "QQ could not deliver part of this answer. Please ask me to resend it.",
+                    stop_typing=False,
                 )
         except asyncio.CancelledError:
             raise
@@ -1687,12 +1756,12 @@ class QQAdapter:
     async def _send_active_final(
         self,
         state: _StreamState,
-        source: str,
+        rendered: str,
         *,
         use_reserved_reply: bool = False,
     ) -> None:
         await self._stop_typing(state.conversation)
-        sanitized = sanitize_markdown(source)
+        sanitized = rendered
         msg_id = state.anchor_msg_id if use_reserved_reply else None
         event_id = state.event_id if use_reserved_reply else None
         msg_seq = state.msg_seq if use_reserved_reply else None
@@ -1719,12 +1788,12 @@ class QQAdapter:
         state.delivered_message_id = _require_response_id(result, "messages")
         state.last_text = sent_text
         state.last_rendered_text = sanitized
-        state.last_source_text = source
+        state.desired_text = rendered
         state.pending_text = None
         state.finalized = True
 
     async def _replace_with_final(
-        self, state: _StreamState, source: str
+        self, state: _StreamState, rendered: str
     ) -> None:
         withdrawn = state.delivered_message_id is None
         if state.delivered_message_id is not None:
@@ -1759,7 +1828,7 @@ class QQAdapter:
                 )
         await self._send_active_final(
             state,
-            source,
+            rendered,
             use_reserved_reply=(
                 state.streamable and state.delivered_message_id is None
             ),
