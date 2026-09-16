@@ -114,7 +114,8 @@ InteractionHandler = Callable[
 
 class PlatformAdapter(Protocol):
     name: str
-    message_limit: int
+    # None delegates physical message splitting to the adapter.
+    message_limit: int | None
     supports_edits: bool
     supports_interactions: bool
     message_edit_limit: int | None

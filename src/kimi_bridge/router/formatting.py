@@ -68,7 +68,9 @@ def _title_from_text(text: str) -> str:
     return collapsed[:SESSION_TITLE_LIMIT]
 
 
-def _chunk_text(text: str, limit: int) -> list[str]:
+def _chunk_text(text: str, limit: int | None) -> list[str]:
+    if limit is None:
+        return [text] if text else []
     if limit <= 0:
         raise ValueError("message limit must be positive")
     if not text:

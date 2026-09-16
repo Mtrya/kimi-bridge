@@ -525,7 +525,7 @@ class FakeAdapter:
     def __init__(
         self,
         *,
-        message_limit: int = 1000,
+        message_limit: int | None = 1000,
         supports_edits: bool = True,
         supports_interactions: bool = True,
         message_edit_limit: int | None = 20,
@@ -6232,3 +6232,39 @@ async def test_voice_message_title_and_no_inbox_files(tmp_path: Path) -> None:
     assert isinstance(content, PromptContent)
     assert content.text is not None
     assert content.text.startswith(VOICE_TRANSCRIPT_PREFIX)
+
+
+async def test_adapter_owned_splitting_receives_complete_text_snapshots(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(message_limit=None)
+    now = [100.0]
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+        clock=lambda: now[0],
+        first_flush_min_chars=0,
+    )
+    source = "**" + "x" * 11000 + "**"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        client.emit("session-1", _event("turn.started"))
+        client.emit("session-1", _event("assistant.delta", delta=source, offset=0))
+        await _wait_for(lambda: bool(adapter.sent))
+        assert [text for _, _, text in adapter.sent] == [source]
+        now[0] += 100
+        client.emit(
+            "session-1", _event("assistant.delta", delta=" tail", offset=len(source))
+        )
+        await _wait_for(lambda: bool(adapter.edits))
+        assert adapter.edits[-1][1] == source + " tail"
+        assert len(adapter.sent) == 1
+        await router._send_chunked(
+            adapter, _message("").conversation, source, terminal=True
+        )
+        assert adapter.sent[-1][2] == source
+    finally:
+        await router.close()
