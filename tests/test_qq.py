@@ -1272,7 +1272,7 @@ def test_sanitize_markdown_preserves_symbols_inside_emphasis() -> None:
     assert sanitize_markdown("2 * 3 * 4") == "2 * 3 * 4"
 
 
-def test_compact_markdown_keeps_emphasis_rendering_aids() -> None:
+def test_stream_markdown_keeps_emphasis_rendering_aids() -> None:
     result = qq_module._sanitize_stable_markdown(
         "这是**重点。**继续 and **bold** more", final=True
     )
@@ -1282,18 +1282,19 @@ def test_compact_markdown_keeps_emphasis_rendering_aids() -> None:
 
 def test_sanitize_markdown_forces_single_line_breaks() -> None:
     result = sanitize_markdown("line1\nline2\n\nline3")
-    assert result == "line1\u200b\nline2\n\nline3"
+    assert result == "line1\u200b\nline2\u200b\n\nline3"
 
 
-def test_sanitize_markdown_preserves_content_within_qq_limit() -> None:
+def test_sanitize_markdown_keeps_formatting_beyond_native_message_limit() -> None:
     lines = 1_000
     source = "```\n" + "\n".join("x" for _ in range(lines)) + "\n```"
 
     result = sanitize_markdown(source)
 
     assert len(source) < QQ_TEXT_LIMIT
-    assert len(result) <= QQ_TEXT_LIMIT
-    assert result.count("x") == lines
+    assert len(result) > QQ_TEXT_LIMIT
+    assert result.count("    x") == lines
+    assert result.count("\u200b\n") == lines - 1
 
 
 def test_defang_urls_strips_scheme_and_brackets_dots() -> None:
@@ -1731,7 +1732,7 @@ async def test_edit_text_continues_stream_reusing_seq_incrementing_index() -> No
     assert all(
         frame["stream_msg_id"] in (None, "stream-1") for frame in api.stream_frames
     )
-    assert api.stream_frames[-1]["content_raw"] == "hello\nworld\nagain\n"
+    assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("hello\nworld\nagain\n")
 
 
 async def test_failed_stream_edit_retains_latest_source_for_plain_delivery() -> None:
@@ -1770,7 +1771,7 @@ async def test_stream_buffers_incomplete_line_until_it_becomes_stable() -> None:
     await adapter.edit_text(ref, "hello world\n")
 
     assert len(api.stream_frames) == 1
-    assert api.stream_frames[0]["content_raw"] == "hello world\n"
+    assert api.stream_frames[0]["content_raw"] == sanitize_markdown("hello world\n")
 
 
 async def test_stream_accepts_revision_of_buffered_tail() -> None:
@@ -1783,7 +1784,7 @@ async def test_stream_accepts_revision_of_buffered_tail() -> None:
     await adapter.edit_text(ref, "stable\nrevised")
 
     assert len(api.stream_frames) == 1
-    assert api.stream_frames[0]["content_raw"] == "stable\n"
+    assert api.stream_frames[0]["content_raw"] == sanitize_markdown("stable\n")
     assert adapter._streams[ref].segments[0].pending_text is None
 
     await adapter.edit_text(ref, "stable\nrevised\n")
@@ -1808,7 +1809,7 @@ async def test_stream_buffers_unclosed_fence_until_the_block_closes() -> None:
     await adapter.edit_text(ref, "before\n```python\nprint('hi')\n")
 
     assert len(api.stream_frames) == 1
-    assert api.stream_frames[0]["content_raw"] == "before\n"
+    assert api.stream_frames[0]["content_raw"] == sanitize_markdown("before\n")
 
     await adapter.edit_text(
         ref, "before\n```python\nprint('hi')\n```"
@@ -1847,7 +1848,7 @@ async def test_streaming_list_rendering_remains_prefix_stable() -> None:
     assert not api.withdrawals
 
 
-async def test_stream_keeps_compact_rendering_near_text_limit() -> None:
+async def test_stream_splits_full_rendering_near_text_limit() -> None:
     api = FakeQQBotAPI()
     adapter = _make_qq_adapter(api, FakeQQGateway())
     conversation = ConversationRef("qq", "app-1", "OPENID-USER")
@@ -1865,12 +1866,15 @@ async def test_stream_keeps_compact_rendering_near_text_limit() -> None:
         STREAM_INPUT_STATE_GENERATING,
         STREAM_INPUT_STATE_GENERATING,
         STREAM_INPUT_STATE_DONE,
+        STREAM_INPUT_STATE_GENERATING,
+        STREAM_INPUT_STATE_DONE,
     ]
     assert api.stream_frames[1]["content_raw"].startswith(
         api.stream_frames[0]["content_raw"]
     )
-    assert api.stream_frames[1]["content_raw"] == sanitize_markdown(final)
-    assert len(api.stream_frames[1]["content_raw"]) <= QQ_TEXT_LIMIT
+    parts = [text.removesuffix(qq_module._QQ_STREAM_DONE_SUFFIX) for text in api._stream_contents.values()]
+    assert "".join(parts) == sanitize_markdown(final)
+    assert all(len(frame["content_raw"]) <= QQ_TEXT_LIMIT for frame in api.stream_frames)
 
 
 async def test_final_text_uses_regular_reply_without_closing_model_stream() -> None:
@@ -2788,7 +2792,7 @@ async def test_cancelled_frame_settles_and_is_not_replayed(stage: str) -> None:
         await sending
     state = next(iter(adapter._streams.values())).segments[0]
     assert state.failed
-    assert state.desired_text == source
+    assert state.desired_text == sanitize_markdown(source)
     assert state.next_index == (1 if stage == "open" else 2)
     attempts = len(api.stream_attempts)
     await adapter.send_text(conversation, "next")
@@ -2813,7 +2817,7 @@ async def test_lost_open_response_times_out_and_falls_back_with_fresh_sequence(
     await adapter.send_text(conversation, "next")
     assert len(api.stream_attempts) == 1
     assert api.active_sends[0]["msg_seq"] == 2
-    assert api.active_sends[0]["markdown"] == {"content": "answer\n"}
+    assert api.active_sends[0]["markdown"] == {"content": "answer\u200b\n"}
     api.block_stream_response = False
     await adapter.stop()
 
@@ -3004,7 +3008,7 @@ async def test_emphasis_overflow_finalizes_and_allows_the_next_reply(
             await _wait_for(lambda: adapter._streams[ref].idle_task is None)
         await adapter.send_text(conversation, "following answer\n")
         assert ref not in adapter._streams
-        assert api.stream_frames[-1]["content_raw"] == "following answer\n"
+        assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("following answer\n")
         delivered = [message["markdown"]["content"] for message in api.active_sends]
         # The correction replaces the earlier partial; its first segment keeps the aid.
         assert delivered[0].startswith("**bold**\u200b ")
@@ -3081,8 +3085,8 @@ async def test_long_stream_failure_recovers_each_segment_before_next_reply() -> 
         api.fail_generating_transport = False
         adapter._anchors[conversation] = _anchor(msg_id="next-inbound")
         await adapter.send_text(conversation, "recovered\n")
-        assert api.active_sends[-1]["markdown"]["content"] == "next answer\n"
-        assert api.stream_frames[-1]["content_raw"] == "recovered\n"
+        assert api.active_sends[-1]["markdown"]["content"] == sanitize_markdown("next answer\n")
+        assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("recovered\n")
     finally:
         await adapter.stop()
 
@@ -3099,8 +3103,8 @@ async def test_shortening_a_long_answer_withdraws_obsolete_segments() -> None:
         await adapter.edit_text(ref, "**corrected。**\n")
         await adapter.send_text(conversation, "following\n")
         assert {item["message_id"] for item in api.withdrawals} == original_ids
-        assert api.active_sends[-1]["markdown"]["content"] == "**corrected。\u200b**\n"
-        assert api.stream_frames[-1]["content_raw"] == "following\n"
+        assert api.active_sends[-1]["markdown"]["content"] == sanitize_markdown("**corrected。**\n")
+        assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("following\n")
     finally:
         await adapter.stop()
 
@@ -3161,7 +3165,7 @@ async def test_cancelled_long_finalization_commits_all_segments_before_retiring(
         api.fail_generating_transport = False
         adapter._anchors[conversation] = _anchor(msg_id="fresh-inbound")
         await adapter.send_text(conversation, "following\n")
-        assert api.stream_frames[-1]["content_raw"] == "following\n"
+        assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("following\n")
     finally:
         await adapter.stop()
 
@@ -3197,7 +3201,95 @@ async def test_obsolete_segment_cleanup_failure_does_not_block_next_reply() -> N
         assert len(adapter._streams[ref].segments) == 1
         await adapter.send_text(conversation, "following\n")
         assert ref not in adapter._streams
-        assert api.active_sends[-1]["markdown"]["content"] == "corrected\n"
-        assert api.stream_frames[-1]["content_raw"] == "following\n"
+        assert api.active_sends[-1]["markdown"]["content"] == sanitize_markdown("corrected\n")
+        assert api.stream_frames[-1]["content_raw"] == sanitize_markdown("following\n")
     finally:
+        await adapter.stop()
+
+
+@pytest.mark.parametrize("delivery", ["regular", "stream", "fallback"])
+async def test_multiline_rendering_aids_survive_segmentation(delivery: str) -> None:
+    api = FakeQQBotAPI()
+    api.fail_generating_transport = delivery == "fallback"
+    adapter = _make_qq_adapter(api, FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    source = "**line。**\n" * 800
+    try:
+        if delivery == "regular":
+            await adapter.send_final_text(conversation, source)
+        else:
+            ref = await adapter.send_text(conversation, source)
+            await adapter.send_text(conversation, "next")
+            assert ref not in adapter._streams
+        if delivery == "stream":
+            parts = [
+                text.removesuffix(qq_module._QQ_STREAM_DONE_SUFFIX)
+                for text in api._stream_contents.values()
+            ]
+        else:
+            parts = [message["markdown"]["content"] for message in api.active_sends]
+        assert len(parts) > 1
+        assert all(len(part) <= QQ_TEXT_LIMIT for part in parts)
+        assert "".join(parts) == "**line。\u200b**\u200b\n" * 800
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.parametrize(
+    "concurrent", ["notice", "final", "open", "edit", "idle", "file"]
+)
+async def test_regular_segments_cannot_be_interleaved(concurrent: str) -> None:
+    from kimi_bridge.platforms.base import OutboundFile
+
+    api = FakeQQBotAPI()
+    sleep = _GatedSleep()
+    adapter = _make_qq_adapter(api, FakeQQGateway(), sleep=sleep)
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    adapter._anchors[conversation] = _anchor()
+    ref = await adapter.send_text(conversation, "model\n")
+    initial_frames = list(api.stream_frames)
+    api.block_regular_response = True
+    sending = asyncio.create_task(adapter.send_final_text(conversation, "x" * 6000))
+    await asyncio.wait_for(api.regular_accepted.wait(), 1)
+    started = asyncio.Event()
+
+    async def competing_send() -> None:
+        started.set()
+        if concurrent == "notice":
+            await adapter.send_notice_text(conversation, "notice")
+        elif concurrent == "final":
+            await adapter.send_final_text(conversation, "final")
+        elif concurrent == "open":
+            await adapter.send_text(conversation, "next model\n")
+        elif concurrent == "edit":
+            await adapter.edit_text(ref, "model\ncontinued\n")
+        elif concurrent == "idle":
+            idle = adapter._streams[ref].idle_task
+            assert idle is not None
+            await sleep.release_task(idle)
+            await idle
+        else:
+            await adapter.send_file(
+                conversation, OutboundFile("a.txt", b"file", "text/plain")
+            )
+
+    competing = asyncio.create_task(competing_send())
+    try:
+        await started.wait()
+        await asyncio.sleep(0)
+        assert not competing.done()
+        assert api.stream_frames == initial_frames
+        assert len(api.active_sends) == 1
+        api.block_regular_response = False
+        api.release_regular_response.set()
+        await asyncio.wait_for(asyncio.gather(sending, competing), 1)
+        assert [message["markdown"]["content"] for message in api.active_sends[:2]] == [
+            "x" * 5000,
+            "x" * 1000,
+        ]
+    finally:
+        api.block_regular_response = False
+        api.release_regular_response.set()
+        await asyncio.gather(sending, competing, return_exceptions=True)
         await adapter.stop()

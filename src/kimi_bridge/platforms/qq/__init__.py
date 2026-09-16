@@ -978,36 +978,17 @@ def sanitize_markdown(text: str) -> str:
     messages, preserving emphasis and its rendering aids at each boundary.
     """
 
-    return _render_markdown(text, force_line_breaks=_force_line_breaks)
-
-
-def _render_markdown(
-    source: str, *, force_line_breaks: Callable[[str], str]
-) -> str:
-    rendered = _flatten_fenced_code(source)
+    rendered = _flatten_fenced_code(text)
     rendered = _flatten_tables(rendered)
     rendered = _strip_inline_code(rendered)
     rendered = _preserve_emphasis_closures(rendered)
     rendered = _preserve_emphasis_spacing(rendered)
-    rendered = force_line_breaks(rendered)
-    if len(rendered) <= QQ_TEXT_LIMIT:
-        return rendered
-
-    return _render_compact_markdown(source)
-
-
-def _render_compact_markdown(source: str) -> str:
-    compact = _strip_fenced_code(source)
-    compact = _strip_table_separators(compact)
-    compact = _strip_inline_code(compact)
-    compact = _preserve_emphasis_closures(compact)
-    compact = _preserve_emphasis_spacing(compact)
-    return compact
+    return _force_line_breaks(rendered)
 
 
 def _sanitize_stable_markdown(text: str, *, final: bool = False) -> str:
     source = text if final else _stable_markdown_source(text)
-    rendered = _render_compact_markdown(source)
+    rendered = sanitize_markdown(source)
     return rendered if final else stable_emphasis(rendered)
 
 
@@ -1048,10 +1029,6 @@ def _flatten_fenced_code(text: str) -> str:
         return "\n".join(f"    {line}" for line in body.splitlines())
 
     return _FENCE_RE.sub(_replace, text)
-
-
-def _strip_fenced_code(text: str) -> str:
-    return _FENCE_RE.sub(lambda match: match.group(1).rstrip("\n"), text)
 
 
 def _strip_inline_code(text: str) -> str:
@@ -1096,24 +1073,16 @@ def _flatten_tables(text: str) -> str:
     return "\n".join(lines)
 
 
-def _strip_table_separators(text: str) -> str:
-    return "\n".join(
-        line
-        for line in text.split("\n")
-        if not ("|" in line and _TABLE_SEPARATOR_RE.match(line))
-    )
-
-
 def _force_line_breaks(text: str) -> str:
+    # Include the trailing newline and paragraph boundaries: deciding from the
+    # next line would revise an already streamed prefix when that line arrives.
     lines = text.split("\n")
-    last = len(lines) - 1
-    forced = [
+    return "\n".join(
         line + _ZERO_WIDTH_SPACE
-        if index != last and line and lines[index + 1] != ""
+        if index < len(lines) - 1 and line and not line.endswith(_ZERO_WIDTH_SPACE)
         else line
         for index, line in enumerate(lines)
-    ]
-    return "\n".join(forced)
+    )
 
 
 def _require_response_id(data: dict[str, Any], context: str) -> str:
@@ -1273,6 +1242,7 @@ class QQAdapter:
         self._anchors: dict[ConversationRef, _ReplyAnchor] = {}
         self._streams: dict[MessageRef, _TextStream] = {}
         self._conversation_locks: dict[ConversationRef, asyncio.Lock] = {}
+        self._outbound_locks: dict[ConversationRef, asyncio.Lock] = {}
         self._typing_tasks: dict[ConversationRef, asyncio.Task[None]] = {}
         self._seen_ids: set[str] = set()
         self._seen_order: deque[str] = deque()
@@ -1356,6 +1326,12 @@ class QQAdapter:
         )
 
     async def _update_text_stream(
+        self, stream: _TextStream, *, final: bool = False
+    ) -> None:
+        async with self._outbound_lock(stream.conversation):
+            await self._update_text_stream_locked(stream, final=final)
+
+    async def _update_text_stream_locked(
         self, stream: _TextStream, *, final: bool = False
     ) -> None:
         stream.finalized = False
@@ -1456,6 +1432,18 @@ class QQAdapter:
         stop_typing: bool,
     ) -> MessageRef:
         self._validate_conversation(conversation)
+        async with self._outbound_lock(conversation):
+            return await self._send_regular_text_locked(
+                conversation, text, stop_typing=stop_typing
+            )
+
+    async def _send_regular_text_locked(
+        self,
+        conversation: ConversationRef,
+        text: str,
+        *,
+        stop_typing: bool,
+    ) -> MessageRef:
         if stop_typing:
             await self._stop_typing(conversation)
         openid = conversation.conversation_id
@@ -1528,23 +1516,24 @@ class QQAdapter:
         if not isinstance(file_info, str) or not file_info:
             raise QQProtocolError("QQ media upload response omitted file_info")
 
-        anchor = self._anchors.get(conversation)
-        reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
-        if anchor is not None and reply_seq is not None:
-            result = await self._api.send_c2c_message(
-                openid,
-                msg_type=MSG_TYPE_MEDIA,
-                media={"file_info": file_info},
-                msg_id=anchor.msg_id,
-                event_id=anchor.event_id,
-                msg_seq=reply_seq,
-            )
-        else:
-            result = await self._api.send_c2c_message(
-                openid, msg_type=MSG_TYPE_MEDIA, media={"file_info": file_info}
-            )
-        message_id = _require_response_id(result, "messages")
-        return MessageRef(conversation, message_id)
+        async with self._outbound_lock(conversation):
+            anchor = self._anchors.get(conversation)
+            reply_seq = anchor.reserve(now=self._clock()) if anchor is not None else None
+            if anchor is not None and reply_seq is not None:
+                result = await self._api.send_c2c_message(
+                    openid,
+                    msg_type=MSG_TYPE_MEDIA,
+                    media={"file_info": file_info},
+                    msg_id=anchor.msg_id,
+                    event_id=anchor.event_id,
+                    msg_seq=reply_seq,
+                )
+            else:
+                result = await self._api.send_c2c_message(
+                    openid, msg_type=MSG_TYPE_MEDIA, media={"file_info": file_info}
+                )
+            message_id = _require_response_id(result, "messages")
+            return MessageRef(conversation, message_id)
 
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
@@ -1560,6 +1549,11 @@ class QQAdapter:
         self, message: MessageRef, outcome: InteractionOutcome
     ) -> None:
         return None
+
+    def _outbound_lock(self, conversation: ConversationRef) -> asyncio.Lock:
+        # Separate from lifecycle locks: opening a stream may await an idle
+        # flush, which must be able to acquire this outbound ordering lock.
+        return self._outbound_locks.setdefault(conversation, asyncio.Lock())
 
     def _validate_conversation(self, conversation: ConversationRef) -> None:
         if conversation.platform != "qq":
@@ -1716,9 +1710,11 @@ class QQAdapter:
         LOGGER.error("QQ answer delivery exhausted; abandoning stream")
         try:
             async with asyncio.timeout(QQ_DELIVERY_TIMEOUT_SECONDS):
-                await self.send_notice_text(
+                # Recovery already owns the conversation's outbound lock.
+                await self._send_regular_text_locked(
                     state.conversation,
                     "QQ could not deliver part of this answer. Please ask me to resend it.",
+                    stop_typing=False,
                 )
         except asyncio.CancelledError:
             raise
@@ -1765,9 +1761,7 @@ class QQAdapter:
         use_reserved_reply: bool = False,
     ) -> None:
         await self._stop_typing(state.conversation)
-        sanitized = _force_line_breaks(rendered)
-        if _qq_text_length(sanitized) > QQ_TEXT_LIMIT:
-            sanitized = rendered
+        sanitized = rendered
         msg_id = state.anchor_msg_id if use_reserved_reply else None
         event_id = state.event_id if use_reserved_reply else None
         msg_seq = state.msg_seq if use_reserved_reply else None
