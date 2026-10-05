@@ -240,6 +240,41 @@ async def test_live_probe_monitors_create_time_model_persistence(
     assert model_check.status == expected_status
 
 
+@pytest.mark.parametrize("drift", ["missing", "optional", "type", "values"])
+def test_prompt_submission_contract_detects_status_drift(drift: str) -> None:
+    openapi, asyncapi = _minimal_documents()
+    operation = openapi["paths"].pop("/api/v1/example")["get"]
+    openapi["paths"]["/api/v1/sessions/{session_id}/prompts"] = {"post": operation}
+    data = operation["responses"]["200"]["content"]["application/json"]["schema"][
+        "properties"
+    ]["data"]
+    data["properties"] = {
+        "prompt_id": {"type": "string"},
+        "status": {"type": "string", "enum": ["running", "queued", "blocked"]},
+    }
+    data["required"] = ["prompt_id", "status"]
+
+    def status_check():
+        return next(
+            check
+            for check in kimi_contract.evaluate_kimi_semantic_contract(
+                openapi, asyncapi
+            )
+            if check.id == "rest.submit_prompt.response.status"
+        )
+
+    assert status_check().status == "pass"
+    if drift == "missing":
+        del data["properties"]["status"]
+    elif drift == "optional":
+        data["required"].remove("status")
+    elif drift == "type":
+        data["properties"]["status"] = {"type": "integer"}
+    else:
+        data["properties"]["status"]["enum"].remove("blocked")
+    assert status_check().status == "fail"
+
+
 def test_semantic_projection_tolerates_additions_and_rejects_required_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ..kimi_server import (
-    KimiServerAPIError,
     KimiServerError,
+    KimiServerOperationError,
     KimiServerProtocolError,
     PermissionMode,
     SessionStatus,
@@ -247,12 +247,7 @@ class _SessionMixin:
             if 0 <= index < len(choices):
                 return choices[index]
             return None
-        try:
-            return await self._client.get_session(selector)
-        except KimiServerAPIError as exc:
-            if exc.code == 40401:
-                return None
-            raise
+        return await self._client.find_session(selector)
 
     async def _ensure_active_stream(
         self,
@@ -278,7 +273,7 @@ class _SessionMixin:
         active = self._active
         if active is not None and active.task is not None and not active.task.done():
             if active.conversation_key != conversation_key:
-                raise KimiServerError(
+                raise KimiServerOperationError(
                     "another conversation is still receiving a response; "
                     "retry after it finishes"
                 )
@@ -314,7 +309,7 @@ class _SessionMixin:
             if stream_task in done:
                 active.task = None
                 stream_task.result()
-                raise KimiServerError("kimi event stream ended before subscribing")
+                raise KimiServerOperationError("kimi event stream ended before subscribing")
             await subscription_wait
         except BaseException:
             if not subscription_wait.done():

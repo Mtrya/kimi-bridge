@@ -26,7 +26,7 @@ from ..interactions import (
     SingleChoiceAnswer,
     SkippedAnswer,
 )
-from ..kimi_server import KimiServerAPIError
+from ..kimi_server import InteractionResolution, KimiServerOperationError
 from ..platforms.base import InboundInteraction, OutboundFile, PlatformAdapter
 from .formatting import _conversation_key
 from .models import _ActiveStream, _PendingInteraction
@@ -34,7 +34,6 @@ from .models import _ActiveStream, _PendingInteraction
 
 LOGGER = logging.getLogger(__name__)
 INTERACTION_POLL_SECONDS = 1.0
-TERMINAL_INTERACTION_ERROR_CODES = {40001, 40401, 40404, 40902}
 STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
     "if you still need it."
@@ -106,6 +105,16 @@ class _InteractionMixin:
     ) -> None:
         """Resolve one normalized platform interaction submission."""
 
+        try:
+            await self._handle_interaction(adapter, action)
+        except KimiServerOperationError as exc:
+            await self._report_operation_error(
+                adapter, action.conversation, exc, operation="Interaction response"
+            )
+
+    async def _handle_interaction(
+        self, adapter: PlatformAdapter, action: InboundInteraction
+    ) -> None:
         async with self._interaction_lock:
             pending = next(
                 (
@@ -150,24 +159,23 @@ class _InteractionMixin:
                 return
 
             approval_decision: ApprovalDecision | None = None
-            try:
-                if pending.kind == "approval":
-                    approval_decision = await self._resolve_approval_action(
-                        pending, action
+            if pending.kind == "approval":
+                approval_decision = await self._resolve_approval_action(
+                    pending, action
+                )
+                outcome = (
+                    approval_decision.capitalize()
+                    if approval_decision is not None
+                    else "Already resolved or expired"
+                )
+            else:
+                outcome = await self._resolve_question_action(pending, action)
+                if outcome is None:
+                    await adapter.send_final_text(
+                        action.conversation,
+                        "Choose an option or enter a free-text answer.",
                     )
-                    outcome = approval_decision.capitalize()
-                else:
-                    outcome = await self._resolve_question_action(pending, action)
-                    if outcome is None:
-                        await adapter.send_final_text(
-                            action.conversation,
-                            "Choose an option or enter a free-text answer.",
-                        )
-                        return
-            except KimiServerAPIError as exc:
-                if exc.code not in TERMINAL_INTERACTION_ERROR_CODES:
-                    raise
-                outcome = "Already resolved or expired"
+                    return
 
             await self._clear_pending(pending)
             await adapter.finish_interaction(
@@ -340,20 +348,26 @@ class _InteractionMixin:
                 return
             try:
                 if pending.kind == "approval":
-                    await self._client.resolve_approval(
+                    resolution = await self._client.resolve_approval(
                         pending.session_id,
                         pending.request_id,
                         "rejected",
                     )
                     detail = "Timed out and was automatically rejected."
                 else:
-                    await self._client.dismiss_question(
+                    resolution = await self._client.dismiss_question(
                         pending.session_id, pending.request_id
                     )
                     detail = "Timed out and was automatically dismissed."
-            except KimiServerAPIError as exc:
-                if exc.code not in TERMINAL_INTERACTION_ERROR_CODES:
-                    raise
+            except KimiServerOperationError as exc:
+                await self._report_operation_error(
+                    pending.adapter,
+                    pending.conversation,
+                    exc,
+                    operation="Automatic interaction timeout response",
+                )
+                return
+            if resolution is InteractionResolution.EXPIRED:
                 detail = "Expired after it had already been resolved."
             await self._clear_pending(pending)
             await pending.adapter.finish_interaction(
@@ -372,18 +386,18 @@ class _InteractionMixin:
 
     async def _resolve_approval_action(
         self, pending: _PendingInteraction, action: InboundInteraction
-    ) -> ApprovalDecision:
+    ) -> ApprovalDecision | None:
         if not isinstance(pending.request, ApprovalRequest):
             raise TypeError("approval interaction has a question request")
         if not isinstance(action.response, ApprovalResponse):
             raise ValueError("approval interaction has an invalid response")
         decision = action.response.decision
-        await self._client.resolve_approval(
+        resolution = await self._client.resolve_approval(
             pending.session_id,
             pending.request_id,
             decision,
         )
-        return decision
+        return decision if resolution is InteractionResolution.APPLIED else None
 
     async def _resolve_question_action(
         self, pending: _PendingInteraction, action: InboundInteraction
@@ -395,12 +409,16 @@ class _InteractionMixin:
         if not isinstance(action.response, QuestionResponse):
             raise ValueError("question interaction has an invalid response")
         answers = _validate_question_answers(pending.request, action.response.answers)
-        await self._client.resolve_question(
+        resolution = await self._client.resolve_question(
             pending.session_id,
             pending.request_id,
             answers,
         )
-        return "Answer submitted"
+        return (
+            "Answer submitted"
+            if resolution is InteractionResolution.APPLIED
+            else "Already resolved or expired"
+        )
 
 
 def _validate_question_answers(

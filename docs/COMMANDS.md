@@ -88,6 +88,8 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.
 
+If the turn finishes before steering, the submitted prompt remains under Kimi's normal execution lifecycle. A prompt blocked before execution is reported in chat. If submission or steering cannot be confirmed, check `/status` or `/history` before resending; the bridge does not automatically resubmit. Goal creation submits its initial prompt as separate work and reports when the goal was created but its initial prompt failed or was blocked.
+
 Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` close the relevant interaction as cancelled.
 
 ## Permission modes and interactions

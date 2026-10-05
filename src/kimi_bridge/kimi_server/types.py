@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Literal
 
 
@@ -18,7 +19,11 @@ class KimiServerAuthenticationError(KimiServerStartupError):
     """kimi-code is not authenticated on this host."""
 
 
-class KimiServerAPIError(KimiServerError):
+class KimiServerOperationError(KimiServerError):
+    """An operation failed without invalidating the client or its protocol."""
+
+
+class KimiServerAPIError(KimiServerOperationError):
     """A REST call returned a non-zero kimi-server envelope code."""
 
     def __init__(
@@ -41,8 +46,52 @@ class KimiServerProtocolError(KimiServerError):
     """The server violated or rejected the expected REST/WebSocket protocol."""
 
 
-class KimiServerTransportError(KimiServerError):
+class KimiServerTransportError(KimiServerOperationError):
     """A REST request could not complete at the HTTP transport boundary."""
+
+
+class PromptDelivery(Enum):
+    ENQUEUE = "enqueue"
+    STEER_IF_ACTIVE = "steer_if_active"
+
+
+class PromptOutcome(Enum):
+    SUBMITTED = "submitted"
+    STEERED = "steered"
+    STEERING_UNAVAILABLE = "steering_unavailable"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class PromptSubmission:
+    """Acknowledged submission; its outcome is not a live execution status."""
+
+    prompt_id: str
+    outcome: PromptOutcome
+
+
+class PromptSubmissionUncertain(KimiServerOperationError):
+    """The submission response was lost; retrying could duplicate the prompt."""
+
+    def __init__(self) -> None:
+        super().__init__("Prompt submission could not be confirmed.")
+
+
+class PromptSteeringError(KimiServerOperationError):
+    """Submission was acknowledged but the requested steering did not settle."""
+
+    def __init__(self, submission: PromptSubmission, *, uncertain: bool) -> None:
+        self.submission = submission
+        self.uncertain = uncertain
+        super().__init__(
+            f"Prompt {submission.prompt_id} was submitted, but steering "
+            + ("could not be confirmed." if uncertain else "failed.")
+        )
+
+
+class InteractionResolution(Enum):
+    APPLIED = "applied"
+    EXPIRED = "expired"
 
 
 @dataclass(frozen=True, slots=True)

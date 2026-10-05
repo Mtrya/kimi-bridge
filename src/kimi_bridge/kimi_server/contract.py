@@ -449,11 +449,14 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     ]
                 },
             ),
-            response_fields=(_field("prompt_id", "string"),),
+            response_fields=(
+                _field("prompt_id", "string"),
+                _field("status", "string", values=("running", "queued", "blocked")),
+            ),
         ),
         RestOperationContract(
             "steer_prompts",
-            "KimiServerClient.steer_prompts",
+            "KimiServerClient.submit_prompt",
             "POST",
             "/sessions/{session_id}/prompts:steer",
             "/api/v1/sessions/{session_id}/prompts:steer",

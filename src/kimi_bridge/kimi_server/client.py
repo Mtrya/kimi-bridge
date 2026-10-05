@@ -34,19 +34,23 @@ from .contract import (
     KIMI_WEBSOCKET_PATH,
 )
 from .events import _EventCursor, _advance_cursor, _cursor_from_mapping
+from .prompts import deliver_prompt
 from .supervisor import KimiServerSupervisor
 from .types import (
     GoalControl,
     GoalInfo,
+    InteractionResolution,
     KimiServerAPIError,
-    KimiServerError,
+    KimiServerOperationError,
     KimiServerProtocolError,
     KimiServerStartupError,
     KimiServerTransportError,
     ModelInfo,
     PermissionMode,
     PromptContent,
+    PromptDelivery,
     PromptMedia,
+    PromptSubmission,
     SecondaryModelConfig,
     ServerConnection,
     SessionProfile,
@@ -210,7 +214,7 @@ class KimiServerClient:
         """Restart the supervised Kimi server and wait for its replacement."""
 
         if self._supervisor is None:
-            raise KimiServerError("server restart requires a managed kimi server")
+            raise KimiServerOperationError("server restart requires a managed kimi server")
         connection = await self._supervisor.restart()
         self._usage_totals.clear()
         return connection
@@ -298,6 +302,16 @@ class KimiServerClient:
         return await self._request_operation(
             "get_session", path_parameters={"session_id": session_id}
         )
+
+    async def find_session(self, session_id: str) -> dict[str, Any] | None:
+        """Look up a session without exposing the server's missing-ID code."""
+
+        try:
+            return await self.get_session(session_id)
+        except KimiServerAPIError as exc:
+            if exc.code == 40401:
+                return None
+            raise
 
     async def get_session_profile(self, session_id: str) -> SessionProfile:
         data = await self._request_operation(
@@ -421,11 +435,14 @@ class KimiServerClient:
         session_id: str,
         content: str | PromptContent,
         *,
+        delivery: PromptDelivery = PromptDelivery.ENQUEUE,
         model: str | None = None,
         thinking: str | None = None,
         permission_mode: PermissionMode | None = None,
         plan_mode: bool | None = None,
-    ) -> dict[str, Any]:
+    ) -> PromptSubmission:
+        if not isinstance(delivery, PromptDelivery):
+            raise ValueError("delivery must be a PromptDelivery")
         content_items = await self._prompt_content_to_wire(content)
         payload: dict[str, Any] = {"content": content_items}
         if model is not None:
@@ -436,11 +453,17 @@ class KimiServerClient:
             payload["permission_mode"] = permission_mode
         if plan_mode is not None:
             payload["plan_mode"] = plan_mode
-        return await self._request_operation(
-            "submit_prompt",
-            path_parameters={"session_id": session_id},
-            json_body=payload,
-        )
+        connection = await self._connection_info()
+
+        async def request(operation: str, body: dict[str, Any]) -> Any:
+            return await self._request_operation(
+                operation,
+                path_parameters={"session_id": session_id},
+                json_body=body,
+                connection=connection,
+            )
+
+        return await deliver_prompt(request, payload, delivery)
 
     async def _prompt_content_to_wire(
         self, content: str | PromptContent
@@ -478,14 +501,6 @@ class KimiServerClient:
                 "kimi server file upload returned no file id"
             )
         return file_id
-
-    async def steer_prompts(self, session_id: str, prompt_ids: list[str]) -> bool:
-        data = await self._request_operation(
-            "steer_prompts",
-            path_parameters={"session_id": session_id},
-            json_body={"prompt_ids": prompt_ids},
-        )
-        return bool(data["steered"])
 
     async def update_profile(
         self,
@@ -589,16 +604,11 @@ class KimiServerClient:
         return [_tool_info_from_wire(item) for item in data["tools"]]
 
     async def list_approvals(self, session_id: str) -> list[ApprovalRequest]:
-        try:
-            data = await self._request_operation(
-                "list_approvals",
-                path_parameters={"session_id": session_id},
-                params={"status": "pending"},
-            )
-        except KimiServerAPIError as exc:
-            if exc.code == 40001:
-                return []
-            raise
+        data = await self._request_operation(
+            "list_approvals",
+            path_parameters={"session_id": session_id},
+            params={"status": "pending"},
+        )
         return [_approval_request_from_wire(item) for item in data["items"]]
 
     async def resolve_approval(
@@ -606,28 +616,24 @@ class KimiServerClient:
         session_id: str,
         approval_id: str,
         decision: ApprovalDecision,
-    ) -> bool:
-        data = await self._request_operation(
+    ) -> InteractionResolution:
+        return await self._resolve_interaction(
             "resolve_approval",
             path_parameters={
                 "session_id": session_id,
                 "approval_id": approval_id,
             },
             json_body={"decision": decision},
+            result_field="resolved",
+            expired_codes={40401, 40404, 40902},
         )
-        return bool(data["resolved"])
 
     async def list_questions(self, session_id: str) -> list[QuestionRequest]:
-        try:
-            data = await self._request_operation(
-                "list_questions",
-                path_parameters={"session_id": session_id},
-                params={"status": "pending"},
-            )
-        except KimiServerAPIError as exc:
-            if exc.code == 40001:
-                return []
-            raise
+        data = await self._request_operation(
+            "list_questions",
+            path_parameters={"session_id": session_id},
+            params={"status": "pending"},
+        )
         return [_question_request_from_wire(item) for item in data["items"]]
 
     async def resolve_question(
@@ -635,30 +641,64 @@ class KimiServerClient:
         session_id: str,
         question_id: str,
         answers: tuple[QuestionAnswer, ...],
-    ) -> bool:
+    ) -> InteractionResolution:
         answers_payload = {
             answer.question_id: _question_answer_to_wire(answer)
             for answer in answers
         }
-        data = await self._request_operation(
+        return await self._resolve_interaction(
             "resolve_question",
             path_parameters={
                 "session_id": session_id,
                 "question_id": question_id,
             },
             json_body={"answers": answers_payload, "method": "click"},
+            result_field="resolved",
+            expired_codes={40401, 40405, 40902, 40909},
         )
-        return bool(data["resolved"])
 
-    async def dismiss_question(self, session_id: str, question_id: str) -> bool:
-        data = await self._request_operation(
+    async def dismiss_question(
+        self, session_id: str, question_id: str
+    ) -> InteractionResolution:
+        return await self._resolve_interaction(
             "dismiss_question",
             path_parameters={
                 "session_id": session_id,
                 "question_id": question_id,
             },
+            result_field="dismissed",
+            expired_codes={40401, 40405, 40902},
+            accepted_codes=frozenset({40909}),
         )
-        return bool(data["dismissed"])
+
+    async def _resolve_interaction(
+        self,
+        operation: str,
+        *,
+        path_parameters: dict[str, str],
+        result_field: str,
+        expired_codes: set[int],
+        json_body: Any = None,
+        accepted_codes: frozenset[int] = frozenset(),
+    ) -> InteractionResolution:
+        try:
+            data = await self._request_operation(
+                operation,
+                path_parameters=path_parameters,
+                json_body=json_body,
+                accepted_codes=accepted_codes,
+            )
+        except KimiServerAPIError as exc:
+            if exc.code in expired_codes:
+                return InteractionResolution.EXPIRED
+            raise
+        if not isinstance(data, dict) or not isinstance(data.get(result_field), bool):
+            raise KimiServerProtocolError(f"invalid {operation} response")
+        return (
+            InteractionResolution.APPLIED
+            if data[result_field]
+            else InteractionResolution.EXPIRED
+        )
 
     async def abort_prompt(self, session_id: str) -> bool:
         prompts = await self._request_operation(
@@ -966,6 +1006,7 @@ class KimiServerClient:
         files: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
+        accepted_codes: frozenset[int] = frozenset(),
     ) -> Any:
         """Execute one operation from the tracked semantic contract."""
 
@@ -988,6 +1029,7 @@ class KimiServerClient:
             files=files,
             params=params,
             connection=connection,
+            accepted_codes=accepted_codes,
         )
 
     async def _request_document(
@@ -1019,6 +1061,7 @@ class KimiServerClient:
         files: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
+        accepted_codes: frozenset[int] = frozenset(),
     ) -> Any:
         if connection is None:
             connection = await self._connection_info()
@@ -1040,7 +1083,7 @@ class KimiServerClient:
             **kwargs,
         )
         envelope = response.json()
-        if envelope["code"] != 0:
+        if envelope["code"] != 0 and envelope["code"] not in accepted_codes:
             raise KimiServerAPIError(
                 envelope["code"],
                 str(envelope.get("msg", "unknown error")),

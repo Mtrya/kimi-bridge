@@ -30,12 +30,19 @@ from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
     GoalStatus,
+    InteractionResolution,
     KimiServerAPIError,
     KimiServerError,
+    KimiServerOperationError,
     KimiServerProtocolError,
     KimiServerTransportError,
     ModelInfo,
     PromptContent,
+    PromptDelivery,
+    PromptOutcome,
+    PromptSteeringError,
+    PromptSubmission,
+    PromptSubmissionUncertain,
     SecondaryModelConfig,
     PromptMedia,
     SessionProfile,
@@ -77,10 +84,12 @@ class FakeKimiClient:
         self.restarts = 0
         self.created: list[tuple[str, str | None, dict[str, Any]]] = []
         self.prompts: list[tuple[str, str | PromptContent, dict[str, Any]]] = []
-        self.prompt_statuses: list[str] = []
+        self.prompt_outcomes: list[PromptOutcome] = []
+        self.prompt_deliveries: list[PromptDelivery] = []
         self.prompt_error: KimiServerError | None = None
-        self.steered: list[tuple[str, list[str]]] = []
-        self.steer_error: KimiServerAPIError | None = None
+        self.creation_error: KimiServerError | None = None
+        self.interaction_resolution = InteractionResolution.APPLIED
+        self.interaction_error: KimiServerError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
         self.compact_calls: list[str] = []
         self.compact_error: KimiServerAPIError | None = None
@@ -150,6 +159,8 @@ class FakeKimiClient:
         title: str | None = None,
         **profile: Any,
     ) -> str:
+        if self.creation_error is not None:
+            raise self.creation_error
         session_id = f"session-{len(self.created) + 1}"
         self.created.append((workspace, title, profile))
         self.sessions.insert(
@@ -170,27 +181,20 @@ class FakeKimiClient:
         self,
         session_id: str,
         content: str | PromptContent,
+        *,
+        delivery: PromptDelivery = PromptDelivery.ENQUEUE,
         **profile: Any,
-    ) -> dict[str, Any]:
+    ) -> PromptSubmission:
         self.call_order.append("submit")
         self.prompts.append((session_id, content, profile))
+        self.prompt_deliveries.append(delivery)
         if self.prompt_error is not None:
             raise self.prompt_error
-        status = self.prompt_statuses.pop(0) if self.prompt_statuses else "running"
-        return {
-            "prompt_id": f"prompt-{len(self.prompts)}",
-            "status": status,
-        }
+        outcome = self.prompt_outcomes.pop(0) if self.prompt_outcomes else PromptOutcome.SUBMITTED
+        return PromptSubmission(f"prompt-{len(self.prompts)}", outcome)
 
     async def get_session_model(self, session_id: str) -> ModelInfo:
         return self.session_model
-
-    async def steer_prompts(self, session_id: str, prompt_ids: list[str]) -> bool:
-        self.call_order.append("steer")
-        self.steered.append((session_id, prompt_ids))
-        if self.steer_error is not None:
-            raise self.steer_error
-        return True
 
     async def get_server_version(self) -> str:
         return self.server_version
@@ -414,6 +418,9 @@ class FakeKimiClient:
             before_id = last_id
         return sessions
 
+    async def find_session(self, session_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.sessions if item["id"] == session_id), None)
+
     async def get_session(self, session_id: str) -> dict[str, Any]:
         session = next(
             (item for item in self.sessions if item["id"] == session_id), None
@@ -457,14 +464,16 @@ class FakeKimiClient:
 
     async def resolve_approval(
         self, session_id: str, approval_id: str, decision: str
-    ) -> bool:
+    ) -> InteractionResolution:
+        if self.interaction_error is not None:
+            raise self.interaction_error
         self.resolved_approvals.append((session_id, approval_id, decision))
         self.approvals[session_id] = [
             item
             for item in self.approvals.get(session_id, [])
             if item.id != approval_id
         ]
-        return True
+        return self.interaction_resolution
 
     async def list_questions(self, session_id: str) -> list[QuestionRequest]:
         return list(self.questions.get(session_id, []))
@@ -474,23 +483,27 @@ class FakeKimiClient:
         session_id: str,
         question_id: str,
         answers: tuple[QuestionAnswer, ...],
-    ) -> bool:
+    ) -> InteractionResolution:
+        if self.interaction_error is not None:
+            raise self.interaction_error
         self.resolved_questions.append((session_id, question_id, answers))
         self.questions[session_id] = [
             item
             for item in self.questions.get(session_id, [])
             if item.id != question_id
         ]
-        return True
+        return self.interaction_resolution
 
-    async def dismiss_question(self, session_id: str, question_id: str) -> bool:
+    async def dismiss_question(self, session_id: str, question_id: str) -> InteractionResolution:
+        if self.interaction_error is not None:
+            raise self.interaction_error
         self.dismissed_questions.append((session_id, question_id))
         self.questions[session_id] = [
             item
             for item in self.questions.get(session_id, [])
             if item.id != question_id
         ]
-        return True
+        return self.interaction_resolution
 
     async def wait_until_subscribed(
         self, session_id: str, *, timeout: float = 1
@@ -2871,11 +2884,15 @@ async def test_new_command_uses_requested_workspace_without_forwarding(
     assert client.prompts == []
 
 
-async def test_submit_then_steer_and_no_active_turn_fallback(
+async def test_normal_messages_request_steering_and_accept_semantic_outcomes(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
-    client.prompt_statuses = ["running", "queued", "queued"]
+    client.prompt_outcomes = [
+        PromptOutcome.SUBMITTED,
+        PromptOutcome.STEERED,
+        PromptOutcome.STEERING_UNAVAILABLE,
+    ]
     adapter = FakeAdapter()
     router = ChatRouter(
         client,  # type: ignore[arg-type]
@@ -2886,16 +2903,229 @@ async def test_submit_then_steer_and_no_active_turn_fallback(
     try:
         await router.handle_inbound(adapter, _message("first"))
         await router.handle_inbound(adapter, _message("change course"))
-        client.steer_error = KimiServerAPIError(40001, "no active turn")
         await router.handle_inbound(adapter, _message("race fallback"))
     finally:
         await router.close()
 
-    assert client.call_order == ["submit", "submit", "steer", "submit", "steer"]
-    assert client.steered == [
-        ("session-1", ["prompt-2"]),
-        ("session-1", ["prompt-3"]),
+    assert client.call_order == ["submit", "submit", "submit"]
+    assert client.prompt_deliveries == [PromptDelivery.STEER_IF_ACTIVE] * 3
+    assert adapter.sent == []
+
+
+@pytest.fixture
+async def delivery_context(tmp_path: Path):
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "delivery-state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        yield router, client, adapter
+    finally:
+        await router.close()
+
+
+async def test_blocked_prompt_is_reported_and_next_message_is_accepted(
+    delivery_context,
+) -> None:
+    router, client, adapter = delivery_context
+    client.prompt_outcomes = [PromptOutcome.BLOCKED]
+    await router.handle_inbound(adapter, _message("blocked"))
+    assert len(adapter.final_texts) == 1
+    await router.handle_inbound(adapter, _message("next"))
+    assert len(client.prompts) == 2
+    assert len(adapter.final_texts) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PromptSubmissionUncertain(),
+        PromptSteeringError(
+            PromptSubmission("accepted-prompt", PromptOutcome.SUBMITTED),
+            uncertain=False,
+        ),
+        PromptSteeringError(
+            PromptSubmission("accepted-prompt", PromptOutcome.SUBMITTED), uncertain=True
+        ),
+    ],
+)
+async def test_delivery_failures_preserve_acceptance_and_allow_next_message(
+    delivery_context, error
+) -> None:
+    router, client, adapter = delivery_context
+    client.prompt_error = error
+    await router.handle_inbound(adapter, _message("hello"))
+    assert len(client.prompts) == 1
+    assert len(adapter.final_texts) == 1
+    text = adapter.final_texts[0][2]
+    assert "/status" in text and "/history" in text
+    if isinstance(error, PromptSteeringError):
+        assert error.submission.prompt_id in text
+    client.prompt_error = None
+    await router.handle_inbound(adapter, _message("next"))
+    assert len(client.prompts) == 2
+
+
+async def test_session_creation_failure_is_inside_inbound_boundary(
+    delivery_context,
+) -> None:
+    router, client, adapter = delivery_context
+    client.creation_error = KimiServerOperationError("unavailable")
+    await router.handle_inbound(adapter, _message("hello"))
+    assert client.prompts == []
+    assert router._state.bindings == {}
+    assert len(adapter.final_texts) == 1
+    client.creation_error = None
+    await router.handle_inbound(adapter, _message("next"))
+    assert len(client.prompts) == 1
+
+
+@pytest.mark.parametrize(
+    "error", [KimiServerProtocolError("invalid contract"), RuntimeError("bug")]
+)
+async def test_unexpected_delivery_failures_remain_visible(
+    delivery_context, error
+) -> None:
+    router, client, adapter = delivery_context
+    client.prompt_error = error
+    with pytest.raises(type(error)) as caught:
+        await router.handle_inbound(adapter, _message("hello"))
+    assert caught.value is error
+    assert adapter.final_texts == []
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_goal_initial_prompt_does_not_request_steering(
+    delivery_context, blocked
+) -> None:
+    router, client, adapter = delivery_context
+    await router.handle_inbound(adapter, _message("bind"))
+    if blocked:
+        client.prompt_outcomes = [PromptOutcome.BLOCKED]
+    await router.handle_inbound(adapter, _message("/goal Finish the work"))
+    assert client.prompt_deliveries == [
+        PromptDelivery.STEER_IF_ACTIVE,
+        PromptDelivery.ENQUEUE,
     ]
+    assert len(client.goals) == 1
+    assert len(adapter.final_texts) == int(blocked)
+
+
+async def test_goal_submission_failure_preserves_and_reports_created_goal(
+    delivery_context,
+) -> None:
+    router, client, adapter = delivery_context
+    await router.handle_inbound(adapter, _message("bind"))
+    client.prompt_error = PromptSubmissionUncertain()
+    await router.handle_inbound(adapter, _message("/goal Finish the work"))
+    assert len(client.goals) == 1
+    assert client.call_order == ["submit", "goal:create", "submit"]
+    assert len(adapter.final_texts) == 1
+    assert "Goal created" in adapter.final_texts[0][2]
+    assert "/history" in adapter.final_texts[0][2]
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_expired_interaction_clears_pending_without_claiming_approval(
+    delivery_context, kind
+) -> None:
+    router, client, adapter = delivery_context
+    if kind == "approval":
+        client.approvals["session-1"] = [_approval()]
+    else:
+        client.questions["session-1"] = [_question_request()]
+    client.interaction_resolution = InteractionResolution.EXPIRED
+    await router.handle_inbound(adapter, _message("start"))
+    await _wait_for(lambda: len(adapter.interactions) == 1)
+    message, _, prompt = adapter.interactions[0]
+    response = (
+        ApprovalResponse("approved")
+        if kind == "approval"
+        else QuestionResponse(
+            tuple(SkippedAnswer(question.id) for question in prompt.request.questions)
+        )
+    )
+    await router.handle_interaction(
+        adapter,
+        _interaction(
+            message,
+            interaction_id=prompt.interaction_id,
+            response=response,
+        ),
+    )
+    assert router._pending == {}
+    assert len(adapter.outcomes) == 1
+    assert adapter.outcomes[0][1].approval_decision is None
+
+
+async def test_interaction_failure_keeps_pending_and_allows_retry(
+    delivery_context,
+) -> None:
+    router, client, adapter = delivery_context
+    client.approvals["session-1"] = [_approval()]
+    await router.handle_inbound(adapter, _message("start"))
+    await _wait_for(lambda: len(adapter.interactions) == 1)
+    message, _, prompt = adapter.interactions[0]
+    action = _interaction(
+        message,
+        interaction_id=prompt.interaction_id,
+        response=ApprovalResponse("approved"),
+    )
+    client.interaction_error = KimiServerOperationError("unavailable")
+    await router.handle_interaction(adapter, action)
+    assert len(router._pending) == 1
+    assert adapter.outcomes == []
+    assert len(adapter.final_texts) == 1
+    client.interaction_error = None
+    await router.handle_interaction(adapter, action)
+    assert router._pending == {}
+    assert adapter.outcomes[0][1].approval_decision == "approved"
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+async def test_timeout_failure_keeps_interaction_available_for_user(
+    delivery_context,
+    kind,
+) -> None:
+    router, client, adapter = delivery_context
+    release_timeout = asyncio.Event()
+
+    async def timeout_sleep(_delay: float) -> None:
+        await release_timeout.wait()
+
+    router._interaction_sleep = timeout_sleep
+    if kind == "approval":
+        client.approvals["session-1"] = [_approval()]
+        response = ApprovalResponse("approved")
+    else:
+        client.questions["session-1"] = [_question_request()]
+        response = QuestionResponse((SkippedAnswer("q1"),))
+    await router.handle_inbound(adapter, _message("start"))
+    await _wait_for(lambda: len(adapter.interactions) == 1)
+    pending = next(iter(router._pending.values()))
+    assert pending.timeout_task is not None
+    client.interaction_error = KimiServerOperationError("unavailable")
+    release_timeout.set()
+    await pending.timeout_task
+    assert list(router._pending.values()) == [pending]
+    assert adapter.outcomes == []
+    assert len(adapter.final_texts) == 1
+    client.interaction_error = None
+    message, _, prompt = adapter.interactions[0]
+    await router.handle_interaction(
+        adapter,
+        _interaction(
+            message,
+            interaction_id=prompt.interaction_id,
+            response=response,
+        ),
+    )
+    assert router._pending == {}
+    assert len(adapter.outcomes) == 1
 
 
 async def test_approval_interaction_resolves_and_rejects_wrong_actor(
