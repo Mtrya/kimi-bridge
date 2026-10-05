@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from ..kimi_server import (
-    KimiServerAPIError,
     KimiServerClient,
     KimiServerError,
+    KimiServerOperationError,
     PromptContent,
+    PromptDelivery,
     PromptMedia,
+    PromptOutcome,
+    PromptSteeringError,
+    PromptSubmission,
+    PromptSubmissionUncertain,
 )
-from ..platforms.base import InboundFile, InboundMessage, PlatformAdapter
+from ..platforms.base import ConversationRef, InboundFile, InboundMessage, PlatformAdapter
 from ..speech import SpeechTranscriber
 from ..state import BridgeState, ConversationBinding, StateStore
 from .commands import _CommandMixin
@@ -34,6 +40,7 @@ VOICE_TRANSCRIPT_PREFIX = "[语音转写]"
 VOICE_UNTRANSCRIBED_NOTICE = (
     "[System: A voice message was received but could not be transcribed.]"
 )
+LOGGER = logging.getLogger(__name__)
 
 
 class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixin):
@@ -135,14 +142,15 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
         async with lock:
             self._coerce_binding_capabilities(conversation_key, adapter)
-            if (
+            is_command = (
                 text.startswith("/")
                 and not msg.images
                 and not msg.videos
                 and not msg.files
                 and not msg.audios
-            ):
-                try:
+            )
+            try:
+                if is_command:
                     await self._handle_command(
                         conversation_key,
                         adapter,
@@ -150,24 +158,16 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         msg.actor,
                         text,
                     )
-                except KimiServerError as exc:
-                    await self._send_chunked(
+                    return
+                binding = self._state.bindings.get(conversation_key)
+                if binding is None:
+                    self._default_workspace.mkdir(parents=True, exist_ok=True)
+                    binding = await self._create_and_bind(
+                        conversation_key,
+                        self._default_workspace,
+                        _title_from_message(msg),
                         adapter,
-                        conversation=msg.conversation,
-                        text=f"Command failed: {exc}",
                     )
-                return
-
-            binding = self._state.bindings.get(conversation_key)
-            if binding is None:
-                self._default_workspace.mkdir(parents=True, exist_ok=True)
-                binding = await self._create_and_bind(
-                    conversation_key,
-                    self._default_workspace,
-                    _title_from_message(msg),
-                    adapter,
-                )
-            try:
                 await self._ensure_active_stream(
                     conversation_key,
                     binding.session_id,
@@ -179,22 +179,55 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                 result = await self._client.submit_prompt(
                     binding.session_id,
                     content,
+                    delivery=PromptDelivery.STEER_IF_ACTIVE,
                     permission_mode=binding.permission_mode,
                 )
-            except KimiServerError as exc:
-                await self._send_chunked(
+                await self._report_prompt_outcome(adapter, msg.conversation, result)
+            except KimiServerOperationError as exc:
+                await self._report_operation_error(
                     adapter,
-                    conversation=msg.conversation,
-                    text=f"Prompt failed: {exc}",
+                    msg.conversation,
+                    exc,
+                    operation="Command" if is_command else "Prompt",
                 )
-                return
-            if result.get("status") in {"queued", "blocked"}:
-                prompt_id = str(result["prompt_id"])
-                try:
-                    await self._client.steer_prompts(binding.session_id, [prompt_id])
-                except KimiServerAPIError as exc:
-                    if exc.code != 40001:
-                        raise
+
+    async def _report_operation_error(
+        self,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        exc: KimiServerOperationError,
+        *,
+        operation: str,
+    ) -> None:
+        LOGGER.error("%s failed", operation, exc_info=exc)
+        if isinstance(exc, PromptSubmissionUncertain):
+            detail = (
+                "Submission could not be confirmed. "
+                "Check /status or /history before resending."
+            )
+            text = f"{operation}: {detail}"
+        elif isinstance(exc, PromptSteeringError):
+            detail = "could not be confirmed" if exc.uncertain else "failed"
+            text = (
+                f"{operation}: prompt {exc.submission.prompt_id} was submitted, "
+                f"but steering {detail}. Check /status or /history before resending."
+            )
+        else:
+            text = f"{operation} failed: {exc}"
+        await self._send_chunked(adapter, conversation, text)
+
+    async def _report_prompt_outcome(
+        self,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        result: PromptSubmission,
+        *,
+        operation: str = "Prompt",
+    ) -> None:
+        if result.outcome is PromptOutcome.BLOCKED:
+            await self._send_chunked(
+                adapter, conversation, f"{operation} was blocked before execution."
+            )
 
     async def _build_prompt_content(
         self,

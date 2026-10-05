@@ -9,9 +9,10 @@ from typing import cast
 
 from ..kimi_server import (
     GoalControl,
-    KimiServerAPIError,
     KimiServerError,
+    KimiServerOperationError,
     KimiServerProtocolError,
+    PromptDelivery,
     TaskStatus,
 )
 from ..platforms.base import ActorRef, ConversationRef, PlatformAdapter
@@ -159,7 +160,7 @@ class _CommandMixin:
                     actor,
                     permission_mode=binding.permission_mode,
                 )
-            except KimiServerError as exc:
+            except KimiServerOperationError as exc:
                 await self._send_chunked(
                     adapter,
                     conversation,
@@ -886,7 +887,7 @@ class _CommandMixin:
 
         try:
             snapshot = await self._client.get_snapshot(session_id)
-        except KimiServerError:
+        except KimiServerOperationError:
             LOGGER.exception("history recap snapshot failed")
             return None
         return _format_history(snapshot, HISTORY_RECAP_COUNT)
@@ -1024,15 +1025,18 @@ class _CommandMixin:
             actor,
         )
         await self._client.update_profile(binding.session_id, goal_objective=objective)
-        result = await self._client.submit_prompt(
-            binding.session_id,
-            objective,
-            permission_mode=binding.permission_mode,
+        try:
+            result = await self._client.submit_prompt(
+                binding.session_id,
+                objective,
+                delivery=PromptDelivery.ENQUEUE,
+                permission_mode=binding.permission_mode,
+            )
+        except KimiServerOperationError as exc:
+            await self._report_operation_error(
+                adapter, conversation, exc, operation="Goal created; initial prompt"
+            )
+            return
+        await self._report_prompt_outcome(
+            adapter, conversation, result, operation="Goal created; initial prompt"
         )
-        if result.get("status") in {"queued", "blocked"}:
-            prompt_id = str(result["prompt_id"])
-            try:
-                await self._client.steer_prompts(binding.session_id, [prompt_id])
-            except KimiServerAPIError as exc:
-                if exc.code != 40001:
-                    raise

@@ -27,6 +27,7 @@ from kimi_bridge.interactions import (
 from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
+    InteractionResolution,
     KimiServerAPIError,
     KimiServerAuthenticationError,
     KimiServerClient,
@@ -37,6 +38,7 @@ from kimi_bridge.kimi_server import (
     KimiServerSupervisor,
     ModelInfo,
     PromptContent,
+    PromptDelivery,
     PromptMedia,
     SecondaryModelConfig,
     ServerConnection,
@@ -1016,7 +1018,7 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
                     "created_at": "now",
                 }
             ),
-            _envelope({"prompt_id": "prompt-1", "status": "running"}),
+            _envelope({"prompt_id": "prompt-1", "status": "queued"}),
             _envelope({"steered": True, "prompt_ids": ["prompt-1"]}),
             _envelope(_profile_payload(permission_mode="yolo")),
             _envelope({"items": [approval]}),
@@ -1036,9 +1038,12 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     )
 
     await client.submit_prompt(
-        "session-1", content, model="kimi-code/k3", permission_mode="manual"
+        "session-1",
+        content,
+        model="kimi-code/k3",
+        permission_mode="manual",
+        delivery=PromptDelivery.STEER_IF_ACTIVE,
     )
-    assert await client.steer_prompts("session-1", ["prompt-1"])
     assert (
         await client.update_profile("session-1", permission_mode="yolo")
     ).session_id == "session-1"
@@ -1051,7 +1056,10 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
             input_display={"command": "pwd"},
         )
     ]
-    assert await client.resolve_approval("session-1", "approval-1", "approved")
+    assert (
+        await client.resolve_approval("session-1", "approval-1", "approved")
+        is InteractionResolution.APPLIED
+    )
     assert await client.list_questions("session-1") == [
         QuestionRequest(
             id="question-1",
@@ -1073,8 +1081,14 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         MultipleChoiceWithOtherAnswer("q4", ("left",), "another"),
         SkippedAnswer("q5"),
     )
-    assert await client.resolve_question("session-1", "question-1", answers)
-    assert await client.dismiss_question("session-1", "question-1")
+    assert (
+        await client.resolve_question("session-1", "question-1", answers)
+        is InteractionResolution.APPLIED
+    )
+    assert (
+        await client.dismiss_question("session-1", "question-1")
+        is InteractionResolution.APPLIED
+    )
 
     assert [request[0:2] for request in http.requests] == [
         ("POST", "http://127.0.0.1:43123/api/v1/files"),
@@ -1295,17 +1309,19 @@ async def test_undo_validates_count_and_surfaces_upstream_error() -> None:
     assert exc_info.value.code == 40911
 
 
-async def test_no_active_turn_means_no_pending_interactions() -> None:
+async def test_interaction_listing_does_not_hide_validation_errors() -> None:
     http = FakeHttpClient(
         [
-            _envelope(None, code=40001, msg="no active turn"),
-            _envelope(None, code=40001, msg="no active turn"),
+            _envelope(None, code=40001, msg="invalid query"),
+            _envelope(None, code=40001, msg="invalid query"),
         ]
     )
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
-    assert await client.list_approvals("session-1") == []
-    assert await client.list_questions("session-1") == []
+    with pytest.raises(KimiServerAPIError):
+        await client.list_approvals("session-1")
+    with pytest.raises(KimiServerAPIError):
+        await client.list_questions("session-1")
 
 
 async def test_unknown_server_version_warns_and_continues(

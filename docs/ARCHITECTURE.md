@@ -29,11 +29,15 @@ kimi-bridge is a single-operator bridge between one instant-messaging adapter an
 
 The supervisor identifies official Kimi Code before startup, launches `kimi web --no-open --host 127.0.0.1 --port <port>` as a foreground child, captures its generated bearer token without exposing it, and checks the live server version. `kimi-bridge compat` reports the relationship between the installed Kimi Code version and the bridge compatibility map. The bridge does not provide a remote Kimi server mode.
 
+Prompt delivery is one client operation with explicit enqueue or steer-if-active intent. It submits once, validates the acknowledgement, and optionally steers the acknowledged prompt through the same server connection. Its typed receipt distinguishes submission, steering, unavailable steering, and pre-execution blocking. Lost submission acknowledgements and steering failures after acknowledged submission have separate errors; the latter retain the receipt. These outcomes describe delivery, while Kimi remains responsible for execution state. The client also translates missing-session lookup and expired approval/question responses into semantic results; server error codes stay within this package.
+
 ## Router boundary
 
 `src/kimi_bridge/router/` exposes the `ChatRouter` facade and owns platform-neutral command orchestration, session and stream lifecycle, interaction lifecycle, answer/thinking rendering, outbound-file authorization, formatting, and private runtime state. Model output, nonterminal notices, and final bridge replies use separate semantic sends so an adapter can preserve an active rendering lifecycle. The router maps an IM conversation to a Kimi session and persists bridge-owned bindings and preferences.
 
 The router does not construct Feishu cards, QQ message payloads, WeChat item payloads, Telegram dictionaries, or multipart bodies. Adapters classify native media and expose semantic values; the router uses the selected model's capabilities to decide whether native image/video input becomes a Kimi file-backed prompt part or a workspace-inbox path. Generic files always use the workspace inbox. Voice messages resolve through the optional `[voice.asr]` endpoint and then the selected adapter's native transcription path when available.
+
+Inbound messages and interaction responses have operation-level error boundaries. Recoverable server failures are logged with their causes and reported to the originating conversation; failed interaction responses retain their pending controls. Session creation is covered by the message boundary. Protocol violations and programming errors propagate instead of being treated as successful delivery or expired interactions.
 
 ## Platform boundaries
 
