@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 4
+KIMI_SEMANTIC_CONTRACT_VERSION = 5
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -353,7 +353,8 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "POST",
             "/sessions/{session_id}:compact",
             "/api/v1/sessions/{session_id}:archive",
-            request_examples=({},),
+            request_examples=({}, {"instruction": "Preserve the remaining work"}),
+            request_fields=(_field("instruction", "string", required=False),),
             schema_alias_note=(
                 "0.28.x OpenAPI aliases generic session actions under the "
                 "archive path; the runtime path remains :compact"

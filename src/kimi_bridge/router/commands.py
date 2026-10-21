@@ -788,9 +788,6 @@ class _CommandMixin:
         actor: ActorRef,
         argument: str,
     ) -> None:
-        if argument:
-            await self._send_chunked(adapter, conversation, "Usage: /compact")
-            return
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
@@ -817,7 +814,9 @@ class _CommandMixin:
                 conversation,
                 actor,
             )
-            await self._client.compact_session(binding.session_id)
+            await self._client.compact_session(
+                binding.session_id, instruction=argument or None
+            )
             outcome = await future
             if outcome.state == "completed":
                 assert outcome.compacted_count is not None

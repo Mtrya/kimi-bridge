@@ -91,7 +91,7 @@ class FakeKimiClient:
         self.interaction_resolution = InteractionResolution.APPLIED
         self.interaction_error: KimiServerError | None = None
         self.profile_updates: list[tuple[str, dict[str, Any]]] = []
-        self.compact_calls: list[str] = []
+        self.compact_calls: list[tuple[str, str | None]] = []
         self.compact_error: KimiServerAPIError | None = None
         self.undo_calls: list[tuple[str, int]] = []
         self.undo_error: KimiServerAPIError | None = None
@@ -270,8 +270,10 @@ class FakeKimiClient:
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
 
-    async def compact_session(self, session_id: str) -> None:
-        self.compact_calls.append(session_id)
+    async def compact_session(
+        self, session_id: str, *, instruction: str | None = None,
+    ) -> None:
+        self.compact_calls.append((session_id, instruction))
         if self.compact_error is not None:
             raise self.compact_error
 
@@ -1141,7 +1143,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/tasks [all|completed|failed|cancelled]",
         "/skills run <name> [args]",
         "/mcp",
-        "/compact",
+        "/compact [instruction]",
         "/undo [count]",
         "/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
         "/send <path>",
@@ -1801,8 +1803,21 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
     assert len(busy_rejections) == len(rejected_mutations)
 
 
+@pytest.mark.parametrize(
+    ("text", "instruction"),
+    [
+        ("/compact", None),
+        ("/compact   \n ", None),
+        (
+            '/compact Preserve API decisions and "Open Issues".\n保留待办事项。',
+            'Preserve API decisions and "Open Issues".\n保留待办事项。',
+        ),
+    ],
+)
 async def test_compact_correlates_manual_event_and_ignores_automatic_compaction(
     tmp_path: Path,
+    text: str,
+    instruction: str | None,
 ) -> None:
     client = FakeKimiClient()
     client.sessions = [_control_session()]
@@ -1817,9 +1832,9 @@ async def test_compact_correlates_manual_event_and_ignores_automatic_compaction(
     )
     try:
         command = asyncio.create_task(
-            router.handle_inbound(adapter, _message("/compact"))
+            router.handle_inbound(adapter, _message(text))
         )
-        await _wait_for(lambda: client.compact_calls == ["session-control"])
+        await _wait_for(lambda: client.compact_calls == [("session-control", instruction)])
         assert [text for _ref, _conversation, text in adapter.sent] == [
             "Compacting..."
         ]
@@ -2070,7 +2085,6 @@ async def test_compact_and_undo_validate_arguments_and_busy_state(
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/compact now"))
         for command in ("/undo 0", "/undo -1", "/undo 1 2", "/undo nope", "/undo ١"):
             await router.handle_inbound(adapter, _message(command))
         await router.handle_inbound(adapter, _message("/undo"))
@@ -2078,6 +2092,7 @@ async def test_compact_and_undo_validate_arguments_and_busy_state(
 
         client.sessions[0]["busy"] = True
         await router.handle_inbound(adapter, _message("/compact"))
+        await router.handle_inbound(adapter, _message("/compact Preserve API decisions"))
         await router.handle_inbound(adapter, _message("/undo 3"))
     finally:
         await router.close()
@@ -2091,7 +2106,7 @@ async def test_compact_and_undo_validate_arguments_and_busy_state(
     assert sum(text.startswith("Usage: /undo") for text in texts) == 5
     assert "Undid 1 history step." in texts
     assert "Undid 2 history steps." in texts
-    assert sum(text.startswith("Session is busy.") for text in texts) == 2
+    assert sum(text.startswith("Session is busy.") for text in texts) == 3
 
 
 def _history_snapshot(*items: dict) -> dict:
@@ -3656,7 +3671,7 @@ async def test_restart_server_fails_outstanding_compaction_waiters(
         compact = asyncio.create_task(
             router.handle_inbound(adapter, _message("/compact"))
         )
-        await _wait_for(lambda: client.compact_calls == ["session-control"])
+        await _wait_for(lambda: client.compact_calls == [("session-control", None)])
 
         await router.handle_inbound(
             adapter,

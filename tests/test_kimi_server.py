@@ -1292,6 +1292,32 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("instruction", "body"),
+    [
+        (None, {}),
+        ("", {}),
+        (" \t\n ", {}),
+        (
+            'Preserve "API Decisions".\n保留待办事项。',
+            {"instruction": 'Preserve "API Decisions".\n保留待办事项。'},
+        ),
+    ],
+)
+async def test_compact_passes_optional_instruction(
+    instruction: str | None, body: dict[str, str],
+) -> None:
+    http = FakeHttpClient([_envelope({})])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    await client.compact_session("session-1", instruction=instruction)
+
+    method, url, kwargs = http.requests[0]
+    assert method == "POST"
+    assert url == "http://127.0.0.1:43123/api/v1/sessions/session-1:compact"
+    assert kwargs["json"] == body
+
+
 async def test_undo_validates_count_and_surfaces_upstream_error() -> None:
     client = KimiServerClient(
         "http://127.0.0.1:43123",
