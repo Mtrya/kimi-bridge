@@ -595,6 +595,9 @@ def _schema_types(schema: Mapping[str, Any]) -> tuple[str, ...]:
 
 
 def _schema_accepts_instance(schema: Mapping[str, Any], value: Any) -> bool:
+    # References are not resolved here, so their acceptance cannot be established.
+    if "$ref" in schema:
+        return False
     all_of = schema.get("allOf")
     if isinstance(all_of, list) and not all(
         isinstance(item, dict) and _schema_accepts_instance(item, value)

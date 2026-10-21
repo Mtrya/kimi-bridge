@@ -341,13 +341,22 @@ class KimiServerClient:
             context_limit=status.context_limit,
         )
 
-    async def compact_session(self, session_id: str) -> None:
-        """Start manual context compaction for an idle session."""
+    async def compact_session(
+        self,
+        session_id: str,
+        *,
+        instruction: str | None = None,
+    ) -> None:
+        """Start manual context compaction with optional summary guidance."""
 
         await self._request_operation(
             "compact_session",
             path_parameters={"session_id": session_id},
-            json_body={},
+            json_body=(
+                {"instruction": instruction}
+                if instruction and instruction.strip()
+                else {}
+            ),
         )
 
     async def undo_session(self, session_id: str, *, count: int = 1) -> None:

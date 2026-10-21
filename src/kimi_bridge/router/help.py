@@ -129,17 +129,18 @@ Example:
 - `/usage`""",
     ),
     "/compact": CommandHelp(
-        syntax="/compact",
+        syntax="/compact [instruction]",
         summary="compact session context and report event metrics",
         section="Sessions",
-        details="""**/compact**
+        details="""**/compact [instruction]**
 
-Start context compaction and edit one progress message with the outcome. Takes no arguments.
+Start context compaction and report the outcome. Optional instructions tell Kimi what to preserve in the summary; omit them for default compaction.
 
 Side effects: rejected while the session is busy; mutates session history by compacting earlier prompts.
 
 Example:
-- `/compact`""",
+- `/compact`
+- `/compact Preserve the API decisions and remaining test failures`""",
     ),
     "/history": CommandHelp(
         syntax="/history [count] [--full]",

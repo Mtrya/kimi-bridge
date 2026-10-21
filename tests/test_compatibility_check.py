@@ -470,6 +470,48 @@ def test_semantic_projection_checks_fields_required_in_optional_parent(
     }
 
 
+@pytest.mark.parametrize(
+    ("properties", "required", "expected"),
+    [
+        ({"instruction": {"type": "string"}}, [], "pass"),
+        ({"instruction": {}}, [], "pass"),
+        ({"instruction": {"anyOf": [{}]}}, [], "pass"),
+        ({"instruction": {"oneOf": [{"type": "integer"}, {}]}}, [], "pass"),
+        ({}, [], "fail"),
+        ({"instruction": {"type": "integer"}}, [], "fail"),
+        ({"instruction": {"type": "string"}}, ["instruction"], "fail"),
+        ({"instruction": {"$ref": "#/components/schemas/Missing"}}, [], "fail"),
+        ({"instruction": {"anyOf": [{"$ref": "#/components/schemas/Missing"}]}}, [], "fail"),
+        ({"instruction": {"allOf": [{"$ref": "#/components/schemas/Missing"}]}}, [], "fail"),
+        ({"instruction": {"type": "string", "$ref": "#/components/schemas/Missing"}}, [], "fail"),
+    ],
+)
+def test_compaction_contract_requires_optional_instruction_support(
+    properties: dict[str, Any], required: list[str], expected: str,
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    action = openapi["paths"].pop("/api/v1/example")["get"]
+    action["requestBody"] = {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            },
+        },
+    }
+    operation = kimi_contract.KIMI_REST_OPERATIONS["compact_session"]
+    openapi["paths"][operation.spec_path] = {"post": action}
+
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+
+    request = next(item for item in checks if item.id == "rest.compact_session.request")
+    assert request.status == expected
+
+
 def test_semantic_projection_checks_multipart_request_shape(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
