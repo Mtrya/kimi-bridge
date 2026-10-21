@@ -7,8 +7,10 @@ import argparse
 import asyncio
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
@@ -42,15 +44,19 @@ _ALLOWED_SOURCE_HOSTS = frozenset(
     }
 )
 _MAX_SOURCE_BYTES = 12 * 1024 * 1024
+_MAX_ERROR_BYTES = 8 * 1024
 _MAX_REDIRECTS = 3
 _FETCH_ATTEMPTS = 3
+_RETRY_DELAY_BUDGET = 60.0
 _ISSUE_MARKER = "<!-- kimi-bridge:platform-source-monitor"
 _ISSUE_LABEL = "upstream-drift"
 _ISSUE_TITLE = "Platform source-contract drift detected"
 
 
 class _RetryableFetchError(SourceFetchError):
-    pass
+    def __init__(self, message: str, *, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class PublicSourceFetcher:
@@ -60,6 +66,7 @@ class PublicSourceFetcher:
         self,
         client: httpx.AsyncClient | None = None,
         *,
+        github_token: str | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._client = client or httpx.AsyncClient(
@@ -69,6 +76,7 @@ class PublicSourceFetcher:
             trust_env=False,
         )
         self._owns_client = client is None
+        self._github_token = github_token
         self._sleep = sleep
 
     async def __aenter__(self) -> PublicSourceFetcher:
@@ -81,13 +89,21 @@ class PublicSourceFetcher:
     async def fetch(self, request: SourceRequest) -> FetchedSource:
         _validate_source_request(request)
         last_error: _RetryableFetchError | None = None
+        remaining_delay = _RETRY_DELAY_BUDGET
         for attempt in range(_FETCH_ATTEMPTS):
             try:
                 return await self._fetch_once(request)
             except _RetryableFetchError as exc:
                 last_error = exc
                 if attempt + 1 < _FETCH_ATTEMPTS:
-                    await self._sleep(0.5 * (2**attempt))
+                    delay = max(0.5 * (2**attempt), exc.retry_after)
+                    if delay > remaining_delay:
+                        raise SourceFetchError(
+                            f"{exc}; retry delay {delay:g}s exceeds the remaining "
+                            f"{remaining_delay:g}s retry budget"
+                        ) from exc
+                    await self._sleep(delay)
+                    remaining_delay -= delay
         assert last_error is not None
         raise SourceFetchError(
             f"{_display_url(request.url)} remained unavailable after "
@@ -98,18 +114,26 @@ class PublicSourceFetcher:
         url = request.url
         for redirect_count in range(_MAX_REDIRECTS + 1):
             _validate_https_url(url)
+            headers = {}
+            if urlsplit(url).hostname == "api.github.com" and self._github_token:
+                headers["Authorization"] = f"Bearer {self._github_token}"
             try:
                 response = await self._client.send(
-                    self._client.build_request("GET", url), stream=True
+                    self._client.build_request("GET", url, headers=headers),
+                    stream=True,
                 )
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 raise _RetryableFetchError(
                     f"transport failure for {_display_url(url)}"
                 ) from exc
             try:
-                if response.status_code == 429 or 500 <= response.status_code < 600:
+                retry_after = _rate_limit_delay(response)
+                if retry_after is None and await _is_github_secondary_limit(response):
+                    retry_after = 60.0
+                if retry_after is not None or 500 <= response.status_code < 600:
                     raise _RetryableFetchError(
-                        f"HTTP {response.status_code} from {_display_url(url)}"
+                        _http_failure_detail(response),
+                        retry_after=retry_after or 0.0,
                     )
                 if response.is_redirect:
                     location = response.headers.get("location")
@@ -125,9 +149,7 @@ class PublicSourceFetcher:
                     _validate_https_url(url)
                     continue
                 if response.status_code != 200:
-                    raise SourceFetchError(
-                        f"HTTP {response.status_code} from {_display_url(url)}"
-                    )
+                    raise SourceFetchError(_http_failure_detail(response))
                 content_length = response.headers.get("content-length")
                 if content_length is not None:
                     try:
@@ -159,6 +181,74 @@ class PublicSourceFetcher:
         raise AssertionError("redirect loop must return or raise")
 
 
+def _http_failure_detail(response: httpx.Response) -> str:
+    detail = f"HTTP {response.status_code} from {_display_url(str(response.url))}"
+    diagnostics = ", ".join(
+        f"{name}={response.headers[name]}"
+        for name in (
+            "retry-after",
+            "x-ratelimit-remaining",
+            "x-ratelimit-reset",
+            "x-github-request-id",
+        )
+        if name in response.headers
+    )
+    return f"{detail} ({diagnostics})" if diagnostics else detail
+
+
+async def _is_github_secondary_limit(response: httpx.Response) -> bool:
+    if response.url.host != "api.github.com" or response.status_code != 403:
+        return False
+    body = bytearray()
+    try:
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > _MAX_ERROR_BYTES:
+                return False
+            body.extend(chunk)
+    except httpx.TransportError as exc:
+        raise _RetryableFetchError(_http_failure_detail(response)) from exc
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    message = payload.get("message") if isinstance(payload, dict) else None
+    return isinstance(message, str) and "secondary rate limit" in message.lower()
+
+
+def _rate_limit_delay(response: httpx.Response) -> float | None:
+    github = response.url.host == "api.github.com"
+    remaining = response.headers.get("x-ratelimit-remaining")
+    retry_after = response.headers.get("retry-after")
+    if response.status_code != 429 and not (
+        github
+        and response.status_code == 403
+        and (remaining == "0" or retry_after is not None)
+    ):
+        return None
+
+    delays = []
+    if retry_after is not None:
+        try:
+            seconds = int(retry_after)
+            if seconds >= 0:
+                delays.append(float(seconds))
+        except (ValueError, OverflowError):
+            try:
+                delays.append(
+                    parsedate_to_datetime(retry_after).timestamp() - time.time()
+                )
+            except (TypeError, ValueError, OverflowError):
+                pass
+    if github and remaining == "0":
+        try:
+            # GitHub requires waiting until after the reset timestamp.
+            delays.append(float(int(response.headers["x-ratelimit-reset"])) - time.time() + 1)
+        except (KeyError, ValueError, OverflowError):
+            pass
+    # GitHub asks for at least one minute when a limit has no retry timing.
+    return max(0.0, *delays) if delays else (60.0 if github else 0.0)
+
+
 async def run_inspections(fetcher: SourceFetcher) -> SourceMonitorReport:
     inspections = await asyncio.gather(
         feishu_contract.inspect(fetcher),
@@ -171,7 +261,9 @@ async def run_inspections(fetcher: SourceFetcher) -> SourceMonitorReport:
 
 
 async def run_live_check() -> SourceMonitorReport:
-    async with PublicSourceFetcher() as fetcher:
+    async with PublicSourceFetcher(
+        github_token=os.environ.get("GITHUB_TOKEN")
+    ) as fetcher:
         report = await run_inspections(fetcher)
         if any(
             check.state == "drift"
@@ -261,6 +353,14 @@ class GitHubIssueAutomation:
             issue.get("state") == "open"
             and isinstance(existing_body, str)
             and f"digest={report.alert_digest}" in existing_body
+            and (
+                not any(
+                    check.state == "unavailable"
+                    for platform in report.platforms
+                    for check in platform.checks
+                )
+                or f"report={report.report_digest}" in existing_body
+            )
         ):
             return "source-drift-unchanged"
         self._request(
@@ -326,8 +426,8 @@ def render_issue_body(
     report: SourceMonitorReport, *, run_url: str | None = None
 ) -> str:
     lines = [
-        f"{_ISSUE_MARKER} digest={report.alert_digest} -->",
-        "The daily credential-free monitor found a public upstream contract that no longer matches, or could not be inspected after bounded retries.",
+        f"{_ISSUE_MARKER} digest={report.alert_digest} report={report.report_digest} -->",
+        "The daily public-source monitor found a public upstream contract that no longer matches, or could not be inspected after bounded retries.",
         "",
         f"Checked: `{report.checked_at}`",
         "",
