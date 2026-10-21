@@ -44,6 +44,7 @@ _ALLOWED_SOURCE_HOSTS = frozenset(
     }
 )
 _MAX_SOURCE_BYTES = 12 * 1024 * 1024
+_MAX_ERROR_BYTES = 8 * 1024
 _MAX_REDIRECTS = 3
 _FETCH_ATTEMPTS = 3
 _RETRY_DELAY_BUDGET = 60.0
@@ -127,6 +128,8 @@ class PublicSourceFetcher:
                 ) from exc
             try:
                 retry_after = _rate_limit_delay(response)
+                if retry_after is None and await _is_github_secondary_limit(response):
+                    retry_after = 60.0
                 if retry_after is not None or 500 <= response.status_code < 600:
                     raise _RetryableFetchError(
                         _http_failure_detail(response),
@@ -193,6 +196,25 @@ def _http_failure_detail(response: httpx.Response) -> str:
     return f"{detail} ({diagnostics})" if diagnostics else detail
 
 
+async def _is_github_secondary_limit(response: httpx.Response) -> bool:
+    if response.url.host != "api.github.com" or response.status_code != 403:
+        return False
+    body = bytearray()
+    try:
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > _MAX_ERROR_BYTES:
+                return False
+            body.extend(chunk)
+    except httpx.TransportError as exc:
+        raise _RetryableFetchError(_http_failure_detail(response)) from exc
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    message = payload.get("message") if isinstance(payload, dict) else None
+    return isinstance(message, str) and "secondary rate limit" in message.lower()
+
+
 def _rate_limit_delay(response: httpx.Response) -> float | None:
     github = response.url.host == "api.github.com"
     remaining = response.headers.get("x-ratelimit-remaining")
@@ -207,8 +229,10 @@ def _rate_limit_delay(response: httpx.Response) -> float | None:
     delays = []
     if retry_after is not None:
         try:
-            delays.append(float(int(retry_after)))
-        except ValueError:
+            seconds = int(retry_after)
+            if seconds >= 0:
+                delays.append(float(seconds))
+        except (ValueError, OverflowError):
             try:
                 delays.append(
                     parsedate_to_datetime(retry_after).timestamp() - time.time()
@@ -218,8 +242,8 @@ def _rate_limit_delay(response: httpx.Response) -> float | None:
     if github and remaining == "0":
         try:
             # GitHub requires waiting until after the reset timestamp.
-            delays.append(int(response.headers["x-ratelimit-reset"]) - time.time() + 1)
-        except (KeyError, ValueError):
+            delays.append(float(int(response.headers["x-ratelimit-reset"])) - time.time() + 1)
+        except (KeyError, ValueError, OverflowError):
             pass
     # GitHub asks for at least one minute when a limit has no retry timing.
     return max(0.0, *delays) if delays else (60.0 if github else 0.0)
@@ -329,6 +353,14 @@ class GitHubIssueAutomation:
             issue.get("state") == "open"
             and isinstance(existing_body, str)
             and f"digest={report.alert_digest}" in existing_body
+            and (
+                not any(
+                    check.state == "unavailable"
+                    for platform in report.platforms
+                    for check in platform.checks
+                )
+                or f"report={report.report_digest}" in existing_body
+            )
         ):
             return "source-drift-unchanged"
         self._request(
@@ -394,8 +426,8 @@ def render_issue_body(
     report: SourceMonitorReport, *, run_url: str | None = None
 ) -> str:
     lines = [
-        f"{_ISSUE_MARKER} digest={report.alert_digest} -->",
-        "The daily credential-free monitor found a public upstream contract that no longer matches, or could not be inspected after bounded retries.",
+        f"{_ISSUE_MARKER} digest={report.alert_digest} report={report.report_digest} -->",
+        "The daily public-source monitor found a public upstream contract that no longer matches, or could not be inspected after bounded retries.",
         "",
         f"Checked: `{report.checked_at}`",
         "",

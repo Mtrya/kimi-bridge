@@ -7,6 +7,8 @@ import io
 import json
 import sys
 import zipfile
+from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -393,7 +395,11 @@ async def test_public_fetcher_scopes_github_token_on_every_redirect(
         (429, {"retry-after": "Tue, 14 Nov 2023 22:13:22 GMT"}, 2),
         (429, {}, 60),
         (429, {"retry-after": "invalid"}, 60),
+        (403, {"retry-after": "-1"}, 60),
+        (403, {"retry-after": "9" * 400}, 60),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9" * 400}, 60),
         (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "invalid"}, 60),
+        (403, {"retry-after": "-1", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000002"}, 3),
         (429, {"retry-after": "1", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000002"}, 3),
     ],
 )
@@ -424,6 +430,90 @@ async def test_public_fetcher_waits_for_github_rate_limit(
     assert source.body == b"recovered"
     assert attempts == 2
     assert sleeps == [delay]
+
+
+@pytest.mark.parametrize("remaining", [None, "10"])
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_public_fetcher_retries_secondary_limit_without_timing(
+    remaining: str | None, recovers: bool,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if recovers and attempts > 1:
+            return httpx.Response(200, content=b"recovered")
+        return httpx.Response(
+            403,
+            headers={"x-ratelimit-remaining": remaining} if remaining else {},
+            json={"message": "You have exceeded a secondary rate limit. private-body-data"},
+        )
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = checker.PublicSourceFetcher(client, sleep=sleep)
+        request = SourceRequest("https://api.github.com/example", "test")
+        if recovers:
+            assert (await fetcher.fetch(request)).body == b"recovered"
+        else:
+            with pytest.raises(SourceFetchError, match="retry budget") as error:
+                await fetcher.fetch(request)
+            assert "private-body-data" not in str(error.value)
+
+    assert attempts == 2
+    assert sleeps == [60]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"retry-after": "-1"},
+        {"retry-after": "9" * 400},
+        {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9" * 400},
+    ],
+)
+async def test_invalid_rate_limit_timing_remains_unavailable(
+    headers: dict[str, str],
+) -> None:
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(403, headers=headers))
+    ) as client:
+        result = await qq_contract.inspect(checker.PublicSourceFetcher(client, sleep=sleep))
+
+    assert result.outcome == "unavailable"
+    assert sleeps == [60]
+
+
+async def test_public_fetcher_bounds_secondary_limit_error_body() -> None:
+    class OversizedBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b" " * (9 * 1024)
+            raise AssertionError("must stop reading an oversized error response")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    body = OversizedBody()
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(403, stream=body))
+    ) as client:
+        with pytest.raises(SourceFetchError, match="HTTP 403"):
+            await checker.PublicSourceFetcher(client).fetch(
+                SourceRequest("https://api.github.com/example", "test")
+            )
+
+    assert body.closed
 
 
 @pytest.mark.parametrize(("retry_after", "sleeps"), [(120, []), (40, [40])])
@@ -468,15 +558,16 @@ async def test_public_fetcher_reports_unavailable_when_rate_limit_exceeds_budget
         ("raw.githubusercontent.com", {"retry-after": "2"}),
     ],
 )
+@pytest.mark.parametrize("body", [b"", b"{", b"\xff", b"[]", b'{"message":"Forbidden"}'])
 async def test_public_fetcher_does_not_retry_other_forbidden_responses(
-    host: str, headers: dict[str, str],
+    host: str, headers: dict[str, str], body: bytes,
 ) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        return httpx.Response(403, headers=headers)
+        return httpx.Response(403, headers=headers, content=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         fetcher = checker.PublicSourceFetcher(client)
@@ -571,6 +662,38 @@ def test_rolling_issue_deduplicates_and_closes_on_recovery() -> None:
     assert automation.synchronize(_report("matched")) == "closed-recovered-source-drift"
     assert fake.issues[0]["state"] == "closed"
     assert len(fake.comments) == 1
+
+
+@pytest.mark.parametrize("legacy_marker", [False, True])
+def test_rolling_issue_refreshes_unavailable_diagnostics(legacy_marker: bool) -> None:
+    fake = FakeGitHub()
+    client = httpx.Client(
+        base_url="https://api.github.test",
+        transport=httpx.MockTransport(fake.handle),
+    )
+    automation = checker.GitHubIssueAutomation(
+        "Mtrya/kimi-bridge", "token", client=client,
+    )
+    first = _report("unavailable", detail="HTTP 403")
+    assert automation.synchronize(first) == "opened-source-drift-issue"
+    if legacy_marker:
+        fake.issues[0]["body"] = fake.issues[0]["body"].replace(
+            f" report={first.report_digest}", "",
+        )
+        assert automation.synchronize(first) == "updated-source-drift-issue"
+
+    detail = "HTTP 403 (x-ratelimit-remaining=0, x-github-request-id=new-request)"
+    second = _report("unavailable", detail=detail)
+    assert second.alert_digest == first.alert_digest
+    assert automation.synchronize(second) == "updated-source-drift-issue"
+    assert len(fake.issues) == 1
+    assert not fake.comments
+    updated_body = fake.issues[0]["body"]
+    assert detail in updated_body
+
+    later = replace(second, checked_at="2026-08-20T00:00:00Z")
+    assert automation.synchronize(later) == "source-drift-unchanged"
+    assert fake.issues[0]["body"] == updated_body
 
 
 def test_report_round_trip_preserves_unverifiable_as_healthy(tmp_path: Path) -> None:
