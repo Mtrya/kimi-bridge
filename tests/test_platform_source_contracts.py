@@ -355,6 +355,137 @@ async def test_public_fetcher_rejects_non_allowlisted_redirects() -> None:
             )
 
 
+@pytest.mark.parametrize("token", [None, "test-github-token"])
+async def test_public_fetcher_scopes_github_token_on_every_redirect(
+    token: str | None,
+) -> None:
+    urls = [
+        "https://api.github.com/repos/tencent-connect/bot-docs/commits",
+        "https://raw.githubusercontent.com/tencent-connect/bot-docs/main/README.md",
+        "https://api.github.com/repos/tencent-connect/bot-docs/commits/main",
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < len(urls):
+            return httpx.Response(302, headers={"Location": urls[len(requests)]})
+        return httpx.Response(200, content=b"source")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with checker.PublicSourceFetcher(client, github_token=token) as fetcher:
+            source = await fetcher.fetch(SourceRequest(urls[0], "test"))
+
+    assert source.body == b"source"
+    assert [str(request.url) for request in requests] == urls
+    authorization = f"Bearer {token}" if token else None
+    assert [request.headers.get("Authorization") for request in requests] == [
+        authorization, None, authorization,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "delay"),
+    [
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000002"}, 3),
+        (403, {"retry-after": "2"}, 2),
+        (429, {"retry-after": "2"}, 2),
+        (429, {"retry-after": "Tue, 14 Nov 2023 22:13:22 GMT"}, 2),
+        (429, {}, 60),
+        (429, {"retry-after": "invalid"}, 60),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "invalid"}, 60),
+        (429, {"retry-after": "1", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1700000002"}, 3),
+    ],
+)
+async def test_public_fetcher_waits_for_github_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    headers: dict[str, str],
+    delay: float,
+) -> None:
+    monkeypatch.setattr(checker.time, "time", lambda: 1_700_000_000)
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(status, headers=headers)
+        return httpx.Response(200, content=b"recovered")
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = checker.PublicSourceFetcher(client, sleep=sleep)
+        source = await fetcher.fetch(SourceRequest("https://api.github.com/example", "test"))
+
+    assert source.body == b"recovered"
+    assert attempts == 2
+    assert sleeps == [delay]
+
+
+@pytest.mark.parametrize(("retry_after", "sleeps"), [(120, []), (40, [40])])
+async def test_public_fetcher_reports_unavailable_when_rate_limit_exceeds_budget(
+    retry_after: int,
+    sleeps: list[float],
+) -> None:
+    attempts = 0
+    observed_sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            403,
+            headers={"retry-after": str(retry_after), "x-github-request-id": "test-request"},
+            json={"message": "test-github-token"},
+        )
+
+    async def sleep(seconds: float) -> None:
+        observed_sleeps.append(seconds)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = checker.PublicSourceFetcher(
+            client, github_token="test-github-token", sleep=sleep,
+        )
+        result = await qq_contract.inspect(fetcher)
+
+    assert result.outcome == "unavailable"
+    assert attempts == len(sleeps) + 1
+    assert observed_sleeps == sleeps
+    detail = result.checks[0].detail
+    assert f"retry-after={retry_after}" in detail
+    assert "x-github-request-id=test-request" in detail
+    assert "test-github-token" not in detail
+
+
+@pytest.mark.parametrize(
+    ("host", "headers"),
+    [
+        ("api.github.com", {"x-ratelimit-remaining": "59"}),
+        ("raw.githubusercontent.com", {"retry-after": "2"}),
+    ],
+)
+async def test_public_fetcher_does_not_retry_other_forbidden_responses(
+    host: str, headers: dict[str, str],
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(403, headers=headers)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        fetcher = checker.PublicSourceFetcher(client)
+        with pytest.raises(SourceFetchError, match="HTTP 403"):
+            await fetcher.fetch(SourceRequest(f"https://{host}/example", "test"))
+
+    assert attempts == 1
+
+
 async def test_exhausted_public_source_is_unavailable_not_drift() -> None:
     class UnavailableFetcher:
         async def fetch(self, request: SourceRequest) -> FetchedSource:
