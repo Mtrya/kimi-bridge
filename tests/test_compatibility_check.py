@@ -474,9 +474,16 @@ def test_semantic_projection_checks_fields_required_in_optional_parent(
     ("properties", "required", "expected"),
     [
         ({"instruction": {"type": "string"}}, [], "pass"),
+        ({"instruction": {}}, [], "pass"),
+        ({"instruction": {"anyOf": [{}]}}, [], "pass"),
+        ({"instruction": {"oneOf": [{"type": "integer"}, {}]}}, [], "pass"),
         ({}, [], "fail"),
         ({"instruction": {"type": "integer"}}, [], "fail"),
         ({"instruction": {"type": "string"}}, ["instruction"], "fail"),
+        ({"instruction": {"$ref": "#/components/schemas/Missing"}}, [], "fail"),
+        ({"instruction": {"anyOf": [{"$ref": "#/components/schemas/Missing"}]}}, [], "fail"),
+        ({"instruction": {"allOf": [{"$ref": "#/components/schemas/Missing"}]}}, [], "fail"),
+        ({"instruction": {"type": "string", "$ref": "#/components/schemas/Missing"}}, [], "fail"),
     ],
 )
 def test_compaction_contract_requires_optional_instruction_support(
