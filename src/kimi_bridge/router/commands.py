@@ -326,8 +326,8 @@ class _CommandMixin:
             if status is None:
                 return
             await self._client.reload_session(binding.session_id)
-            self._model = await self._client.get_default_model()
             self._verified_session_profiles.discard(binding.session_id)
+            self._model = await self._client.get_default_model()
             await self._verify_session_profile(
                 binding.session_id,
                 binding.permission_mode,

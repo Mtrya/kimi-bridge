@@ -125,6 +125,7 @@ class KimiServerClient:
         self._reconnect_initial_backoff = reconnect_initial_backoff
         self._reconnect_max_backoff = reconnect_max_backoff
         self._subscription_lock = asyncio.Lock()
+        self._secondary_model_lock = asyncio.Lock()
         self._subscription_ready: dict[str, asyncio.Event] = {}
         self._usage_totals: dict[str, SessionUsage] = {}
         self._active_ws: Any | None = None
@@ -183,20 +184,21 @@ class KimiServerClient:
 
         if not model:
             raise ValueError("secondary model must be non-empty")
-        current = await self.get_secondary_model()
-        secondary_patch: dict[str, Any] = {"default_model": model}
-        if current.models is not None and model not in dict(current.models):
-            secondary_patch["models"] = {model: ""}
-        data = await self._request_operation(
-            "update_config",
-            json_body={"secondary_model": secondary_patch},
-        )
-        updated = _secondary_model_config_from_wire(data.get("secondary_model"))
-        if updated.default_model != model:
-            raise KimiServerProtocolError(
-                f"kimi server did not persist secondary model {model!r}"
+        async with self._secondary_model_lock:
+            current = await self.get_secondary_model()
+            secondary_patch: dict[str, Any] = {"default_model": model}
+            if current.models is not None and model not in dict(current.models):
+                secondary_patch["models"] = {model: ""}
+            data = await self._request_operation(
+                "update_config",
+                json_body={"secondary_model": secondary_patch},
             )
-        return updated
+            updated = _secondary_model_config_from_wire(data.get("secondary_model"))
+            if updated.default_model != model:
+                raise KimiServerProtocolError(
+                    f"kimi server did not persist secondary model {model!r}"
+                )
+            return updated
 
     async def set_secondary_model_entry(
         self, model: str, description: str
@@ -209,34 +211,30 @@ class KimiServerClient:
             raise KimiServerOperationError(
                 "primary is reserved and cannot be a secondary model pool alias"
             )
-        current = await self.get_secondary_model()
-        if current.force:
-            raise KimiServerOperationError(
-                "Kimi Code forces a single secondary model. Disable force in "
-                "Kimi Code's configuration and /reload before editing the pool."
+        async with self._secondary_model_lock:
+            current = await self.get_secondary_model()
+            models = {model: description}
+            if (
+                current.models is None
+                and current.default_model is not None
+                and current.default_model != model
+            ):
+                models[current.default_model] = ""
+            patch: dict[str, Any] = {"models": models}
+            if current.default_model is None:
+                patch["default_model"] = model
+            data = await self._request_operation(
+                "update_config", json_body={"secondary_model": patch}
             )
-        models = {model: description}
-        if (
-            current.models is None
-            and current.default_model is not None
-            and current.default_model != model
-        ):
-            models[current.default_model] = ""
-        patch: dict[str, Any] = {"models": models}
-        if current.default_model is None:
-            patch["default_model"] = model
-        data = await self._request_operation(
-            "update_config", json_body={"secondary_model": patch}
-        )
-        updated = _secondary_model_config_from_wire(data.get("secondary_model"))
-        if (
-            updated.default_model != (current.default_model or model)
-            or dict(updated.models or ()).get(model) != description
-        ):
-            raise KimiServerProtocolError(
-                f"kimi server did not persist secondary model pool entry {model!r}"
-            )
-        return updated
+            updated = _secondary_model_config_from_wire(data.get("secondary_model"))
+            if (
+                updated.default_model != (current.default_model or model)
+                or dict(updated.models or ()).get(model) != description
+            ):
+                raise KimiServerProtocolError(
+                    f"kimi server did not persist secondary model pool entry {model!r}"
+                )
+            return updated
 
     async def get_server_version(self) -> str:
         """Return the managed server's advertised version."""

@@ -6871,3 +6871,43 @@ async def test_adapter_owned_splitting_receives_complete_text_snapshots(
         assert adapter.sent[-1][2] == source
     finally:
         await router.close()
+
+
+async def test_reload_default_refresh_failure_invalidates_profile_and_new_sessions_retry(tmp_path: Path) -> None:
+    class ConfigFailureClient(FakeKimiClient):
+        config_unavailable = False
+
+        async def get_default_model(self) -> str:
+            if self.config_unavailable:
+                raise KimiServerTransportError("Config unavailable")
+            return await super().get_default_model()
+
+    client = ConfigFailureClient()
+    client.sessions = [_control_session(model="kimi-code/selected")]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3")
+    try:
+        await router.handle_inbound(adapter, _message("work"))
+        assert "session-control" in router._verified_session_profiles
+        client.config_unavailable = True
+        client.default_model = "kimi-code/next"
+        client.sessions[0]["agent_config"]["permission_mode"] = "auto"
+        await router.handle_inbound(adapter, _message("/reload"))
+        assert client.reloads == ["session-control"]
+        assert "session-control" not in router._verified_session_profiles
+        await router.handle_inbound(adapter, _message("continue"))
+        assert client.profile_updates[-1] == (
+            "session-control", {"permission_mode": "manual"}
+        )
+        await router.handle_inbound(adapter, _message("/new"))
+        assert client.created == []
+        assert store.load().bindings["feishu:cli_bot:ou_user"].session_id == "session-control"
+        client.config_unavailable = False
+        await router.handle_inbound(adapter, _message("/new"))
+        assert client.created[-1][2]["model"] == "kimi-code/next"
+        created = store.load().bindings["feishu:cli_bot:ou_user"]
+        assert (await client.get_session_status(created.session_id)).model == "kimi-code/next"
+    finally:
+        await router.close()

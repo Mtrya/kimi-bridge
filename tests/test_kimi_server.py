@@ -1310,13 +1310,15 @@ async def test_secondary_model_config_supports_legacy_and_pool_shapes() -> None:
     )
 
 
-async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
+@pytest.mark.parametrize("force", [False, True])
+async def test_set_secondary_model_extends_an_existing_model_pool(force: bool) -> None:
     http = FakeHttpClient(
         [
             _envelope(
                 {
                     "secondary_model": {
                         "defaultModel": "kimi-code/k3",
+                        "force": force,
                         "models": {"kimi-code/k3": "hard tasks"},
                     }
                 }
@@ -1325,6 +1327,7 @@ async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
                 {
                     "secondary_model": {
                         "defaultModel": "kimi-code/fast",
+                        "force": force,
                         "models": {
                             "kimi-code/k3": "hard tasks",
                             "kimi-code/fast": "",
@@ -1341,6 +1344,7 @@ async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
     updated = await client.set_secondary_model("kimi-code/fast")
 
     assert updated.default_model == "kimi-code/fast"
+    assert updated.force is force
     assert http.requests[-1][0:2] == (
         "POST",
         "http://127.0.0.1:43123/api/v1/config",
@@ -1379,9 +1383,12 @@ async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
     ],
     ids=["first-entry", "implicit-default", "describe-default", "edit-entry"],
 )
+@pytest.mark.parametrize("force", [False, True])
 async def test_set_secondary_model_entry_uses_merge_and_preserves_default(
-    current: dict[str, Any], patch: dict[str, Any], persisted: dict[str, Any],
+    current: dict[str, Any], patch: dict[str, Any], persisted: dict[str, Any], force: bool,
 ) -> None:
+    current = {**current, "force": force}
+    persisted = {**persisted, "force": force}
     http = FakeHttpClient([
         _envelope({"secondary_model": current}),
         _envelope({"secondary_model": persisted}),
@@ -1393,19 +1400,19 @@ async def test_set_secondary_model_entry_uses_merge_and_preserves_default(
     assert [request[0] for request in http.requests] == ["GET", "POST"]
     assert http.requests[-1][1] == "http://127.0.0.1:43123/api/v1/config"
     assert http.requests[-1][2]["json"] == {"secondary_model": patch}
+    assert updated.force is force
     assert updated.default_model == persisted["defaultModel"]
     assert dict(updated.models or ()) == persisted["models"]
 
 
-@pytest.mark.parametrize("model", ["primary", "kimi-code/fast"])
-async def test_secondary_model_pool_rejects_reserved_alias_and_forced_mode(model: str) -> None:
+async def test_secondary_model_pool_rejects_reserved_alias() -> None:
     http = FakeHttpClient([
         _envelope({"secondary_model": {"defaultModel": "kimi-code/k3", "force": True}}),
     ])
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
     with pytest.raises(KimiServerOperationError):
-        await client.set_secondary_model_entry(model, "Fast tasks")
+        await client.set_secondary_model_entry("primary", "Fast tasks")
 
     assert all(request[0] == "GET" for request in http.requests)
 
@@ -2959,3 +2966,48 @@ async def test_supervisor_reports_missing_kimi_before_start() -> None:
 
     with pytest.raises(KimiServerStartupError, match="not installed"):
         await supervisor.start()
+
+
+@pytest.mark.parametrize("select_default", [False, True])
+async def test_concurrent_secondary_model_updates_use_fresh_configuration(select_default: bool) -> None:
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    initial = {"defaultModel": "fast", "models": {"fast": "Quick tasks"}}
+    updated = {
+        "defaultModel": "smart" if select_default else "fast",
+        "models": {"fast": "Quick tasks", "smart": "" if select_default else "Hard tasks"},
+    }
+
+    class PausingHttpClient(FakeHttpClient):
+        async def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
+            response = await super().request(method, url, **kwargs)
+            if len(self.requests) == 1:
+                reading.set()
+                await release.wait()
+            return response
+
+    http = PausingHttpClient([
+        _envelope({"secondary_model": {}}),
+        _envelope({"secondary_model": initial}),
+        _envelope({"secondary_model": initial}),
+        _envelope({"secondary_model": updated}),
+    ])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+    first = asyncio.create_task(client.set_secondary_model_entry("fast", "Quick tasks"))
+    await reading.wait()
+    second = asyncio.create_task(
+        client.set_secondary_model("smart") if select_default
+        else client.set_secondary_model_entry("smart", "Hard tasks")
+    )
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert [request[0] for request in http.requests] == ["GET", "POST", "GET", "POST"]
+    assert results[0].default_model == "fast"
+    assert results[1].default_model == updated["defaultModel"]
+    assert dict(results[1].models or ()) == updated["models"]
+    patch = http.requests[-1][2]["json"]["secondary_model"]
+    assert patch == (
+        {"default_model": "smart", "models": {"smart": ""}}
+        if select_default else {"models": {"smart": "Hard tasks"}}
+    )

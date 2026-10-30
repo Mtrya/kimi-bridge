@@ -233,7 +233,7 @@ Arguments:
 
 Defaults: with no arguments, show the current selection, pool, and catalog. With no configured selection, subagents inherit their primary agent's model. Adding the first entry makes it the default; later additions keep the existing default.
 
-Side effects: updates Kimi Code's global `[secondary_model]` configuration and affects later subagent spawns in every session, including sessions that are currently busy. Existing subagents and primary session models are unchanged. Pool edits are rejected when Kimi's `force` setting is enabled. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh.
+Side effects: updates Kimi Code's global `[secondary_model]` configuration and affects later subagent spawns in every session, including sessions that are currently busy. Existing subagents and primary session models are unchanged. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh.
 
 Example:
 - `/secondary-model`
