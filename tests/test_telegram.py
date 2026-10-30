@@ -27,6 +27,7 @@ from kimi_bridge.interactions import (
     SkippedAnswer,
 )
 from kimi_bridge.platforms.base import (
+    ActorRef,
     ConversationRef,
     InboundInteraction,
     InboundMessage,
@@ -1167,3 +1168,19 @@ def test_approval_text_includes_plan_preview_and_skips_json_summary() -> None:
     assert "Plan:" in text
     assert "# Plan" in text
     assert "p.md" not in text
+
+
+async def test_restore_telegram_conversation_restores_interaction_recipient() -> None:
+    api = FakeTelegramAPI()
+    adapter = await _start_adapter(api)
+    conversation = ConversationRef("telegram", "999", "111")
+    actor = ActorRef("111")
+    try:
+        assert adapter.restore_conversation(conversation, actor)
+        await adapter.present_interaction(conversation, _question_prompt())
+        assert _requests(api, "sendMessage")[-1]["chat_id"] == 111
+        assert not adapter.restore_conversation(ConversationRef("telegram", "999", "222"), ActorRef("222"))
+        assert not adapter.restore_conversation(ConversationRef("qq", "999", "111"), actor)
+        assert not adapter.restore_conversation(ConversationRef("telegram", "old-bot", "111"), actor)
+    finally:
+        await adapter.stop()

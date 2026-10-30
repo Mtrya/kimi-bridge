@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from kimi_bridge import __main__ as main_module
 from kimi_bridge.interactions import (
     ApprovalPrompt,
     ApprovalRequest,
@@ -61,6 +62,7 @@ from kimi_bridge.platforms.base import (
     ConversationRef,
     InboundAudio,
     InboundFile,
+    InboundHandler,
     InboundImage,
     InboundInteraction,
     InboundMessage,
@@ -74,7 +76,12 @@ from kimi_bridge.router.core import (
     VOICE_UNTRANSCRIBED_NOTICE,
 )
 from kimi_bridge.router.help import COMMAND_HELP, command_help_details
-from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
+from kimi_bridge.state import (
+    BridgeState,
+    ConversationBinding,
+    DeliveryRoute,
+    StateStore,
+)
 
 
 class FakeKimiClient:
@@ -587,6 +594,11 @@ class FakeAdapter:
         self.finish_error: Exception | None = None
         self.transcribed_audio: list[InboundAudio] = []
 
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        return conversation.platform == self.name and conversation.bot_id == "cli_bot"
+
     async def start(
         self, _message_handler: Any, _interaction_handler: Any
     ) -> None:
@@ -803,6 +815,12 @@ def _bind_control_session(store: StateStore) -> None:
                     session_id="session-control",
                     workspace="/tmp/control",
                     permission_mode="manual",
+                    delivery=DeliveryRoute(
+                        platform="feishu",
+                        bot_id="cli_bot",
+                        conversation_id="oc_direct",
+                        actor_id="ou_user",
+                    ),
                 )
             }
         )
@@ -845,6 +863,265 @@ async def test_first_message_creates_manual_session_and_persists_binding(
     assert binding.session_id == "session-1"
     assert binding.workspace == str(workspace.resolve())
     assert binding.permission_mode == "manual"
+
+
+@pytest.mark.parametrize(
+    "inspection_commands",
+    [(), ("/status", "/tasks", "/history")],
+    ids=["no-inbound-message", "inspection-commands"],
+)
+async def test_runtime_restart_restores_cron_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inspection_commands: tuple[str, ...],
+) -> None:
+    """A saved binding must receive autonomous turns after a process restart."""
+
+    store = StateStore(tmp_path / "state.json")
+    workspace = tmp_path / "workspace"
+    seed_client = FakeKimiClient()
+    seed_router = ChatRouter(
+        seed_client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=workspace,
+        model="kimi-code/k3",
+    )
+    # Persist through the public inbound path so the test does not prescribe
+    # a state schema or guess a chat destination from the actor's ID.
+    original_message = _message("/new", conversation_id="oc_cron_destination")
+    try:
+        await seed_router.handle_inbound(FakeAdapter(), original_message)
+    finally:
+        await seed_router.close()
+    session_id = next(iter(store.load().bindings.values())).session_id
+
+    class RuntimeClient(FakeKimiClient):
+        async def __aenter__(self) -> RuntimeClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            pass
+
+    class RuntimeSupervisor:
+        async def __aenter__(self) -> RuntimeSupervisor:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            pass
+
+    cron_reply = "Cron completed after restart without a new prompt."
+
+    class RuntimeAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.running = asyncio.Event()
+            self.stopped = asyncio.Event()
+            self.delivered = asyncio.Event()
+            self.on_message: InboundHandler | None = None
+
+        async def start(
+            self, on_message: InboundHandler, _on_interaction: Any
+        ) -> None:
+            self.on_message = on_message
+
+        async def wait(self) -> None:
+            self.running.set()
+            await self.stopped.wait()
+
+        async def stop(self) -> None:
+            self.stopped.set()
+
+        async def send_text(
+            self, conversation: ConversationRef, text: str
+        ) -> MessageRef:
+            message = await super().send_text(conversation, text)
+            if text == cron_reply:
+                self.delivered.set()
+            return message
+
+    # Only the server's sessions and the saved bridge state survive restart;
+    # the new client and adapter have no old subscriptions or routing context.
+    client = RuntimeClient()
+    client.sessions = seed_client.sessions
+    adapter = RuntimeAdapter()
+    stop_requests: list[asyncio.Event] = []
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'default_workspace = "{workspace.as_posix()}"\n'
+        f'state_path = "{store.path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        main_module, "KimiServerSupervisor", lambda **_kwargs: RuntimeSupervisor()
+    )
+    monkeypatch.setattr(main_module, "KimiServerClient", lambda **_kwargs: client)
+    monkeypatch.setattr(main_module, "_build_adapter", lambda _config: adapter)
+    monkeypatch.setattr(
+        main_module,
+        "_install_shutdown_signal_handlers",
+        lambda _loop, event: stop_requests.append(event),
+    )
+
+    runtime = asyncio.create_task(main_module.run(config_path))
+    try:
+        await asyncio.wait_for(adapter.running.wait(), timeout=1)
+        assert adapter.on_message is not None
+        for command in inspection_commands:
+            await adapter.on_message(
+                adapter, replace(original_message, text=command)
+            )
+
+        # Exercise the actual event consumer, not dispatch_event directly.
+        # Cron turns are autonomous and do not carry a user prompt ID.
+        client.emit(
+            session_id,
+            _event("turn.started", turnId=1, origin={"kind": "cron_job"}),
+        )
+        client.emit(
+            session_id, _event("assistant.delta", delta=cron_reply, offset=0)
+        )
+        client.emit(
+            session_id, _event("turn.ended", turnId=1, reason="completed")
+        )
+        try:
+            await asyncio.wait_for(adapter.delivered.wait(), timeout=1)
+        except TimeoutError:
+            pytest.fail(
+                "The restarted bridge did not deliver the autonomous cron reply"
+            )
+
+        replies = [
+            (conversation, text)
+            for _ref, conversation, text in adapter.sent
+            if text == cron_reply
+        ]
+        assert replies == [(original_message.conversation, cron_reply)]
+        assert client.created == []
+        assert client.prompts == []
+        assert next(iter(store.load().bindings.values())).session_id == session_id
+    finally:
+        if stop_requests:
+            stop_requests[0].set()
+        await asyncio.wait_for(runtime, timeout=1)
+
+
+async def test_bound_inspection_command_restores_stream_after_state_upgrade(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    store.save(
+        BridgeState(
+            bindings={
+                "feishu:cli_bot:ou_user": ConversationBinding(
+                    session_id="session-control",
+                    workspace="/tmp/control",
+                    permission_mode="manual",
+                )
+            }
+        )
+    )
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+    finally:
+        await router.close()
+
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.delivery == DeliveryRoute(
+        platform="feishu",
+        bot_id="cli_bot",
+        conversation_id="oc_direct",
+        actor_id="ou_user",
+    )
+    assert client.stream_actions == [("subscribe", "session-control")]
+
+
+@pytest.mark.parametrize("active", [None, "feishu:cli_bot:ou_user"])
+async def test_restore_requires_an_explicit_active_conversation(
+    tmp_path: Path, active: str | None
+) -> None:
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    state = store.load()
+    state.active_conversation = active
+    store.save(state)
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    router = ChatRouter(
+        client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3"
+    )
+    try:
+        await router.restore(FakeAdapter())
+        assert client.subscriptions == (["session-control"] if active else [])
+        assert client.prompts == []
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize(
+    "route_change", [{"platform": "qq"}, {"bot_id": "another-bot"}]
+)
+async def test_restore_rejects_a_route_for_another_adapter(
+    tmp_path: Path, route_change: dict[str, str]
+) -> None:
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    state = store.load()
+    key = "feishu:cli_bot:ou_user"
+    binding = state.bindings[key]
+    assert binding.delivery is not None
+    state.bindings[key] = replace(
+        binding, delivery=replace(binding.delivery, **route_change)
+    )
+    state.active_conversation = key
+    store.save(state)
+    client = FakeKimiClient()
+    router = ChatRouter(
+        client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3"
+    )
+    try:
+        await router.restore(FakeAdapter())
+        assert client.subscriptions == []
+        assert client.profile_updates == []
+        assert store.load() == state
+    finally:
+        await router.close()
+
+
+async def test_restore_keeps_only_the_last_active_conversation(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    state = store.load()
+    key = "feishu:cli_bot:ou_user"
+    state.bindings["feishu:cli_bot:other"] = replace(
+        state.bindings[key],
+        session_id="inactive-session",
+        delivery=DeliveryRoute("feishu", "cli_bot", "other-chat", "other"),
+    )
+    state.active_conversation = key
+    store.save(state)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3"
+    )
+    try:
+        await router.restore(adapter)
+        assert client.subscriptions == ["session-control"]
+        assert store.load() == state
+    finally:
+        await router.close()
 
 
 async def test_first_video_message_uses_a_video_session_title(

@@ -455,7 +455,7 @@ async def test_allowlisted_p2p_text_is_normalized_once() -> None:
         assert received == [
             InboundMessage(
                 conversation=conversation,
-                actor=ActorRef("ou_allowed"),
+                actor=ActorRef("ou_allowed", aliases=("user_allowed",)),
                 text="hello",
                 timestamp=event.event.message.create_time / 1000,
                 message_id="om_1",
@@ -1164,7 +1164,7 @@ async def test_card_callback_is_normalized_and_non_allowlisted_is_silent() -> No
     assert actions == [
         InboundInteraction(
             source=MessageRef(conversation, "card-1"),
-            actor=ActorRef("ou_allowed"),
+            actor=ActorRef("ou_allowed", aliases=("user_allowed",)),
             interaction_id="interaction-1",
             response=ApprovalResponse("approved"),
         )
@@ -1203,7 +1203,7 @@ async def test_card_callback_after_restart_preserves_stale_identity() -> None:
                 ConversationRef("feishu", "cli_event", "oc_direct"),
                 "om_card",
             ),
-            actor=ActorRef("ou_allowed"),
+            actor=ActorRef("ou_allowed", aliases=("user_allowed",)),
             interaction_id="interaction-from-old-run",
             response=None,
         )
@@ -1565,3 +1565,13 @@ async def _wait_for(predicate: Any) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("condition did not become true")
+
+
+def test_restore_conversation_checks_current_feishu_identity_and_allowlist() -> None:
+    adapter = FeishuAdapter("cli_bot", "secret", {"user_alias"}, transport=FakeTransport())
+    conversation = ConversationRef("feishu", "cli_bot", "oc_direct")
+    actor = ActorRef("ou_user", aliases=("user_alias",))
+    assert adapter.restore_conversation(conversation, actor)
+    assert not adapter.restore_conversation(conversation, ActorRef("removed-user"))
+    assert not adapter.restore_conversation(ConversationRef("qq", "cli_bot", "oc_direct"), actor)
+    assert not adapter.restore_conversation(ConversationRef("feishu", "old-bot", "oc_direct"), actor)

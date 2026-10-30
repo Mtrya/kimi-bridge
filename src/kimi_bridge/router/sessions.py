@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -23,7 +24,11 @@ from ..platforms.base import (
     ConversationRef,
     PlatformAdapter,
 )
-from ..state import PERMISSION_MODES, ConversationBinding
+from ..state import (
+    PERMISSION_MODES,
+    ConversationBinding,
+    DeliveryRoute,
+)
 from .files import _expand_fullwidth_tilde
 from .formatting import _session_recency_key
 from .models import _ActiveStream, _CompactionOutcome
@@ -45,6 +50,34 @@ class _SessionMixin:
         self._state.bindings[conversation_key] = binding
         self._state_store.save(self._state)
 
+    def _remember_delivery(
+        self,
+        conversation_key: str,
+        conversation: ConversationRef,
+        actor: ActorRef,
+    ) -> None:
+        binding = self._state.bindings.get(conversation_key)
+        if binding is None:
+            return
+        delivery = DeliveryRoute(
+            platform=conversation.platform,
+            bot_id=conversation.bot_id,
+            conversation_id=conversation.conversation_id,
+            actor_id=actor.id,
+            actor_aliases=actor.aliases,
+        )
+        if binding.delivery == delivery:
+            return
+        self._set_binding(conversation_key, replace(binding, delivery=delivery))
+
+    def _remember_active_conversation(
+        self, conversation_key: str | None
+    ) -> None:
+        if self._state.active_conversation == conversation_key:
+            return
+        self._state.active_conversation = conversation_key
+        self._state_store.save(self._state)
+
     def _default_permission_mode(self, adapter: PlatformAdapter) -> str:
         return DEFAULT_PERMISSION_MODE if adapter.supports_interactions else "auto"
 
@@ -62,9 +95,8 @@ class _SessionMixin:
             return
         self._set_binding(
             conversation_key,
-            ConversationBinding(
-                session_id=binding.session_id,
-                workspace=binding.workspace,
+            replace(
+                binding,
                 permission_mode="auto",
                 render_thinking=False,
             ),
@@ -144,6 +176,8 @@ class _SessionMixin:
         for key, binding in tuple(self._state.bindings.items()):
             if binding.session_id == session_id:
                 del self._state.bindings[key]
+        if self._state.active_conversation not in self._state.bindings:
+            self._state.active_conversation = None
         self._verified_session_profiles.discard(session_id)
         # Invalidate the whole listing so remembered numeric choices never shift.
         for key, choices in tuple(self._session_choices.items()):
@@ -229,6 +263,8 @@ class _SessionMixin:
         workspace: Path,
         title: str,
         adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
     ) -> ConversationBinding:
         permission_mode = self._default_permission_mode(adapter)
         model = await self._client.get_default_model()
@@ -253,6 +289,13 @@ class _SessionMixin:
                 current is not None
                 and current.render_thinking
                 and adapter.supports_interactions
+            ),
+            delivery=DeliveryRoute(
+                platform=conversation.platform,
+                bot_id=conversation.bot_id,
+                conversation_id=conversation.conversation_id,
+                actor_id=actor.id,
+                actor_aliases=actor.aliases,
             ),
         )
         self._set_binding(conversation_key, binding)
@@ -298,6 +341,8 @@ class _SessionMixin:
         *,
         adapter: PlatformAdapter,
         render_thinking: bool,
+        conversation: ConversationRef,
+        actor: ActorRef,
     ) -> ConversationBinding:
         workspace = str(session["metadata"]["cwd"])
         agent_config = session.get("agent_config")
@@ -316,6 +361,13 @@ class _SessionMixin:
             workspace=workspace,
             permission_mode=mode,
             render_thinking=render_thinking,
+            delivery=DeliveryRoute(
+                platform=conversation.platform,
+                bot_id=conversation.bot_id,
+                conversation_id=conversation.conversation_id,
+                actor_id=actor.id,
+                actor_aliases=actor.aliases,
+            ),
         )
         return binding
 
@@ -362,6 +414,7 @@ class _SessionMixin:
                 active.adapter = adapter
                 active.conversation = conversation
                 active.actor = actor
+                self._remember_active_conversation(conversation_key)
                 return
 
         await self._stop_active_stream()
@@ -392,6 +445,7 @@ class _SessionMixin:
                 stream_task.result()
                 raise KimiServerOperationError("kimi event stream ended before subscribing")
             await subscription_wait
+            self._remember_active_conversation(conversation_key)
         except BaseException:
             if not subscription_wait.done():
                 subscription_wait.cancel()
@@ -400,6 +454,74 @@ class _SessionMixin:
             await self._stop_active_stream()
             raise
         stream_task.add_done_callback(self._stream_done)
+
+    async def restore(self, adapter: PlatformAdapter) -> None:
+        """Restore event delivery for the conversation active before restart."""
+
+        async with self._inbound_lock:
+            await self._restore_active_stream(adapter)
+
+    async def _restore_active_stream(self, adapter: PlatformAdapter) -> None:
+        conversation_key = self._state.active_conversation
+        binding = (
+            self._state.bindings.get(conversation_key)
+            if conversation_key is not None
+            else None
+        )
+        if binding is None or binding.delivery is None:
+            return
+        assert conversation_key is not None
+        delivery = binding.delivery
+        conversation = ConversationRef(
+            delivery.platform, delivery.bot_id, delivery.conversation_id
+        )
+        actor = ActorRef(delivery.actor_id, aliases=delivery.actor_aliases)
+        if not adapter.restore_conversation(conversation, actor):
+            LOGGER.warning(
+                "saved conversation %s is not allowed by the current adapter",
+                conversation_key,
+            )
+            return
+        self._coerce_binding_capabilities(conversation_key, adapter)
+        await self._restore_bound_stream(
+            conversation_key, adapter, conversation, actor
+        )
+
+    async def _restore_bound_stream(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
+    ) -> None:
+        binding = self._state.bindings.get(conversation_key)
+        if binding is None or binding.delivery is None:
+            return
+        active = self._active
+        if (
+            active is not None
+            and active.task is not None
+            and not active.task.done()
+            and active.conversation_key != conversation_key
+        ):
+            return
+        try:
+            if await self._client.is_session_archived(binding.session_id):
+                await self._detach_archived_session(binding.session_id)
+                return
+            await self._ensure_active_stream(
+                conversation_key,
+                binding.session_id,
+                adapter,
+                conversation,
+                actor,
+            )
+        except (KimiServerError, TimeoutError):
+            LOGGER.warning(
+                "could not restore event delivery for %s",
+                conversation_key,
+                exc_info=True,
+            )
 
     async def _stop_active_stream(self, *, preserve_compaction_waiter: bool = False) -> None:
         active = self._active

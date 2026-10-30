@@ -1249,6 +1249,16 @@ class QQAdapter:
         self._next_text_handle = 1
         self._closed = False
 
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        return (
+            conversation.platform == self.name
+            and conversation.bot_id == self._app_id
+            and conversation.conversation_id == actor.id
+            and actor.id in self._allowed_users
+        )
+
     async def start(
         self,
         on_message: InboundHandler,

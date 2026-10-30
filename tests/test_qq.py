@@ -10,7 +10,7 @@ import pytest
 from websockets.exceptions import ConnectionClosed
 
 from kimi_bridge.platforms import qq as qq_module
-from kimi_bridge.platforms.base import ConversationRef, MessageRef
+from kimi_bridge.platforms.base import ActorRef, ConversationRef, MessageRef
 from kimi_bridge.platforms.qq import (
     GROUP_AND_C2C_EVENT_INTENT,
     MSG_TYPE_MARKDOWN,
@@ -3292,4 +3292,19 @@ async def test_regular_segments_cannot_be_interleaved(concurrent: str) -> None:
         api.block_regular_response = False
         api.release_regular_response.set()
         await asyncio.gather(sending, competing, return_exceptions=True)
+        await adapter.stop()
+
+
+async def test_restore_conversation_checks_current_qq_identity_and_allowlist() -> None:
+    adapter = _make_qq_adapter(FakeQQBotAPI(), FakeQQGateway())
+    conversation = ConversationRef("qq", "app-1", "OPENID-USER")
+    actor = ActorRef("OPENID-USER")
+    try:
+        assert adapter.restore_conversation(conversation, actor)
+        assert not adapter.restore_conversation(
+            ConversationRef("qq", "app-1", "removed-user"), ActorRef("removed-user")
+        )
+        assert not adapter.restore_conversation(ConversationRef("wechat", "app-1", actor.id), actor)
+        assert not adapter.restore_conversation(ConversationRef("qq", "old-bot", actor.id), actor)
+    finally:
         await adapter.stop()
