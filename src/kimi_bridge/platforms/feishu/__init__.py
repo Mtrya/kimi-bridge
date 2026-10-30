@@ -676,6 +676,15 @@ class FeishuAdapter:
         self._seen_order: deque[str] = deque()
         self._started_at_ms = 0
 
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        return (
+            conversation.platform == self.name
+            and conversation.bot_id == self._app_id
+            and bool(self._allowed_users.intersection((actor.id, *actor.aliases)))
+        )
+
     async def start(
         self,
         on_message: InboundHandler,
@@ -979,7 +988,7 @@ class FeishuAdapter:
             self,
             InboundMessage(
                 conversation=conversation,
-                actor=ActorRef(recipient),
+                actor=ActorRef(recipient, aliases=tuple(sorted(identities - {recipient}))),
                 message_id=message_id,
                 text=text,
                 timestamp=create_time / 1000,
@@ -1048,7 +1057,7 @@ class FeishuAdapter:
             self,
             InboundInteraction(
                 source=source,
-                actor=ActorRef(recipient),
+                actor=ActorRef(recipient, aliases=tuple(sorted(identities - {recipient}))),
                 interaction_id=(
                     interaction_id_from_value(value)
                     or (prompt.interaction_id if prompt is not None else None)

@@ -21,6 +21,7 @@ from kimi_bridge.interactions import (
     InteractionOutcome,
 )
 from kimi_bridge.platforms.base import (
+    ActorRef,
     ConversationRef,
     InboundMessage,
     MessageRef,
@@ -2771,3 +2772,21 @@ async def test_lifecycle_retries_safe_notifications_and_closes_once(
         "stop",
     ]
     assert runtime_api.close_calls == 1
+
+
+async def test_restore_conversation_checks_current_wechat_identity_and_allowlist(tmp_path: Path) -> None:
+    async def on_message(*_args: Any) -> None:
+        pass
+
+    adapter, _api, _storage = await _start_runtime_adapter(tmp_path, on_message)
+    conversation = ConversationRef("wechat", "bot-one@im.bot", "user-one")
+    actor = ActorRef("user-one")
+    try:
+        assert adapter.restore_conversation(conversation, actor)
+        assert not adapter.restore_conversation(
+            ConversationRef("wechat", "bot-one@im.bot", "removed-user"), ActorRef("removed-user")
+        )
+        assert not adapter.restore_conversation(ConversationRef("qq", "bot-one@im.bot", actor.id), actor)
+        assert not adapter.restore_conversation(ConversationRef("wechat", "old-bot", actor.id), actor)
+    finally:
+        await adapter.stop()

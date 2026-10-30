@@ -223,6 +223,16 @@ class WeChatAdapter:
         self._terminal_error: BaseException | None = None
         self._closed = False
 
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        return (
+            conversation.platform == self.name
+            and conversation.bot_id == self._bot_id
+            and conversation.conversation_id == actor.id
+            and actor.id in self._allowed_users
+        )
+
     async def start(
         self,
         on_message: InboundHandler,

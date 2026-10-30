@@ -24,6 +24,7 @@ class ConversationRef:
 class ActorRef:
     id: str
     name: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +120,12 @@ class PlatformAdapter(Protocol):
     supports_edits: bool
     supports_interactions: bool
     message_edit_limit: int | None
+
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        """Accept a saved destination under the current bot and allowlist."""
+        ...
 
     async def start(
         self,

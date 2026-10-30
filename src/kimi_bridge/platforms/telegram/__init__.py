@@ -420,6 +420,19 @@ class TelegramAdapter:
         self._closed_replies: set[tuple[ConversationRef, str]] = set()
         self._closed_reply_order: deque[tuple[ConversationRef, str]] = deque()
 
+    def restore_conversation(
+        self, conversation: ConversationRef, actor: ActorRef
+    ) -> bool:
+        if (
+            conversation.platform != self.name
+            or conversation.bot_id != self._bot_id
+            or conversation.conversation_id != actor.id
+            or actor.id not in {str(user) for user in self._allowed_users}
+        ):
+            return False
+        self._conversation_actors[conversation] = actor.id
+        return True
+
     async def start(
         self,
         on_message: InboundHandler,

@@ -106,6 +106,7 @@ async def run(config_path: str | Path) -> None:
             signal_wait: asyncio.Task[bool] | None = None
             try:
                 await adapter.start(router.handle_inbound, router.handle_interaction)
+                await router.restore(adapter)
                 adapter_wait = asyncio.create_task(
                     adapter.wait(), name=f"{adapter.name}-adapter"
                 )

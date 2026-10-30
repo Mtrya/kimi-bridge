@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import cast
@@ -17,7 +18,7 @@ from ..kimi_server import (
     TaskStatus,
 )
 from ..platforms.base import ActorRef, ConversationRef, MessageRef, PlatformAdapter
-from ..state import PERMISSION_MODES, ConversationBinding
+from ..state import PERMISSION_MODES
 from .files import _load_outbound_file
 from .help import command_help_details, render_help_index
 from .formatting import (
@@ -57,6 +58,9 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "auto": "Regular tools are auto-approved; questions are skipped. Feishu/Telegram still review plans.",
     "yolo": "Regular tools are auto-approved; questions and plan review remain interactive.",
 }
+_BOUND_INSPECTION_COMMANDS = frozenset(
+    {"/status", "/tasks", "/history", "/title", "/usage"}
+)
 
 class _CommandMixin:
     async def _handle_command(
@@ -78,6 +82,10 @@ class _CommandMixin:
         if command == "/help":
             await self._send_chunked(adapter, conversation, render_help_index())
             return
+        if command in _BOUND_INSPECTION_COMMANDS:
+            await self._restore_bound_stream(
+                conversation_key, adapter, conversation, actor
+            )
         if command == "/new":
             try:
                 workspace = await self._resolve_new_workspace(argument)
@@ -89,6 +97,8 @@ class _CommandMixin:
                 workspace,
                 f"Kimi: {workspace.name or workspace}",
                 adapter,
+                conversation,
+                actor,
             )
             await self._ensure_active_stream(
                 conversation_key,
@@ -169,6 +179,8 @@ class _CommandMixin:
                 render_thinking=(
                     current.render_thinking if current is not None else False
                 ),
+                conversation=conversation,
+                actor=actor,
             )
             try:
                 await self._ensure_active_stream(
@@ -299,13 +311,9 @@ class _CommandMixin:
             await self._client.update_profile(
                 binding.session_id, permission_mode=argument
             )
-            updated = ConversationBinding(
-                session_id=binding.session_id,
-                workspace=binding.workspace,
-                permission_mode=argument,
-                render_thinking=binding.render_thinking,
+            self._set_binding(
+                conversation_key, replace(binding, permission_mode=argument)
             )
-            self._set_binding(conversation_key, updated)
             await self._send_chunked(
                 adapter,
                 conversation,
@@ -674,12 +682,7 @@ class _CommandMixin:
         enabled = argument == "on"
         changed = binding.render_thinking != enabled
         if changed:
-            binding = ConversationBinding(
-                session_id=binding.session_id,
-                workspace=binding.workspace,
-                permission_mode=binding.permission_mode,
-                render_thinking=enabled,
-            )
+            binding = replace(binding, render_thinking=enabled)
             self._set_binding(conversation_key, binding)
 
         if enabled:

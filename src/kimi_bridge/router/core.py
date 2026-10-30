@@ -161,6 +161,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         completion = None
         async with self._inbound_lock:
             self._coerce_binding_capabilities(conversation_key, adapter)
+            self._remember_delivery(conversation_key, msg.conversation, msg.actor)
             try:
                 if is_command:
                     completion = await self._handle_command(
@@ -187,6 +188,8 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                             self._default_workspace,
                             _title_from_message(msg),
                             adapter,
+                            msg.conversation,
+                            msg.actor,
                         )
                     await self._ensure_active_stream(
                         conversation_key,
