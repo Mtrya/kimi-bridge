@@ -40,7 +40,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/send <path>` | Send one regular file contained by the bound workspace. |
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
 
-Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. After switching sessions, list tasks again before using a number. Explicit IDs remain valid without a prior listing.
+Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. Changing the bound session clears your task numbers across chats, including when you later switch back. Explicit IDs remain valid without a prior listing. Bare numbers always select list positions; use `/tasks show id <id>` or `/tasks cancel id <id>` for an exact ID, including numeric IDs such as `/tasks show id 123`.
 
 Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` default; it affects later subagent spawns in every session without changing existing subagents or primary session models. This command requires Kimi Code 0.42.0 or newer, where secondary models are always enabled. Plan usage and quota reset information are not exposed by the public local server.
 

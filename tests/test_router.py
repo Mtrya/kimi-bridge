@@ -1827,6 +1827,139 @@ async def test_partial_task_list_delivery_invalidates_numbers(tmp_path: Path) ->
     assert client.cancelled_tasks == [("session-control", "task-new")]
 
 
+async def test_explicit_task_ids_bypass_number_selection(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    tasks = [_task("task-first"), _task("1"), _task("0001"), _task("987654321")]
+    client.tasks["session-control"] = tasks
+    client.task_details = {(task.session_id, task.id): task for task in tasks}
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        # Exact IDs work both before listing and when an ID collides with a number.
+        for listed in (False, True):
+            if listed:
+                await router.handle_inbound(adapter, _message("/tasks"))
+            for task in tasks:
+                for verb in ("show", "cancel"):
+                    await router.handle_inbound(
+                        adapter, _message(f"/tasks {verb} id {task.id}")
+                    )
+        await router.handle_inbound(adapter, _message("/tasks show 1"))
+        await router.handle_inbound(adapter, _message("/tasks cancel 1"))
+    finally:
+        await router.close()
+
+    expected = [task.id for task in tasks] * 2 + ["task-first"]
+    assert client.task_detail_calls == [
+        ("session-control", task_id, 8192) for task_id in expected
+    ]
+    assert client.cancelled_tasks == [
+        ("session-control", task_id) for task_id in expected
+    ]
+    assert client.task_list_calls == [("session-control", "running")]
+
+
+@pytest.mark.parametrize("listed", [False, True])
+async def test_long_task_numbers_reply_without_calling_task_api(
+    tmp_path: Path,
+    listed: bool,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    client.tasks["session-control"] = [_task("task-first")]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        if listed:
+            await router.handle_inbound(adapter, _message("/tasks"))
+        for selector in ("9" * 5000, "0" * 5000, "١" * 5000):
+            for verb in ("show", "cancel"):
+                before = len(adapter.sent)
+                await router.handle_inbound(
+                    adapter, _message(f"/tasks {verb} {selector}")
+                )
+                assert len(adapter.sent) > before
+                assert "/tasks" in adapter.sent[-1][2]
+    finally:
+        await router.close()
+
+    assert client.task_detail_calls == client.cancelled_tasks == []
+
+
+@pytest.mark.parametrize(
+    ("commands", "invalidated"),
+    [
+        (["/switch session-other", "/switch session-control"], True),
+        (["/new", "/switch session-control"], True),
+        (["/switch session-control"], False),
+        (["/switch missing"], False),
+        (["/mode auto"], False),
+    ],
+)
+async def test_task_choices_follow_binding_changes_across_chats(
+    tmp_path: Path,
+    commands: list[str],
+    invalidated: bool,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(),
+        {**_control_session(), "id": "session-other"},
+    ]
+    task = _task("task-first")
+    client.tasks[task.session_id] = [task]
+    client.task_details[(task.session_id, task.id)] = task
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        # Bindings are per actor, so a switch in another chat must also invalidate.
+        await router.handle_inbound(
+            adapter, _message("/tasks", conversation_id="oc_tasks")
+        )
+        for command in commands:
+            await router.handle_inbound(adapter, _message(command))
+        for verb in ("show", "cancel"):
+            await router.handle_inbound(
+                adapter, _message(f"/tasks {verb} 1", conversation_id="oc_tasks")
+            )
+        if invalidated:
+            assert client.task_detail_calls == client.cancelled_tasks == []
+            await router.handle_inbound(
+                adapter, _message("/tasks", conversation_id="oc_tasks")
+            )
+            for verb in ("show", "cancel"):
+                await router.handle_inbound(
+                    adapter, _message(f"/tasks {verb} 1", conversation_id="oc_tasks")
+                )
+    finally:
+        await router.close()
+
+    assert client.task_detail_calls == [(task.session_id, task.id, 8192)]
+    assert client.cancelled_tasks == [(task.session_id, task.id)]
+
+
 async def test_task_detail_humanizes_duration_and_blank_output(
     tmp_path: Path,
 ) -> None:

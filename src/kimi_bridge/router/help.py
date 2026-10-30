@@ -379,7 +379,7 @@ Example:
         section="Tasks and tools",
         details="""**/tasks [all|completed|failed|cancelled]**
 
-List numbered background tasks of the bound session. Use the displayed number with `/tasks show` or `/tasks cancel`. Numbers refer to your latest list in this chat and session, including any status filter, and stay fixed until you list tasks again.
+List numbered background tasks of the bound session. Use the displayed number with `/tasks show` or `/tasks cancel`. Numbers refer to your latest list in this chat and session, including any status filter, and stay fixed until you list tasks again. Changing the bound session clears your task numbers across chats.
 
 Arguments:
 - `all` — include tasks in every status.
@@ -405,8 +405,11 @@ Arguments:
 - `n` — a number from your latest `/tasks` list in this chat and session.
 - `id` — a task ID from `/tasks`.
 
+Bare numbers select list positions. Use `/tasks show id <id>` to select an exact ID, including a numeric ID.
+
 Example:
-- `/tasks show 2`""",
+- `/tasks show 2`
+- `/tasks show id 123`""",
     ),
     "/tasks cancel": CommandHelp(
         syntax="/tasks cancel <n|id>",
@@ -420,10 +423,13 @@ Arguments:
 - `n` — a number from your latest `/tasks` list in this chat and session.
 - `id` — a task ID from `/tasks`.
 
+Bare numbers select list positions. Use `/tasks cancel id <id>` to select an exact ID, including a numeric ID.
+
 Side effects: executes immediately, even while a turn is busy.
 
 Example:
-- `/tasks cancel 1`""",
+- `/tasks cancel 1`
+- `/tasks cancel id 123`""",
     ),
     "/skills": CommandHelp(
         syntax="/skills",

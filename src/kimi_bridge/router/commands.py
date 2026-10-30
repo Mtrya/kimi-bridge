@@ -168,8 +168,7 @@ class _CommandMixin:
                     f"Could not switch to {binding.session_id}: {exc}",
                 )
                 return
-            self._state.bindings[conversation_key] = binding
-            self._state_store.save(self._state)
+            self._set_binding(conversation_key, binding)
             recap = await self._history_recap(binding.session_id)
             confirmation = f"Switched to {binding.session_id}"
             if recap is not None:
@@ -289,8 +288,7 @@ class _CommandMixin:
                 permission_mode=argument,
                 render_thinking=binding.render_thinking,
             )
-            self._state.bindings[conversation_key] = updated
-            self._state_store.save(self._state)
+            self._set_binding(conversation_key, updated)
             await self._send_chunked(
                 adapter,
                 conversation,
@@ -653,8 +651,7 @@ class _CommandMixin:
                 permission_mode=binding.permission_mode,
                 render_thinking=enabled,
             )
-            self._state.bindings[conversation_key] = binding
-            self._state_store.save(self._state)
+            self._set_binding(conversation_key, binding)
 
         if enabled:
             await self._ensure_active_stream(
@@ -707,15 +704,16 @@ class _CommandMixin:
             )
             return
         parts = argument.split()
-        if len(parts) == 2 and parts[0] in {"show", "cancel"}:
-            task_id = parts[1]
-            if task_id.isdecimal():
+        explicit_id = len(parts) == 3 and parts[1] == "id"
+        if (len(parts) == 2 or explicit_id) and parts[0] in {"show", "cancel"}:
+            task_id = parts[-1]
+            if not explicit_id and task_id.isdecimal():
                 choices = self._task_choices.get((conversation_key, conversation))
-                index = int(task_id) - 1
                 if (
                     choices is None
                     or choices[0] != binding.session_id
-                    or not 0 <= index < len(choices[1])
+                    or len(task_id) > len(str(len(choices[1])))
+                    or not 1 <= int(task_id) <= len(choices[1])
                 ):
                     await self._send_chunked(
                         adapter,
@@ -723,7 +721,7 @@ class _CommandMixin:
                         "Task number unavailable. Run /tasks to list tasks in this session.",
                     )
                     return
-                task_id = choices[1][index]
+                task_id = choices[1][int(task_id) - 1]
             if parts[0] == "show":
                 task = await self._client.get_task(
                     binding.session_id,
@@ -740,7 +738,8 @@ class _CommandMixin:
         await self._send_chunked(
             adapter,
             conversation,
-            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id>",
+            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id>\n"
+            "Use /tasks show id <id> or /tasks cancel id <id> for an exact ID, including numeric IDs.",
         )
 
     async def _handle_skills(
