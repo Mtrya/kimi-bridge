@@ -17,7 +17,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/title [text]` | Show the current title or rename the session. |
 | `/usage` | Show live token and context-window values when exposed by Kimi. |
 | `/compact [instruction]` | Start context compaction; optional instructions tell Kimi what to preserve in the summary. |
-| `/history [count] [--full]` | Show the newest visible session messages (default `10`, max `50`); thinking and tool traffic are omitted, attachments become placeholders, and `--full` removes the default 500-character per-message limit. |
+| `/history [count] [full]` | Show the newest visible session messages (default `10`, max `50`); thinking and tool traffic are omitted, attachments become placeholders, and `full` removes the default 500-character per-message limit. `full` may precede or follow the count. |
 | `/undo [count]` | Undo a positive number of history steps; default `1`; the confirmation recaps the newest 2 messages. |
 | `/mode <manual\|auto\|yolo>` | Set the session permission mode where the adapter supports it. |
 | `/model [alias]` | Show the current model and catalog aliases, or select an alias. |
@@ -31,14 +31,16 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/goal cancel` | Cancel the current goal and its active prompt/interaction. |
 | `/stop` | Abort the active main-agent turn, discard queued prompts, and cancel its pending interaction. Detached tasks continue. |
 | `/restart-server` | Gracefully restart the managed Kimi Code server while keeping the bridge and selected adapter online. |
-| `/tasks [all\|completed\|failed\|cancelled]` | List running tasks by default, all tasks with `all`, or filter by terminal status. |
-| `/tasks show <id>` | Inspect a task with at most the last 8 KiB of output. |
-| `/tasks cancel <id>` | Cancel a task. |
+| `/tasks [all\|completed\|failed\|cancelled]` | List numbered running tasks by default, all tasks with `all`, or filter by terminal status. |
+| `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, with at most the last 8 KiB of output. |
+| `/tasks cancel <n\|id>` | Cancel a task by displayed number or explicit ID. |
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |
 | `/mcp` | List MCP tools resolved for the session. This is read-only. |
 | `/send <path>` | Send one regular file contained by the bound workspace. |
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
+
+Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. Changing the bound session clears your task numbers across chats, including when you later switch back. Explicit IDs remain valid without a prior listing. Bare numbers always select list positions; use `/tasks show id <id>` or `/tasks cancel id <id>` for an exact ID, including numeric IDs such as `/tasks show id 123`.
 
 Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` default; it affects later subagent spawns in every session without changing existing subagents or primary session models. This command requires Kimi Code 0.42.0 or newer, where secondary models are always enabled. Plan usage and quota reset information are not exposed by the public local server.
 
@@ -83,7 +85,7 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 | While a turn is busy | Commands |
 | --- | --- |
 | Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/restart-server` |
+| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/tasks cancel <n\|id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/restart-server` |
 | Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.

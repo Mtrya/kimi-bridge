@@ -33,6 +33,17 @@ DEFAULT_PERMISSION_MODE = "manual"
 
 
 class _SessionMixin:
+    def _set_binding(
+        self, conversation_key: str, binding: ConversationBinding
+    ) -> None:
+        current = self._state.bindings.get(conversation_key)
+        if current is None or current.session_id != binding.session_id:
+            for key in tuple(self._task_choices):
+                if key[0] == conversation_key:
+                    del self._task_choices[key]
+        self._state.bindings[conversation_key] = binding
+        self._state_store.save(self._state)
+
     def _default_permission_mode(self, adapter: PlatformAdapter) -> str:
         return DEFAULT_PERMISSION_MODE if adapter.supports_interactions else "auto"
 
@@ -48,13 +59,15 @@ class _SessionMixin:
             binding.permission_mode == "auto" and not binding.render_thinking
         ):
             return
-        self._state.bindings[conversation_key] = ConversationBinding(
-            session_id=binding.session_id,
-            workspace=binding.workspace,
-            permission_mode="auto",
-            render_thinking=False,
+        self._set_binding(
+            conversation_key,
+            ConversationBinding(
+                session_id=binding.session_id,
+                workspace=binding.workspace,
+                permission_mode="auto",
+                render_thinking=False,
+            ),
         )
-        self._state_store.save(self._state)
 
     async def _require_binding(
         self,
@@ -177,8 +190,7 @@ class _SessionMixin:
                 and adapter.supports_interactions
             ),
         )
-        self._state.bindings[conversation_key] = binding
-        self._state_store.save(self._state)
+        self._set_binding(conversation_key, binding)
         return binding
 
     async def _verify_session_profile(
