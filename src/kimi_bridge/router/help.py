@@ -192,7 +192,7 @@ Set the session permission mode. The argument is required.
 
 Arguments:
 - `manual` — approvals and questions are answered in chat.
-- `auto` — fully autonomous; the agent never asks.
+- `auto` — approves ordinary tools and skips questions; Feishu/Telegram still ask for plan review.
 - `yolo` — regular tools are auto-approved; the agent may still ask questions.
 
 Side effects: affects later permission checks only; it does not answer a currently displayed approval or question.
@@ -270,7 +270,7 @@ Arguments:
 
 Defaults: without an argument, only shows the current state.
 
-Side effects: setting plan mode is rejected while the session is busy.
+Side effects: setting plan mode is rejected while the session is busy. QQ/WeChat automatically approve completed plans; Feishu/Telegram present plan review in every permission mode.
 
 Example:
 - `/plan`

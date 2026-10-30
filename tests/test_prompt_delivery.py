@@ -247,11 +247,10 @@ async def test_cancellation_is_not_converted_to_an_operation_outcome(
         ("resolve_approval", 40404),
         ("resolve_approval", 40902),
         ("resolve_question", 40401),
-        ("resolve_question", 40405),
+        ("resolve_question", 40404),
         ("resolve_question", 40902),
-        ("resolve_question", 40909),
         ("dismiss_question", 40401),
-        ("dismiss_question", 40405),
+        ("dismiss_question", 40404),
         ("dismiss_question", 40902),
     ],
 )
@@ -288,37 +287,17 @@ async def test_interaction_validation_errors_remain_failures(operation) -> None:
             await getattr(client, operation)("s1", "i1", *args)
 
 
-@pytest.mark.parametrize("resolved", [True, False, "yes", None])
-async def test_interaction_acknowledgement_requires_a_boolean(resolved) -> None:
-    http, _ = exchange([envelope({"resolved": resolved})])
+@pytest.mark.parametrize("outcome", ["approved", "rejected", "dismissed", True, None])
+async def test_interaction_acknowledgement_requires_the_requested_outcome(outcome) -> None:
+    http, _ = exchange([envelope({"outcome": outcome, "ended_at": "now"})])
     async with http:
         client = KimiServerClient("http://localhost:1234", "token", http_client=http)
-        if isinstance(resolved, bool):
+        if outcome == "approved":
             result = await client.resolve_approval("s1", "i1", "approved")
-            assert result is (
-                InteractionResolution.APPLIED
-                if resolved
-                else InteractionResolution.EXPIRED
-            )
+            assert result is InteractionResolution.APPLIED
         else:
             with pytest.raises(KimiServerProtocolError):
                 await client.resolve_approval("s1", "i1", "approved")
-
-
-async def test_dismissal_success_code_is_scoped_to_dismissal() -> None:
-    http, _ = exchange(
-        [
-            envelope({"dismissed": True}, code=40909),
-            envelope(code=40909),
-        ]
-    )
-    async with http:
-        client = KimiServerClient("http://localhost:1234", "token", http_client=http)
-        assert (
-            await client.dismiss_question("s1", "i1") is InteractionResolution.APPLIED
-        )
-        with pytest.raises(KimiServerAPIError):
-            await client.resolve_approval("s1", "i1", "approved")
 
 
 async def test_session_lookup_distinguishes_missing_from_failure() -> None:

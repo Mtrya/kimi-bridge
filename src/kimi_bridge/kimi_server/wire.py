@@ -20,6 +20,8 @@ from .types import (
     GoalBudget,
     GoalInfo,
     GoalStatus,
+    InteractionEnd,
+    InteractionUpdate,
     KimiServerProtocolError,
     ModelInfo,
     PendingInteractionKind,
@@ -275,18 +277,56 @@ def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
 
 
-def _approval_request_from_wire(value: dict[str, Any]) -> ApprovalRequest:
+def _interaction_update_from_wire(value: dict[str, Any]) -> InteractionUpdate:
+    session_id = str(value["session_id"])
+    interaction_id = str(value["interaction_id"])
+    kind = value["kind"]
+    if kind not in {"approval", "question"}:
+        raise KimiServerProtocolError(f"unknown interaction kind: {kind!r}")
+    if value["status"] == "ended":
+        outcome = value["outcome"]
+        allowed = (
+            {"approved", "rejected", "cancelled"}
+            if kind == "approval"
+            else {"answered", "dismissed", "cancelled"}
+        )
+        if outcome not in allowed:
+            raise KimiServerProtocolError(f"invalid interaction outcome: {outcome!r}")
+        return InteractionUpdate(
+            session_id, interaction_id, None, cast(InteractionEnd, outcome)
+        )
+    if value["status"] != "pending":
+        raise KimiServerProtocolError(
+            f"unknown interaction status: {value['status']!r}"
+        )
+    parser = (
+        _approval_request_from_wire
+        if kind == "approval"
+        else _question_request_from_wire
+    )
+    return InteractionUpdate(
+        session_id,
+        interaction_id,
+        parser(value["request"], interaction_id=interaction_id, session_id=session_id),
+    )
+
+
+def _approval_request_from_wire(
+    value: dict[str, Any], *, interaction_id: str, session_id: str
+) -> ApprovalRequest:
     action = value.get("action")
     return ApprovalRequest(
-        id=str(value["approval_id"]),
-        session_id=str(value["session_id"]),
+        id=interaction_id,
+        session_id=session_id,
         tool_name=str(value["tool_name"]),
         action=str(action) if action else "Approval required",
         input_display=value.get("tool_input_display"),
     )
 
 
-def _question_request_from_wire(value: dict[str, Any]) -> QuestionRequest:
+def _question_request_from_wire(
+    value: dict[str, Any], *, interaction_id: str, session_id: str
+) -> QuestionRequest:
     questions: list[Question] = []
     for item in value["questions"]:
         options = tuple(
@@ -316,8 +356,8 @@ def _question_request_from_wire(value: dict[str, Any]) -> QuestionRequest:
             )
         )
     return QuestionRequest(
-        id=str(value["question_id"]),
-        session_id=str(value["session_id"]),
+        id=interaction_id,
+        session_id=session_id,
         questions=tuple(questions),
     )
 

@@ -293,24 +293,38 @@ def _evaluate_asyncapi_contract(
     for contract in semantic_contract.KIMI_WEBSOCKET_MESSAGES:
         message = message_map.get(contract.name)
         payload = message.get("payload") if isinstance(message, dict) else None
+        name = contract.name
+        variants = [payload] if isinstance(payload, dict) else []
+        if contract.discriminator is not None:
+            field, value = contract.discriminator
+            name = f"{name}.{value}"
+            variants = [
+                variant
+                for variant in (
+                    _schema_alternatives(payload) if isinstance(payload, dict) else []
+                )
+                if _field_matches(
+                    variant, SchemaFieldContract((field,), ("string",), values=(value,))
+                )
+            ]
         checks.append(
             _contract_check(
-                f"websocket.message.{contract.name}",
+                f"websocket.message.{name}",
                 "websocket",
-                isinstance(payload, dict),
-                f"message {contract.name} remains available",
+                bool(variants),
+                f"message {name} remains available",
                 contract.source,
             )
         )
-        if not isinstance(payload, dict):
+        if not variants:
             continue
         for requirement in contract.fields:
             checks.append(
                 _contract_check(
                     "websocket.message."
-                    f"{contract.name}.{'.'.join(requirement.path)}",
+                    f"{name}.{'.'.join(requirement.path)}",
                     "websocket",
-                    _field_matches(payload, requirement),
+                    all(_field_matches(variant, requirement) for variant in variants),
                     "message field "
                     f"{'.'.join(requirement.path)} keeps a compatible shape",
                     contract.source,
@@ -319,7 +333,7 @@ def _evaluate_asyncapi_contract(
         if contract.examples:
             checks.append(
                 _contract_check(
-                    f"websocket.message.{contract.name}.outbound",
+                    f"websocket.message.{name}.outbound",
                     "websocket",
                     all(
                         _schema_accepts_instance(payload, example)
@@ -466,23 +480,22 @@ def _field_matches(
         and requirement.format is None
     ):
         return True
-    return any(
-        (
+    candidates = [
+        candidate
+        for candidate, _required in states
+        if (
             "any" in requirement.types
             or not _schema_types(candidate)
-            or bool(
-                set(_schema_types(candidate)).intersection(requirement.types)
-            )
+            or bool(set(_schema_types(candidate)).intersection(requirement.types))
         )
         and (
-            requirement.format is None
-            or candidate.get("format") == requirement.format
+            requirement.format is None or candidate.get("format") == requirement.format
         )
-        and all(
-            _schema_accepts_instance(candidate, value)
-            for value in requirement.values
-        )
-        for candidate, _required in states
+    ]
+    # A discriminated union can distribute accepted values across variants.
+    return bool(candidates) and all(
+        any(_schema_accepts_instance(candidate, value) for candidate in candidates)
+        for value in requirement.values
     )
 
 

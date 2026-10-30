@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+import httpx
 import pytest
 
 from kimi_bridge.compatibility import (
@@ -28,6 +29,8 @@ from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
     InteractionResolution,
+    InteractionUpdate,
+    InteractionSnapshot,
     KimiServerAPIError,
     KimiServerAuthenticationError,
     KimiServerClient,
@@ -72,6 +75,348 @@ Documentation: https://moonshotai.github.io/kimi-cli/
 """
 
 
+def _interaction_frame(kind: str, *, ended: bool = False) -> dict[str, Any]:
+    return {
+        "type": "interaction",
+        "session_id": "session-1",
+        "agent_id": "main",
+        "event_created_at": "2026-10-30T00:00:00Z",
+        "interaction_id": "interaction-1",
+        "kind": kind,
+        "status": "ended" if ended else "pending",
+        **(
+            {"outcome": "approved" if kind == "approval" else "answered"}
+            if ended
+            else {}
+        ),
+        "request": (
+            {
+                "tool_name": "Shell",
+                "action": "Run command",
+                "tool_input_display": {"command": "pwd"},
+            }
+            if kind == "approval"
+            else {
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": "Pick one",
+                        "header": "Choice",
+                        "body": "Details",
+                        "options": [
+                            {"id": "one", "label": "One", "description": "First"},
+                            {"id": "two", "label": "Two"},
+                        ],
+                        "allow_other": True,
+                        "other_label": "Custom",
+                        "multi_select": False,
+                    }
+                ],
+            }
+        ),
+    }
+
+
+@pytest.mark.parametrize("kind", ["approval", "question"])
+@pytest.mark.parametrize("before_ack", [False, True])
+async def test_interaction_frames_are_semantic_and_do_not_advance_cursor(
+    kind, before_ack
+) -> None:
+    ack = {
+        "accepted": ["session-1"],
+        "not_found": [],
+        "resync_required": [],
+        "cursors": {},
+    }
+    first = FakeWebSocket(
+        subscribe_payload=ack,
+        events=[
+            _session_event(4, "epoch-1", "turn.started"),
+            _interaction_frame(kind),
+            _interaction_frame(kind, ended=True),
+        ],
+        events_before_ack=before_ack,
+        disconnect_after_events=True,
+    )
+    second = FakeWebSocket(subscribe_payload=ack)
+    http = FakeHttpClient(
+        [_envelope({"busy": False}), _envelope({"busy": False})],
+        pending_snapshots=[["interaction-1"], []],
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([first, second]),
+        reconnect_initial_backoff=0,
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot(
+            "session-1", frozenset({"interaction-1"})
+        )
+        assert (await anext(stream))["seq"] == 4
+        event = await anext(stream)
+        assert isinstance(event, InteractionUpdate)
+        expected = (
+            ApprovalRequest(
+                "interaction-1", "session-1", "Shell", "Run command", {"command": "pwd"}
+            )
+            if kind == "approval"
+            else QuestionRequest(
+                "interaction-1",
+                "session-1",
+                (
+                    Question(
+                        "q1",
+                        "Pick one",
+                        (
+                            QuestionOption("one", "One", "First"),
+                            QuestionOption("two", "Two"),
+                        ),
+                        header="Choice",
+                        body="Details",
+                        allow_other=True,
+                        other_label="Custom",
+                    ),
+                ),
+            )
+        )
+        assert event.request == expected
+        ended = await anext(stream)
+        assert ended == InteractionUpdate(
+            "session-1",
+            "interaction-1",
+            None,
+            "approved" if kind == "approval" else "answered",
+        )
+        assert await asyncio.wait_for(anext(stream), 1) == InteractionSnapshot(
+            "session-1", frozenset()
+        )
+        subscribe = next(frame for frame in second.sent if frame["type"] == "subscribe")
+        assert subscribe["payload"]["cursors"] == {
+            "session-1": {"seq": 4, "epoch": "epoch-1"}
+        }
+        transcript_requests = [
+            request for request in http.requests if request[1].endswith("/transcript")
+        ]
+        assert len(transcript_requests) == 2
+        assert transcript_requests[0][2]["params"] == {
+            "agent_id": "main",
+            "page_size": 1,
+        }
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_interactions_include_subagents_but_filter_other_sessions() -> None:
+    frame = _interaction_frame("approval")
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[
+            dict(frame, session_id="other"),
+            dict(frame, agent_id="child", interaction_id="child-request"),
+            frame,
+        ],
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False})],
+            pending_snapshots=[["interaction-1", "child-request"]],
+        ),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert isinstance(await anext(stream), InteractionSnapshot)
+        event = await anext(stream)
+        assert isinstance(event, InteractionUpdate)
+        assert event.session_id == "session-1"
+        assert event.id == "child-request"
+        assert event.request.session_id == "session-1"
+        assert (await anext(stream)).id == "interaction-1"
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+@pytest.mark.parametrize("failed_request", [1, 2])
+async def test_transcript_transport_failure_reconnects(failed_request) -> None:
+    class FailingHttp(FakeHttpClient):
+        transcript_requests = 0
+
+        async def request(self, method, url, **kwargs):
+            if url.endswith("/transcript"):
+                self.transcript_requests += 1
+                if self.transcript_requests == failed_request:
+                    raise httpx.ConnectError("transient transcript failure")
+            return await super().request(method, url, **kwargs)
+
+    http = FailingHttp([_envelope({"busy": False})] * (failed_request + 1))
+    sockets = [
+        FakeWebSocket(
+            subscribe_payload={"accepted": ["session-1"]},
+            disconnect_after_events=True,
+        )
+        for _ in range(failed_request)
+    ]
+    sockets.append(
+        FakeWebSocket(
+            subscribe_payload={"accepted": ["session-1"]},
+            events=[_session_event(1, "epoch-1", "turn.started")],
+        )
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect(sockets),
+        reconnect_initial_backoff=0,
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        async with asyncio.timeout(1):
+            for _ in range(failed_request):
+                assert isinstance(await anext(stream), InteractionSnapshot)
+            assert (await anext(stream))["type"] == "turn.started"
+        assert http.transcript_requests == failed_request + 1
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_snapshot_filters_resolved_interactions_buffered_before_ack() -> None:
+    pending = _interaction_frame("approval")
+    fresh = dict(pending, interaction_id="still-pending")
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[pending, _interaction_frame("approval", ended=True), fresh],
+        events_before_ack=True,
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False})],
+            pending_snapshots=[["still-pending"]],
+        ),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot(
+            "session-1", frozenset({"still-pending"})
+        )
+        assert await anext(stream) == InteractionUpdate(
+            "session-1", "interaction-1", None, "approved"
+        )
+        assert (await anext(stream)).id == "still-pending"
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_invalid_transcript_is_a_protocol_failure_not_a_reconnect() -> None:
+    http = FakeHttpClient(
+        [_envelope({"busy": False})],
+        transcript_snapshots=[{"agents": [], "pending_interactions": "invalid"}],
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect(
+            [FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})]
+        ),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        with pytest.raises(KimiServerProtocolError):
+            await anext(stream)
+        assert len([r for r in http.requests if r[1].endswith("/transcript")]) == 1
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_pending_frames_after_ack_are_checked_without_dropping_new_work() -> None:
+    stale = _interaction_frame("approval")
+    fresh = dict(stale, interaction_id="new-request", agent_id="child")
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[stale, fresh],
+    )
+    http = FakeHttpClient(
+        [_envelope({"busy": False})], pending_snapshots=[[], [], ["new-request"]]
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot("session-1", frozenset())
+        event = await asyncio.wait_for(anext(stream), 1)
+        assert isinstance(event, InteractionUpdate)
+        assert event.id == "new-request"
+        assert [
+            request[2]["params"]["agent_id"]
+            for request in http.requests
+            if request[1].endswith("/transcript")
+        ] == ["main", "main", "child"]
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_reconnect_reconciles_pending_interactions_from_all_agents() -> None:
+    roster = [{"agentId": "main", "type": "main"}, {"agentId": "child", "type": "sub"}]
+    http = FakeHttpClient(
+        [_envelope({"busy": False}), _envelope({"busy": False})],
+        transcript_snapshots=[
+            {"agents": roster, "pending_interactions": ["main-request"]},
+            {"agents": roster, "pending_interactions": ["child-request"]},
+            {"agents": roster, "pending_interactions": []},
+            {"agents": roster, "pending_interactions": ["child-request"]},
+        ],
+    )
+    sockets = [
+        FakeWebSocket(
+            subscribe_payload={"accepted": ["session-1"]},
+            disconnect_after_events=True,
+        ),
+        FakeWebSocket(subscribe_payload={"accepted": ["session-1"]}),
+    ]
+    client = KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect(sockets),
+        reconnect_initial_backoff=0,
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot(
+            "session-1", frozenset({"main-request", "child-request"})
+        )
+        assert await asyncio.wait_for(anext(stream), 1) == InteractionSnapshot(
+            "session-1", frozenset({"child-request"})
+        )
+        assert [
+            request[2]["params"]["agent_id"]
+            for request in http.requests
+            if request[1].endswith("/transcript")
+        ] == ["main", "child", "main", "child"]
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
 def _envelope(data: Any, *, code: int = 0, msg: str = "success") -> dict[str, Any]:
     return {"code": code, "msg": msg, "data": data, "request_id": "req-1"}
 
@@ -110,6 +455,16 @@ def _profile_payload(
     }
 
 
+async def _session_events(client: KimiServerClient, session_id: str):
+    stream = client.subscribe_events(session_id)
+    try:
+        async for event in stream:
+            if isinstance(event, dict):
+                yield event
+    finally:
+        await stream.aclose()
+
+
 class FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
@@ -127,7 +482,15 @@ class FakeHttpClient:
         responses: Iterable[dict[str, Any]],
         *,
         actions: list[str] | None = None,
+        pending_snapshots: Iterable[list[str]] | None = None,
+        transcript_snapshots: Iterable[dict[str, Any]] | None = None,
     ) -> None:
+        self._pending_snapshots = (
+            iter(pending_snapshots) if pending_snapshots is not None else None
+        )
+        self._transcript_snapshots = (
+            iter(transcript_snapshots) if transcript_snapshots is not None else None
+        )
         self._responses = iter(responses)
         self._actions = actions
         self.requests: list[tuple[str, str, dict[str, Any]]] = []
@@ -136,6 +499,19 @@ class FakeHttpClient:
         if self._actions is not None:
             self._actions.append(f"http:{method}:{url}")
         self.requests.append((method, url, kwargs))
+        if method == "GET" and url.endswith("/transcript"):
+            if self._transcript_snapshots is not None:
+                return FakeResponse(_envelope(next(self._transcript_snapshots)))
+            return FakeResponse(
+                _envelope(
+                    {
+                        "agents": [{"agentId": "main", "type": "main"}],
+                        "pending_interactions": next(self._pending_snapshots)
+                        if self._pending_snapshots is not None
+                        else [],
+                    }
+                )
+            )
         return FakeResponse(next(self._responses))
 
 
@@ -977,27 +1353,6 @@ async def test_set_secondary_model_extends_an_existing_model_pool() -> None:
 
 
 async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> None:
-    approval = {
-        "approval_id": "approval-1",
-        "session_id": "session-1",
-        "tool_name": "Shell",
-        "action": "Run command",
-        "tool_input_display": {"command": "pwd"},
-    }
-    question = {
-        "question_id": "question-1",
-        "session_id": "session-1",
-        "questions": [
-            {
-                "id": "q1",
-                "question": "Pick one",
-                "options": [
-                    {"id": "one", "label": "One", "description": "First"}
-                ],
-                "allow_other": True,
-            }
-        ],
-    }
     http = FakeHttpClient(
         [
             _envelope(
@@ -1021,11 +1376,9 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
             _envelope({"prompt_id": "prompt-1", "status": "queued"}),
             _envelope({"steered": True, "prompt_ids": ["prompt-1"]}),
             _envelope(_profile_payload(permission_mode="yolo")),
-            _envelope({"items": [approval]}),
-            _envelope({"resolved": True, "resolved_at": "now"}),
-            _envelope({"items": [question]}),
-            _envelope({"resolved": True, "resolved_at": "now"}),
-            _envelope({"dismissed": True, "dismissed_at": "now"}),
+            _envelope({"outcome": "approved", "ended_at": "now"}),
+            _envelope({"outcome": "answered", "ended_at": "now"}),
+            _envelope({"outcome": "dismissed", "ended_at": "now"}),
         ]
     )
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
@@ -1047,33 +1400,10 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     assert (
         await client.update_profile("session-1", permission_mode="yolo")
     ).session_id == "session-1"
-    assert await client.list_approvals("session-1") == [
-        ApprovalRequest(
-            id="approval-1",
-            session_id="session-1",
-            tool_name="Shell",
-            action="Run command",
-            input_display={"command": "pwd"},
-        )
-    ]
     assert (
         await client.resolve_approval("session-1", "approval-1", "approved")
         is InteractionResolution.APPLIED
     )
-    assert await client.list_questions("session-1") == [
-        QuestionRequest(
-            id="question-1",
-            session_id="session-1",
-            questions=(
-                Question(
-                    id="q1",
-                    text="Pick one",
-                    options=(QuestionOption("one", "One", "First"),),
-                    allow_other=True,
-                ),
-            ),
-        )
-    ]
     answers = (
         SingleChoiceAnswer("q1", "one"),
         MultipleChoiceAnswer("q2", ("x", "y")),
@@ -1106,24 +1436,16 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
             "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
         ),
         (
-            "GET",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/approvals",
+            "POST",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/interactions/approval-1",
         ),
         (
             "POST",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/approvals/approval-1",
-        ),
-        (
-            "GET",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/interactions/question-1",
         ),
         (
             "POST",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions/question-1",
-        ),
-        (
-            "POST",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/questions/question-1:dismiss",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/interactions/question-1",
         ),
     ]
     assert http.requests[0][2]["data"] == {"name": "photo.png"}
@@ -1151,10 +1473,9 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
     }
     assert http.requests[3][2]["json"] == {"prompt_ids": ["prompt-1"]}
     assert http.requests[4][2]["json"] == {"agent_config": {"permission_mode": "yolo"}}
-    assert http.requests[5][2]["params"] == {"status": "pending"}
-    assert http.requests[6][2]["json"] == {"decision": "approved"}
-    assert http.requests[7][2]["params"] == {"status": "pending"}
-    assert http.requests[8][2]["json"] == {
+    assert http.requests[5][2]["json"] == {"kind": "approval", "decision": "approved"}
+    assert http.requests[6][2]["json"] == {
+        "kind": "question",
         "answers": {
             "q1": {"kind": "single", "option_id": "one"},
             "q2": {"kind": "multi", "option_ids": ["x", "y"]},
@@ -1168,7 +1489,7 @@ async def test_interaction_profile_steer_and_media_methods_use_spec_shapes() -> 
         },
         "method": "click",
     }
-    assert "json" not in http.requests[9][2]
+    assert http.requests[7][2]["json"] == {"kind": "question", "dismissed": True}
 
 
 async def test_stateful_session_methods_use_public_v1_shapes() -> None:
@@ -1335,7 +1656,7 @@ async def test_undo_validates_count_and_surfaces_upstream_error() -> None:
     assert exc_info.value.code == 40911
 
 
-async def test_interaction_listing_does_not_hide_validation_errors() -> None:
+async def test_interaction_response_does_not_hide_validation_errors() -> None:
     http = FakeHttpClient(
         [
             _envelope(None, code=40001, msg="invalid query"),
@@ -1345,9 +1666,9 @@ async def test_interaction_listing_does_not_hide_validation_errors() -> None:
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
 
     with pytest.raises(KimiServerAPIError):
-        await client.list_approvals("session-1")
+        await client.resolve_approval("session-1", "approval-1", "approved")
     with pytest.raises(KimiServerAPIError):
-        await client.list_questions("session-1")
+        await client.dismiss_question("session-1", "question-1")
 
 
 async def test_unknown_server_version_warns_and_continues(
@@ -1420,7 +1741,7 @@ async def test_materializes_session_before_initial_subscription() -> None:
         http_client=http,
         ws_connect=ws_connect,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
     await events.aclose()
@@ -1428,6 +1749,7 @@ async def test_materializes_session_before_initial_subscription() -> None:
     assert actions == [
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
     ]
     subscribe = next(frame for frame in socket.sent if frame["type"] == "subscribe")
     assert subscribe["payload"]["agent_filter"] == {"session-1": ["main"]}
@@ -1458,7 +1780,7 @@ async def test_sequenced_error_before_ack_is_yielded_and_stream_continues() -> N
         http_client=FakeHttpClient([_envelope({"busy": False})]),
         ws_connect=FakeWebSocketConnect([socket]),
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert await asyncio.wait_for(anext(events), 1) == error_event
     assert await asyncio.wait_for(anext(events), 1) == completed_event
@@ -1502,7 +1824,7 @@ async def test_replayed_sequenced_notice_is_not_yielded_twice() -> None:
         ws_connect=FakeWebSocketConnect([first, second]),
         sleep=no_sleep,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert await asyncio.wait_for(anext(events), 1) == error_event
     assert await asyncio.wait_for(anext(events), 1) == completed_event
@@ -1554,7 +1876,7 @@ async def test_reconnect_recovers_from_one_mismatched_ack_with_cursor() -> None:
         ws_connect=FakeWebSocketConnect([first, mismatched, recovered]),
         sleep=record_sleep,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert await asyncio.wait_for(anext(events), 1) == first_event
     assert await asyncio.wait_for(anext(events), 1) == second_event
@@ -1586,7 +1908,7 @@ async def test_initial_mismatched_ack_remains_fatal() -> None:
         http_client=FakeHttpClient([_envelope({"busy": False})]),
         ws_connect=FakeWebSocketConnect([socket]),
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     with pytest.raises(KimiServerProtocolError, match="expected ack for request"):
         await asyncio.wait_for(anext(events), 1)
@@ -1626,7 +1948,7 @@ async def test_persistent_reconnect_ack_mismatches_remain_fatal() -> None:
         ws_connect=FakeWebSocketConnect([first, *mismatched]),
         sleep=no_sleep,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert await asyncio.wait_for(anext(events), 1) == first_event
     with pytest.raises(KimiServerProtocolError, match="repeatedly sent mismatched"):
@@ -1772,7 +2094,7 @@ async def test_unsequenced_websocket_error_before_ack_remains_fatal() -> None:
         http_client=FakeHttpClient([_envelope({"busy": False})]),
         ws_connect=FakeWebSocketConnect([socket]),
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     with pytest.raises(
         KimiServerProtocolError,
@@ -1802,7 +2124,7 @@ async def test_main_agent_filter_allows_global_sequence_gaps() -> None:
         http_client=http,
         ws_connect=FakeWebSocketConnect([socket]),
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 4
@@ -1866,7 +2188,7 @@ async def test_live_usage_event_feeds_inspection_and_reconnect_invalidates_it() 
         ws_connect=FakeWebSocketConnect([first, second]),
         sleep=no_sleep,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert (await asyncio.wait_for(anext(events), 1))["payload"] == usage_event[
         "payload"
@@ -1893,7 +2215,7 @@ async def test_missing_session_fails_before_websocket_connection() -> None:
         http_client=http,
         ws_connect=ws_connect,
     )
-    events = client.subscribe_events("missing")
+    events = _session_events(client, "missing")
 
     with pytest.raises(KimiServerAPIError) as caught:
         await asyncio.wait_for(anext(events), 1)
@@ -1945,7 +2267,7 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
         http_client=http,
         ws_connect=ws_connect,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     volatile = await asyncio.wait_for(anext(events), 1)
     assert volatile["seq"] == 5
@@ -1968,19 +2290,29 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
         ),
         (
             "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
+        ),
+        (
+            "GET",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
         ),
         (
             "GET",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
+        ),
     ]
     assert actions == [
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
     ]
     subscribe = next(frame for frame in second.sent if frame["type"] == "subscribe")
     assert subscribe["payload"]["cursors"] == {
@@ -2047,7 +2379,7 @@ async def test_reconnect_materializes_again_on_new_supervisor_generation() -> No
         ws_connect=ws_connect,
         sleep=fake_sleep,
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 1
     await events.aclose()
@@ -2055,9 +2387,11 @@ async def test_reconnect_materializes_again_on_new_supervisor_generation() -> No
     assert actions == [
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
         "sleep:0.25",
         "http:GET:http://127.0.0.1:43124/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43124/api/v1/ws",
+        "http:GET:http://127.0.0.1:43124/api/v1/sessions/session-1/transcript",
     ]
 
 
@@ -2076,7 +2410,7 @@ async def test_subscription_rejects_not_found_after_materialization() -> None:
         http_client=FakeHttpClient([_envelope({"busy": False})]),
         ws_connect=FakeWebSocketConnect([socket]),
     )
-    events = client.subscribe_events("session-1")
+    events = _session_events(client, "session-1")
 
     with pytest.raises(KimiServerProtocolError, match="after public-v1 materialization"):
         await asyncio.wait_for(anext(events), 1)
@@ -2127,7 +2461,15 @@ async def test_document_fetch_and_probe_subscription_stay_inside_client_boundary
         ),
         (
             "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
+        ),
+        (
+            "GET",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
         ),
     ]
     assert all(

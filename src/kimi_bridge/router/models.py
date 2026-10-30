@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Literal
 
-from ..interactions import ApprovalRequest, QuestionRequest
+from ..interactions import ApprovalRequest, InteractionOutcome, QuestionRequest
 from ..kimi_server import SessionNotice
 from ..platforms.base import (
     ActorRef,
@@ -68,7 +68,11 @@ class _ActiveStream:
         default_factory=set
     )
     task: asyncio.Task[None] | None = None
-    interaction_task: asyncio.Task[None] | None = None
+    interactions: dict[str, ApprovalRequest | QuestionRequest] = field(
+        default_factory=dict
+    )
+    handled_interactions: set[str] = field(default_factory=set)
+    interaction_retry_task: asyncio.Task[None] | None = None
     failure_notice_task: asyncio.Task[None] | None = None
 
 
@@ -85,6 +89,7 @@ class _PendingInteraction:
     message: MessageRef
     request: ApprovalRequest | QuestionRequest
     timeout_task: asyncio.Task[None] | None = None
+    completion: InteractionOutcome | None = None
 
 
 @dataclass(frozen=True, slots=True)

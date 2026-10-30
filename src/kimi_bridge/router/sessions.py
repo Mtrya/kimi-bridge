@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from ..kimi_server import (
+    InteractionSnapshot,
+    InteractionUpdate,
     KimiServerError,
     KimiServerOperationError,
     KimiServerProtocolError,
@@ -319,11 +321,6 @@ class _SessionMixin:
             await self._stop_active_stream()
             raise
         stream_task.add_done_callback(self._stream_done)
-        active.interaction_task = asyncio.create_task(
-            self._poll_interactions(active),
-            name=f"kimi-interactions-{session_id}",
-        )
-        active.interaction_task.add_done_callback(self._interaction_poll_done)
 
     async def _stop_active_stream(self) -> None:
         active = self._active
@@ -332,10 +329,9 @@ class _SessionMixin:
             return
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
-        if active.interaction_task is not None:
-            active.interaction_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await active.interaction_task
+        if active.interaction_retry_task is not None:
+            active.interaction_retry_task.cancel()
+            await asyncio.gather(active.interaction_retry_task, return_exceptions=True)
         if active.failure_notice_task is not None:
             active.failure_notice_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -352,7 +348,10 @@ class _SessionMixin:
             async for event in self._client.subscribe_events(active.session_id):
                 if self._active is not active:
                     return
-                await self.dispatch_event(active.conversation_key, event)
+                if isinstance(event, (InteractionUpdate, InteractionSnapshot)):
+                    await self._handle_interaction_event(active, event)
+                else:
+                    await self.dispatch_event(active.conversation_key, event)
         except asyncio.CancelledError:
             failure = KimiServerError("kimi event stream stopped")
             raise

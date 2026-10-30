@@ -23,9 +23,7 @@ from ..compatibility import (
 )
 from ..interactions import (
     ApprovalDecision,
-    ApprovalRequest,
     QuestionAnswer,
-    QuestionRequest,
 )
 from .contract import (
     KIMI_ASYNCAPI_PATH,
@@ -40,6 +38,8 @@ from .types import (
     GoalControl,
     GoalInfo,
     InteractionResolution,
+    InteractionSnapshot,
+    InteractionUpdate,
     KimiServerAPIError,
     KimiServerOperationError,
     KimiServerProtocolError,
@@ -62,11 +62,10 @@ from .types import (
     ToolInfo,
 )
 from .wire import (
-    _approval_request_from_wire,
     _goal_info_from_wire,
+    _interaction_update_from_wire,
     _model_info_from_wire,
     _question_answer_to_wire,
-    _question_request_from_wire,
     _secondary_model_config_from_wire,
     _session_profile_from_wire,
     _session_status_from_wire,
@@ -612,102 +611,100 @@ class KimiServerClient:
         )
         return [_tool_info_from_wire(item) for item in data["tools"]]
 
-    async def list_approvals(self, session_id: str) -> list[ApprovalRequest]:
-        data = await self._request_operation(
-            "list_approvals",
-            path_parameters={"session_id": session_id},
-            params={"status": "pending"},
+    async def _get_pending_interaction_ids(
+        self, session_id: str, connection: ServerConnection, *, agent_id: str | None = None
+    ) -> frozenset[str]:
+        async def read(agent_id: str) -> dict[str, Any]:
+            return await self._request_operation(
+                "pending_interactions",
+                path_parameters={"session_id": session_id},
+                params={"agent_id": agent_id, "page_size": 1},
+                connection=connection,
+            )
+
+        main = await read(agent_id if agent_id is not None else _MAIN_AGENT_ID)
+        # Interactions are session-wide even when answer events filter to main.
+        # Each transcript only lists that agent's pending requests.
+        child_ids = (
+            {agent["agentId"] for agent in main["agents"]} - {_MAIN_AGENT_ID}
+            if agent_id is None
+            else set()
         )
-        return [_approval_request_from_wire(item) for item in data["items"]]
+        transcripts = [
+            main,
+            *await asyncio.gather(*(read(agent_id) for agent_id in child_ids)),
+        ]
+        pending_ids: set[str] = set()
+        for transcript in transcripts:
+            identifiers = transcript["pending_interactions"]
+            if not isinstance(identifiers, list) or any(
+                not isinstance(item, str) for item in identifiers
+            ):
+                raise KimiServerProtocolError("invalid pending interaction IDs")
+            pending_ids.update(identifiers)
+        return frozenset(pending_ids)
 
     async def resolve_approval(
-        self,
-        session_id: str,
-        approval_id: str,
-        decision: ApprovalDecision,
+        self, session_id: str, approval_id: str, decision: ApprovalDecision
     ) -> InteractionResolution:
         return await self._resolve_interaction(
-            "resolve_approval",
-            path_parameters={
-                "session_id": session_id,
-                "approval_id": approval_id,
-            },
-            json_body={"decision": decision},
-            result_field="resolved",
-            expired_codes={40401, 40404, 40902},
+            session_id,
+            approval_id,
+            {"kind": "approval", "decision": decision},
+            outcome=decision,
         )
-
-    async def list_questions(self, session_id: str) -> list[QuestionRequest]:
-        data = await self._request_operation(
-            "list_questions",
-            path_parameters={"session_id": session_id},
-            params={"status": "pending"},
-        )
-        return [_question_request_from_wire(item) for item in data["items"]]
 
     async def resolve_question(
-        self,
-        session_id: str,
-        question_id: str,
-        answers: tuple[QuestionAnswer, ...],
+        self, session_id: str, question_id: str, answers: tuple[QuestionAnswer, ...]
     ) -> InteractionResolution:
-        answers_payload = {
-            answer.question_id: _question_answer_to_wire(answer)
-            for answer in answers
-        }
         return await self._resolve_interaction(
-            "resolve_question",
-            path_parameters={
-                "session_id": session_id,
-                "question_id": question_id,
+            session_id,
+            question_id,
+            {
+                "kind": "question",
+                "answers": {
+                    answer.question_id: _question_answer_to_wire(answer)
+                    for answer in answers
+                },
+                "method": "click",
             },
-            json_body={"answers": answers_payload, "method": "click"},
-            result_field="resolved",
-            expired_codes={40401, 40405, 40902, 40909},
+            outcome="answered",
         )
 
     async def dismiss_question(
         self, session_id: str, question_id: str
     ) -> InteractionResolution:
         return await self._resolve_interaction(
-            "dismiss_question",
-            path_parameters={
-                "session_id": session_id,
-                "question_id": question_id,
-            },
-            result_field="dismissed",
-            expired_codes={40401, 40405, 40902},
-            accepted_codes=frozenset({40909}),
+            session_id,
+            question_id,
+            {"kind": "question", "dismissed": True},
+            outcome="dismissed",
         )
 
     async def _resolve_interaction(
         self,
-        operation: str,
+        session_id: str,
+        interaction_id: str,
+        body: dict[str, Any],
         *,
-        path_parameters: dict[str, str],
-        result_field: str,
-        expired_codes: set[int],
-        json_body: Any = None,
-        accepted_codes: frozenset[int] = frozenset(),
+        outcome: str,
     ) -> InteractionResolution:
         try:
             data = await self._request_operation(
-                operation,
-                path_parameters=path_parameters,
-                json_body=json_body,
-                accepted_codes=accepted_codes,
+                "respond_interaction",
+                path_parameters={
+                    "session_id": session_id,
+                    "interaction_id": interaction_id,
+                },
+                json_body=body,
             )
         except KimiServerAPIError as exc:
-            if exc.code in expired_codes:
+            if exc.code in {40401, 40404, 40902}:
                 return InteractionResolution.EXPIRED
             raise
-        if not isinstance(data, dict) or not isinstance(data.get(result_field), bool):
-            raise KimiServerProtocolError(f"invalid {operation} response")
-        return (
-            InteractionResolution.APPLIED
-            if data[result_field]
-            else InteractionResolution.EXPIRED
-        )
+        if not isinstance(data, dict) or data.get("outcome") != outcome:
+            raise KimiServerProtocolError("invalid interaction response outcome")
+        return InteractionResolution.APPLIED
 
     async def abort_prompt(self, session_id: str) -> bool:
         prompts = await self._request_operation(
@@ -797,8 +794,11 @@ class KimiServerClient:
                 raise KimiServerProtocolError(
                     "credential-free probe session was not accepted by WebSocket"
                 )
+            await self._get_pending_interaction_ids(session_id, connection)
 
-    async def subscribe_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
+    async def subscribe_events(
+        self, session_id: str
+    ) -> AsyncIterator[dict[str, Any] | InteractionUpdate | InteractionSnapshot]:
         """Yield session events and reconnect from their cursor.
 
         Only one subscription generator may own the socket at a time. On a
@@ -872,10 +872,32 @@ class KimiServerClient:
                             if acknowledged is not None:
                                 cursor = _cursor_from_mapping(acknowledged)
 
+                        # Pending interactions are replayed without sequence numbers.
+                        # Reconcile cards whose completion was missed while offline.
+                        interaction_snapshot = InteractionSnapshot(
+                            session_id,
+                            await self._get_pending_interaction_ids(
+                                session_id, connection
+                            ),
+                        )
+                        # Frames read before the ack precede this REST snapshot.
+                        # Do not resurrect requests already resolved in that gap.
+                        pending_frames = [
+                            frame
+                            for frame in pending_frames
+                            if not (
+                                frame.get("type") == "interaction"
+                                and frame.get("status") == "pending"
+                                and frame.get("session_id") == session_id
+                                and frame["interaction_id"]
+                                not in interaction_snapshot.pending_ids
+                            )
+                        ]
                         ready.set()
                         subscribed_once = True
                         consecutive_ack_mismatches = 0
                         reconnect_delay = self._reconnect_initial_backoff
+                        yield interaction_snapshot
                         must_reconnect = False
                         while not self._closed:
                             if pending_frames:
@@ -899,6 +921,27 @@ class KimiServerClient:
                                     yield resync_event
                                     must_reconnect = True
                                     break
+                                continue
+                            if frame_type == "interaction":
+                                if frame["session_id"] == session_id:
+                                    if (
+                                        frame["status"] == "pending"
+                                        and frame["interaction_id"]
+                                        not in interaction_snapshot.pending_ids
+                                    ):
+                                        # A pending frame buffered in the socket
+                                        # can predate the snapshot, or be new live
+                                        # work. Verify its agent before presenting.
+                                        pending_ids = (
+                                            await self._get_pending_interaction_ids(
+                                                session_id,
+                                                connection,
+                                                agent_id=frame["agent_id"],
+                                            )
+                                        )
+                                        if frame["interaction_id"] not in pending_ids:
+                                            continue
+                                    yield _interaction_update_from_wire(frame)
                                 continue
                             if not _is_session_event_frame(frame):
                                 if frame_type == "error":
@@ -974,6 +1017,7 @@ class KimiServerClient:
                 except (
                     _WebSocketAckMismatch,
                     ConnectionClosed,
+                    KimiServerTransportError,
                     OSError,
                     TimeoutError,
                 ) as exc:
@@ -1197,7 +1241,9 @@ class KimiServerClient:
             if frame.get("type") == "ping":
                 await self._send_pong(ws, frame)
                 continue
-            if pending_frames is not None and _is_session_event_frame(frame):
+            if pending_frames is not None and (
+                _is_session_event_frame(frame) or frame.get("type") == "interaction"
+            ):
                 pending_frames.append(frame)
                 continue
             if frame.get("type") == "error":
