@@ -10,6 +10,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | --- | --- |
 | `/help` | Show the in-chat command index. |
 | `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
+| `/archive` | Archive the bound session through Kimi, preserve its history, and clear every bridge chat binding to it. |
 | `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
 | `/sessions search <keyword>` | Search active sessions by title and workspace path. |
 | `/switch <n\|id\|title>` | Bind a displayed index, explicit session ID, or exact title; the confirmation recaps the newest 2 messages. |
@@ -41,6 +42,8 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
 
 Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` default; it affects later subagent spawns in every session without changing existing subagents or primary session models. This command requires Kimi Code 0.42.0 or newer, where secondary models are always enabled. Plan usage and quota reset information are not exposed by the public local server.
+
+`/archive` takes no arguments and sends the archive request directly to Kimi, including while the bound session is busy. Kimi stops the session's running work when archiving. The bridge closes that session's event stream and, after confirmation, clears its pending controls and bindings. The next ordinary message creates a session in `default_workspace`; use `/new <cwd>` to choose another workspace. Cached listings containing the archived session are invalidated, so run `/sessions` again before switching by number. A failed archive leaves bindings intact.
 
 ## Terminal platform authorization commands
 
@@ -83,7 +86,7 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 | While a turn is busy | Commands |
 | --- | --- |
 | Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/restart-server` |
+| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/tasks cancel <id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/restart-server`, `/archive` |
 | Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.

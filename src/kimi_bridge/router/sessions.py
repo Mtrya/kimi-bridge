@@ -84,6 +84,48 @@ class _SessionMixin:
             return None
         return status
 
+    async def _archive_session(self, session_id: str) -> None:
+        active = self._active
+        if active is not None and active.session_id == session_id:
+            # Archive emits terminal events while disposing the runtime. Stop
+            # snapshot reads first so they cannot materialize it again.
+            await self._stop_active_stream()
+        else:
+            active = None
+        async with self._interaction_lock:
+            try:
+                await self._client.archive_session(session_id)
+            except Exception:
+                if active is not None:
+                    await self._ensure_active_stream(
+                        active.conversation_key,
+                        session_id,
+                        active.adapter,
+                        active.conversation,
+                        active.actor,
+                    )
+                raise
+            await self._detach_archived_session(session_id)
+
+    async def _detach_archived_session(self, session_id: str) -> None:
+        """Drop bridge references only after Kimi confirms the archive."""
+
+        for key, binding in tuple(self._state.bindings.items()):
+            if binding.session_id == session_id:
+                del self._state.bindings[key]
+        self._state_store.save(self._state)
+        self._verified_session_profiles.discard(session_id)
+        # Invalidate the whole listing so remembered numeric choices never shift.
+        for key, choices in tuple(self._session_choices.items()):
+            if any(str(session["id"]) == session_id for session in choices):
+                del self._session_choices[key]
+        self._fail_compaction_waiter(
+            session_id, KimiServerError("Session was archived")
+        )
+        if self._active is not None and self._active.session_id == session_id:
+            await self._stop_active_stream()
+        await self._finish_archived_interactions(session_id)
+
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
         idle, busy = await asyncio.gather(
             self._client.list_sessions(busy=False, page_size=self._session_list_limit),

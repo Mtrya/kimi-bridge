@@ -140,49 +140,50 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
             return
         conversation_key = _conversation_key(msg)
         lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
+        is_command = (
+            text.startswith("/")
+            and not msg.images
+            and not msg.videos
+            and not msg.files
+            and not msg.audios
+        )
+        completion = None
         async with lock:
             self._coerce_binding_capabilities(conversation_key, adapter)
-            is_command = (
-                text.startswith("/")
-                and not msg.images
-                and not msg.videos
-                and not msg.files
-                and not msg.audios
-            )
             try:
                 if is_command:
-                    await self._handle_command(
+                    completion = await self._handle_command(
                         conversation_key,
                         adapter,
                         msg.conversation,
                         msg.actor,
                         text,
                     )
-                    return
-                binding = self._state.bindings.get(conversation_key)
-                if binding is None:
-                    self._default_workspace.mkdir(parents=True, exist_ok=True)
-                    binding = await self._create_and_bind(
+                else:
+                    binding = self._state.bindings.get(conversation_key)
+                    if binding is None:
+                        self._default_workspace.mkdir(parents=True, exist_ok=True)
+                        binding = await self._create_and_bind(
+                            conversation_key,
+                            self._default_workspace,
+                            _title_from_message(msg),
+                            adapter,
+                        )
+                    await self._ensure_active_stream(
                         conversation_key,
-                        self._default_workspace,
-                        _title_from_message(msg),
+                        binding.session_id,
                         adapter,
+                        msg.conversation,
+                        msg.actor,
                     )
-                await self._ensure_active_stream(
-                    conversation_key,
-                    binding.session_id,
-                    adapter,
-                    msg.conversation,
-                    msg.actor,
-                )
-                content = await self._build_prompt_content(binding, msg, adapter)
-                result = await self._client.submit_prompt(
-                    binding.session_id,
-                    content,
-                    delivery=PromptDelivery.STEER_IF_ACTIVE,
-                    permission_mode=binding.permission_mode,
-                )
-                await self._report_prompt_outcome(adapter, msg.conversation, result)
+                    content = await self._build_prompt_content(binding, msg, adapter)
+                    result = await self._client.submit_prompt(
+                        binding.session_id,
+                        content,
+                        delivery=PromptDelivery.STEER_IF_ACTIVE,
+                        permission_mode=binding.permission_mode,
+                    )
+                    await self._report_prompt_outcome(adapter, msg.conversation, result)
             except KimiServerOperationError as exc:
                 await self._report_operation_error(
                     adapter,
@@ -190,6 +191,9 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                     exc,
                     operation="Command" if is_command else "Prompt",
                 )
+        # Long-running work must not block later commands such as /archive.
+        if completion is not None:
+            await completion()
 
     async def _report_operation_error(
         self,

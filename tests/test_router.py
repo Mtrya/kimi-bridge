@@ -128,6 +128,8 @@ class FakeKimiClient:
         self.aborted: list[str] = []
         self.abort_result = True
         self.stopped: list[str] = []
+        self.archived: list[str] = []
+        self.archive_error: KimiServerError | None = None
         self.stop_result = True
         self.sessions: list[dict[str, Any]] = []
         self.create_model_persists = True
@@ -230,6 +232,11 @@ class FakeKimiClient:
 
     async def list_models(self) -> list[ModelInfo]:
         return list(self.models)
+
+    async def archive_session(self, session_id: str) -> None:
+        self.archived.append(session_id)
+        if self.archive_error is not None:
+            raise self.archive_error
 
     async def get_session_profile(self, session_id: str) -> SessionProfile:
         session = await self.get_session(session_id)
@@ -6844,5 +6851,192 @@ async def test_adapter_owned_splitting_receives_complete_text_snapshots(
             adapter, _message("").conversation, source, terminal=True
         )
         assert adapter.sent[-1][2] == source
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("busy", [False, True])
+async def test_archive_detaches_session_and_next_message_creates_new_session(
+    tmp_path: Path, busy: bool,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    state = store.load()
+    state.bindings["feishu:cli_bot:ou_shared"] = state.bindings["feishu:cli_bot:ou_user"]
+    unrelated = ConversationBinding("session-other", str(tmp_path))
+    state.bindings["feishu:cli_bot:ou_other"] = unrelated
+    store.save(state)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("work"))
+        await router.handle_inbound(adapter, _message("/sessions"))
+        active = router._active
+        assert active is not None
+        stream = active.task
+        router._session_choices["shared-list"] = list(client.sessions)
+        router._session_choices["other-list"] = [{"id": "session-other"}]
+        router._verified_session_profiles.add("session-other")
+        client.sessions[0]["busy"] = busy
+        await router.handle_inbound(adapter, _message("/archive"))
+
+        assert client.archived == ["session-control"]
+        assert store.load().bindings == {"feishu:cli_bot:ou_other": unrelated}
+        assert router._state.bindings == store.load().bindings
+        assert router._active is None
+        assert stream is not None and stream.done()
+        assert router._verified_session_profiles == {"session-other"}
+        assert router._session_choices == {"other-list": [{"id": "session-other"}]}
+        assert client.aborted == client.stopped == []
+        await router.handle_inbound(adapter, _message("next task"))
+        assert client.created[-1][0] == str(tmp_path)
+        assert client.prompts[-1][0] != "session-control"
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("command", ["/archive", "/archive session-control", "/archive ?"])
+async def test_archive_requires_binding_and_rejects_arguments(tmp_path: Path, command: str) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter()
+    store = StateStore(tmp_path / "state.json")
+    if command != "/archive":
+        _bind_control_session(store)
+    before = store.load().bindings.copy()
+    router = ChatRouter(client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3")
+    try:
+        await router.handle_inbound(adapter, _message(command))
+    finally:
+        await router.close()
+    assert client.archived == []
+    assert store.load().bindings == before
+    assert client.created == []
+    assert len(adapter.sent) == 1
+
+
+@pytest.mark.parametrize("error", [
+    KimiServerAPIError(50003, "Persistence failed"),
+    KimiServerTransportError("Connection lost"),
+])
+async def test_archive_failure_keeps_binding_stream_and_choices(tmp_path: Path, error: KimiServerError) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    client.archive_error = error
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    before = store.load().bindings.copy()
+    adapter = FakeAdapter()
+    router = ChatRouter(client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3")
+    try:
+        await router.handle_inbound(adapter, _message("work"))
+        await router.handle_inbound(adapter, _message("/sessions"))
+        choices = router._session_choices.copy()
+        active = router._active
+        assert active is not None and active.task is not None
+        previous_stream = active.task
+        await router.handle_inbound(adapter, _message("/archive"))
+        assert client.archived == ["session-control"]
+        assert store.load().bindings == before
+        assert router._session_choices == choices
+        assert active is not None
+        assert router._active is not None
+        assert router._active.session_id == active.session_id
+        assert router._active.task is not None and not router._active.task.done()
+        assert previous_stream.done()
+        assert client.subscriptions == ["session-control", "session-control"]
+        assert str(error) in adapter.sent[-1][2]
+    finally:
+        await router.close()
+
+
+async def test_archive_closes_pending_controls_without_sending_abort(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.approvals["session-1"] = [_approval()]
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client, state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path, model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("work"))
+        await _wait_for(lambda: bool(adapter.interactions))
+        pending = next(iter(router._pending.values()))
+        client.sessions[0]["busy"] = True
+        await router.handle_inbound(adapter, _message("/archive"))
+        assert router._pending == {}
+        assert pending.timeout_task is not None and pending.timeout_task.done()
+        assert [outcome.state for _, outcome in adapter.outcomes] == ["cancelled"]
+        assert client.archived == ["session-1"]
+        assert client.aborted == client.stopped == client.resolved_approvals == []
+    finally:
+        await router.close()
+
+
+async def test_archive_reaches_kimi_during_compaction_in_the_same_chat(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3")
+    try:
+        compact = asyncio.create_task(router.handle_inbound(adapter, _message("/compact")))
+        await _wait_for(lambda: bool(client.compact_calls))
+        client.sessions[0]["busy"] = True
+        await asyncio.wait_for(router.handle_inbound(adapter, _message("/archive")), timeout=1)
+        await asyncio.wait_for(compact, timeout=1)
+        assert client.archived == ["session-control"]
+        assert router._compaction_waiters == {}
+        assert store.load().bindings == {}
+        assert router._active is None
+        assert len(adapter.edits) == 1
+    finally:
+        await router.close()
+
+
+async def test_archive_keeps_an_unrelated_session_stream(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(client, state_store=store, default_workspace=tmp_path, model="kimi-code/k3")
+    try:
+        await router.handle_inbound(adapter, _message("other work", user_id="ou_other", conversation_id="oc_other"))
+        active = router._active
+        assert active is not None
+        task = active.task
+        await router.handle_inbound(adapter, _message("/archive"))
+        assert client.archived == ["session-control"]
+        assert router._active is active
+        assert task is not None and not task.done()
+        assert "feishu:cli_bot:ou_other" in store.load().bindings
+    finally:
+        await router.close()
+
+
+async def test_archive_stops_snapshot_reads_before_native_terminal_events(tmp_path: Path) -> None:
+    class ArchivingClient(FakeKimiClient):
+        async def archive_session(self, session_id: str) -> None:
+            self.emit(session_id, _event("turn.ended", reason="cancelled"))
+            await asyncio.sleep(0)
+            await super().archive_session(session_id)
+
+    client = ArchivingClient()
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client, state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path, model="kimi-code/k3",
+    )
+    try:
+        await router.handle_inbound(adapter, _message("work"))
+        await router.handle_inbound(adapter, _message("/archive"))
+        assert client.archived == ["session-1"]
+        assert client.snapshot_calls == []
+        assert router._active is None
     finally:
         await router.close()

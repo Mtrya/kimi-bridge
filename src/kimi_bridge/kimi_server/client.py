@@ -318,6 +318,19 @@ class KimiServerClient:
         )
         return _session_profile_from_wire(data)
 
+    async def archive_session(self, session_id: str) -> None:
+        """Archive one session and require confirmation before detaching it."""
+
+        data = await self._request_operation(
+            "archive_session",
+            path_parameters={"session_id": session_id},
+            json_body={},
+        )
+        if data.get("archived") is not True:
+            raise KimiServerProtocolError(
+                f"kimi server did not confirm archiving session {session_id!r}"
+            )
+
     async def get_session_status(self, session_id: str) -> SessionStatus:
         data = await self._request_operation(
             "session_status", path_parameters={"session_id": session_id}

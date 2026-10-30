@@ -304,6 +304,15 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             ),
         ),
         RestOperationContract(
+            "archive_session",
+            "KimiServerClient.archive_session",
+            "POST",
+            "/sessions/{session_id}:archive",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            response_fields=(_field("archived", "boolean", values=(True,)),),
+        ),
+        RestOperationContract(
             "get_session",
             "KimiServerClient.get_session",
             "GET",
