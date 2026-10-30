@@ -202,25 +202,28 @@ def _optional_number(value: int | None) -> str:
     return str(value) if value is not None else "unknown"
 
 
+def _sort_tasks(tasks: list[TaskInfo]) -> list[TaskInfo]:
+    return sorted(tasks, key=lambda task: _TASK_STATUS_DISPLAY[task.status][0])
+
+
 def _format_tasks(tasks: list[TaskInfo], status: TaskStatus | None) -> str:
     if not tasks:
         suffix = f" with status {status}" if status is not None else ""
         return f"No tasks found{suffix}."
     heading = "Tasks" if status is None else f"{_task_status_label(status)} tasks"
     blocks = [f"**{heading} · {len(tasks)}**"]
-    for task in sorted(
-        tasks, key=lambda item: _TASK_STATUS_DISPLAY[item.status][0]
-    ):
+    for index, task in enumerate(tasks, 1):
         _, icon, label = _TASK_STATUS_DISPLAY[task.status]
         blocks.append(
             "\n".join(
                 (
-                    f"{icon} **{label}** · {task.kind}",
+                    f"{index}. {icon} **{label}** · {task.kind}",
                     _task_summary(task),
                     f"`{task.id}`",
                 )
             )
         )
+    blocks.append("Use /tasks show <n|id> or /tasks cancel <n|id>.")
     return "\n\n".join(blocks)
 
 

@@ -102,6 +102,9 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._clock = clock
         self._conversation_locks: dict[str, asyncio.Lock] = {}
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
+        self._task_choices: dict[
+            tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
+        ] = {}
         self._verified_session_profiles: set[str] = set()
         self._active: _ActiveStream | None = None
         self._pending: dict[str, _PendingInteraction] = {}
