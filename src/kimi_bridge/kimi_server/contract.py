@@ -209,7 +209,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "update_config",
-            "KimiServerClient.set_secondary_model",
+            "KimiServerClient.set_secondary_model/set_secondary_model_entry",
             "POST",
             "/config",
             "/api/v1/config",
@@ -221,6 +221,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                         "models": {"kimi-code/k3": ""},
                     }
                 },
+                {"secondary_model": {"models": {"kimi-code/k3": "Hard tasks"}}},
             ),
             request_fields=(
                 _field("secondary_model", "object", required=False),
@@ -310,6 +311,14 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions/{session_id}",
             "/api/v1/sessions/{session_id}",
             response_fields=_SESSION_FIELDS,
+        ),
+        RestOperationContract(
+            "reload_session",
+            "KimiServerClient.reload_session",
+            "POST",
+            "/sessions/{session_id}:reload",
+            "/api/v1/sessions/{session_id}:reload",
+            request_examples=({},),
         ),
         RestOperationContract(
             "get_profile",

@@ -9,7 +9,6 @@ from typing import cast
 
 from ..kimi_server import (
     GoalControl,
-    KimiServerError,
     KimiServerOperationError,
     KimiServerProtocolError,
     PromptDelivery,
@@ -309,39 +308,34 @@ class _CommandMixin:
             )
             await self._send_chunked(adapter, conversation, "Stopped.")
             return
-        if command == "/restart-server":
+        if command == "/reload":
             if argument:
                 await self._send_chunked(
-                    adapter, conversation, "Usage: /restart-server"
+                    adapter, conversation, "Usage: /reload"
                 )
                 return
-            await self._send_chunked(
-                adapter, conversation, "Restarting Kimi Code server…"
+            binding = await self._require_binding(
+                conversation_key, adapter, conversation
             )
-            self._fail_all_compaction_waiters(
-                KimiServerError("Kimi Code server restarted")
+            if binding is None:
+                return
+            status = await self._require_idle(
+                binding, adapter, conversation, "Reload"
             )
-            try:
-                await self._cancel_all_pending_interactions(
-                    "Cancelled because the Kimi Code server restarted."
-                )
-                await self._client.restart_server()
-                version = await self._client.check_server_version()
-                self._model = await self._client.get_default_model()
-                self._verified_session_profiles.clear()
-                binding = self._state.bindings.get(conversation_key)
-                if binding is not None:
-                    await self._verify_session_profile(
-                        binding.session_id,
-                        binding.permission_mode,
-                        replace_existing=False,
-                    )
-            finally:
-                await self._resume_interactions()
+            if status is None:
+                return
+            await self._client.reload_session(binding.session_id)
+            self._verified_session_profiles.discard(binding.session_id)
+            self._model = await self._client.get_default_model()
+            await self._verify_session_profile(
+                binding.session_id,
+                binding.permission_mode,
+                replace_existing=False,
+            )
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Kimi Code server restarted ({version}).",
+                f"Reloaded session {binding.session_id} with the latest Kimi Code configuration.",
             )
             return
 
@@ -481,16 +475,33 @@ class _CommandMixin:
             )
             return
 
+        parts = argument.split(maxsplit=2)
+        editing_entry = parts[0] == "set"
+        if editing_entry and len(parts) != 3:
+            await self._send_chunked(
+                adapter, conversation, "Usage: /secondary-model set <alias> <description>"
+            )
+            return
+        alias = parts[1] if editing_entry else argument
         models = await self._client.list_models()
-        if not any(model.alias == argument for model in models):
+        if not any(model.alias == alias for model in models):
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Unknown model alias: {argument}\n"
+                f"Unknown model alias: {alias}\n"
                 "Use /secondary-model to list exact aliases.",
             )
             return
-        await self._client.set_secondary_model(argument)
+        if editing_entry:
+            updated = await self._client.set_secondary_model_entry(alias, parts[2])
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Secondary model pool entry: {alias}\n{parts[2]}\n"
+                f"Default secondary model: {updated.default_model}",
+            )
+            return
+        await self._client.set_secondary_model(alias)
         await self._send_chunked(
             adapter,
             conversation,

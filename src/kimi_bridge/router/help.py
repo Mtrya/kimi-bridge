@@ -221,23 +221,25 @@ Example:
 - `/model kimi-code/k3`""",
     ),
     "/secondary-model": CommandHelp(
-        syntax="/secondary-model [alias]",
-        summary="show or set the default model for subagents",
+        syntax="/secondary-model [alias] | set <alias> <description>",
+        summary="show the subagent pool, select its default, or edit an entry",
         section="Control",
         details="""**/secondary-model [alias]**
 
-Show the global default model for newly spawned subagents and the exact catalog aliases, or select one.
+Show the global default model, pool descriptions, and exact catalog aliases for newly spawned subagents, or select a default.
 
 Arguments:
 - `alias` — an exact alias from the live Kimi catalog, not a display name.
+- `set <alias> <description>` — add a pool entry or replace its description. The description is the remaining text, including spaces; quotes are not needed.
 
-Defaults: without `alias`, only shows the current selection and catalog. With no configured selection, subagents inherit their primary agent's model.
+Defaults: with no arguments, show the current selection, pool, and catalog. With no configured selection, subagents inherit their primary agent's model. Adding the first entry makes it the default; later additions keep the existing default.
 
-Side effects: updates Kimi Code's global `[secondary_model]` configuration and affects later subagent spawns in every session, including sessions that are currently busy. Existing subagents and primary session models are unchanged. This command requires Kimi Code 0.42.0 or newer, where secondary models are always enabled.
+Side effects: updates Kimi Code's global `[secondary_model]` configuration and affects later subagent spawns in every session, including sessions that are currently busy. Existing subagents and primary session models are unchanged. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh.
 
 Example:
 - `/secondary-model`
-- `/secondary-model kimi-code/kimi-for-coding-highspeed`""",
+- `/secondary-model kimi-code/kimi-for-coding-highspeed`
+- `/secondary-model set kimi-code/k3 Complex reasoning and debugging`""",
     ),
     "/effort": CommandHelp(
         syntax="/effort [effort]",
@@ -360,18 +362,18 @@ Side effects: idempotent; reports `Stopped.` even when the session is already id
 Example:
 - `/stop`""",
     ),
-    "/restart-server": CommandHelp(
-        syntax="/restart-server",
-        summary="restart the managed Kimi Code server",
+    "/reload": CommandHelp(
+        syntax="/reload",
+        summary="reload Kimi settings and refresh the bound session",
         section="Control",
-        details="""**/restart-server**
+        details="""**/reload**
 
-Gracefully stop the managed Kimi Code server, start a fresh server generation, and reconnect without restarting the bridge or IM adapter. Takes no arguments.
+Reload Kimi Code's configuration, plugins, skills, and agent definitions, then rebuild the bound session with its existing history. Takes no arguments and requires a bound session.
 
-Side effects: executes even while sessions are busy. Active turns, approvals, questions, and detached tasks across every session are terminated. Persisted sessions, history, and bridge conversation bindings remain available after restart. The command reports success only after the replacement server is ready.
+Side effects: rejected during running agent turns or compaction. The server and bridge stay online; the session ID, selected model, and bridge permission mode are preserved. Global Kimi settings are refreshed, and new sessions use the latest default model. The bridge's own configuration is loaded at bridge startup.
 
 Example:
-- `/restart-server`""",
+- `/reload`""",
     ),
     "/tasks": CommandHelp(
         syntax="/tasks [all|completed|failed|cancelled]",
