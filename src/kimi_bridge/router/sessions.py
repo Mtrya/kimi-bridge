@@ -231,16 +231,18 @@ class _SessionMixin:
         adapter: PlatformAdapter,
     ) -> ConversationBinding:
         permission_mode = self._default_permission_mode(adapter)
+        model = await self._client.get_default_model()
         session_id = await self._client.create_session(
             str(workspace),
             title=title,
-            model=self._model,
+            model=model,
             permission_mode=permission_mode,
         )
         await self._verify_session_profile(
             session_id,
             permission_mode,
             replace_existing=True,
+            expected_model=model,
         )
         current = self._state.bindings.get(conversation_key)
         binding = ConversationBinding(
@@ -262,24 +264,26 @@ class _SessionMixin:
         permission_mode: str,
         *,
         replace_existing: bool,
+        expected_model: str | None = None,
     ) -> None:
         if session_id in self._verified_session_profiles:
             return
         status = await self._client.get_session_status(session_id)
+        model = expected_model or self._model
         update_model = status.model is None or (
-            replace_existing and status.model != self._model
+            replace_existing and status.model != model
         )
         update_permission = status.permission_mode != permission_mode
         if update_model or update_permission:
             await self._client.update_profile(
                 session_id,
-                model=self._model if update_model else None,
+                model=model if update_model else None,
                 permission_mode=cast(PermissionMode, permission_mode),
             )
             status = await self._client.get_session_status(session_id)
-            if update_model and status.model != self._model:
+            if update_model and status.model != model:
                 raise KimiServerProtocolError(
-                    f"kimi session {session_id} did not bind model {self._model!r}"
+                    f"kimi session {session_id} did not bind model {model!r}"
                 )
             if status.permission_mode != permission_mode:
                 raise KimiServerProtocolError(

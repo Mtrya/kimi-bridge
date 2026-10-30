@@ -70,7 +70,7 @@ For more detailed installation steps, platform-side setup, or customization, see
 Chat commands include:
 
 - sessions: `/new`, `/archive`, `/sessions`, `/switch`, `/status`, `/title`, `/usage`, `/compact`, `/undo`;
-- control: `/mode`, `/model`, `/secondary-model`, `/effort`, `/plan`, `/goal`, `/stop`, `/restart-server`;
+- control: `/mode`, `/model`, `/secondary-model`, `/effort`, `/plan`, `/goal`, `/stop`, `/reload`;
 - tasks and tools: `/tasks`, `/skills`, `/mcp`;
 - output: `/send`, `/render-thinking`.
 
