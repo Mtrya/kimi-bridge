@@ -15,6 +15,8 @@ from email.parser import Parser
 from email.policy import default
 from pathlib import Path
 
+from kimi_bridge.compatibility import COMPATIBILITY_MAP
+
 
 REQUIRED_PACKAGE_FILES = {
     "kimi_bridge/compatibility-map.json",
@@ -201,7 +203,12 @@ def _check_tool_install(artifact: Path) -> None:
                 f"unexpected installed version: {version.stdout.strip()}"
             )
         _run(
-            [str(executable), "compat", "--kimi-code", "0.42.0"],
+            [
+                str(executable),
+                "compat",
+                "--kimi-code",
+                COMPATIBILITY_MAP[-1].kimi_code[-1],
+            ],
             environment,
         )
         doctor_environment = dict(environment)

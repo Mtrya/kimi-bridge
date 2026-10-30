@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal
 
+from ..interactions import ApprovalRequest, QuestionRequest
+
 
 class KimiServerError(RuntimeError):
     """Base error for the bridge's kimi-server boundary."""
@@ -92,6 +94,25 @@ class PromptSteeringError(KimiServerOperationError):
 class InteractionResolution(Enum):
     APPLIED = "applied"
     EXPIRED = "expired"
+
+
+InteractionEnd = Literal["approved", "rejected", "cancelled", "answered", "dismissed"]
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionUpdate:
+    session_id: str
+    id: str
+    request: ApprovalRequest | QuestionRequest | None
+    outcome: InteractionEnd | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionSnapshot:
+    """Authoritative pending IDs after a subscription has been accepted."""
+
+    session_id: str
+    pending_ids: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)

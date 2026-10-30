@@ -466,23 +466,22 @@ def _field_matches(
         and requirement.format is None
     ):
         return True
-    return any(
-        (
+    candidates = [
+        candidate
+        for candidate, _required in states
+        if (
             "any" in requirement.types
             or not _schema_types(candidate)
-            or bool(
-                set(_schema_types(candidate)).intersection(requirement.types)
-            )
+            or bool(set(_schema_types(candidate)).intersection(requirement.types))
         )
         and (
-            requirement.format is None
-            or candidate.get("format") == requirement.format
+            requirement.format is None or candidate.get("format") == requirement.format
         )
-        and all(
-            _schema_accepts_instance(candidate, value)
-            for value in requirement.values
-        )
-        for candidate, _required in states
+    ]
+    # A discriminated union can distribute accepted values across variants.
+    return bool(candidates) and all(
+        any(_schema_accepts_instance(candidate, value) for candidate in candidates)
+        for value in requirement.values
     )
 
 

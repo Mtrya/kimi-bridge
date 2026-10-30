@@ -68,7 +68,10 @@ class _ActiveStream:
         default_factory=set
     )
     task: asyncio.Task[None] | None = None
-    interaction_task: asyncio.Task[None] | None = None
+    interactions: dict[str, ApprovalRequest | QuestionRequest] = field(
+        default_factory=dict
+    )
+    handled_interactions: set[str] = field(default_factory=set)
     failure_notice_task: asyncio.Task[None] | None = None
 
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 5
+KIMI_SEMANTIC_CONTRACT_VERSION = 6
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -557,82 +557,32 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             ),
         ),
         RestOperationContract(
-            "list_approvals",
-            "KimiServerClient.list_approvals",
+            "pending_interactions",
+            "KimiServerClient._get_pending_interaction_ids",
             "GET",
-            "/sessions/{session_id}/approvals",
-            "/api/v1/sessions/{session_id}/approvals",
-            query_examples=({"status": "pending"},),
+            "/sessions/{session_id}/transcript",
+            "/api/v1/sessions/{session_id}/transcript",
+            query_examples=({"agent_id": "main", "page_size": 1},),
             response_fields=(
-                _field("items", "array"),
-                _field("items.[].approval_id", "string"),
-                _field("items.[].session_id", "string"),
-                _field("items.[].tool_name", "string"),
-                _field("items.[].action", "string", required=False),
-                _field("items.[].tool_input_display", "any", required=False),
+                _field("pending_interactions", "array"),
+                _field("pending_interactions.[]", "string"),
+                _field("agents", "array"),
+                _field("agents.[].agentId", "string"),
             ),
         ),
         RestOperationContract(
-            "resolve_approval",
-            "KimiServerClient.resolve_approval",
+            "respond_interaction",
+            "KimiServerClient.resolve_approval/resolve_question/dismiss_question",
             "POST",
-            "/sessions/{session_id}/approvals/{approval_id}",
-            "/api/v1/sessions/{session_id}/approvals/{approval_id}",
+            "/sessions/{session_id}/interactions/{interaction_id}",
+            "/api/v1/sessions/{session_id}/interactions/{interaction_id}",
             request_examples=(
-                {"decision": "approved"},
-                {"decision": "rejected"},
-            ),
-            response_fields=(_field("resolved", "boolean"),),
-        ),
-        RestOperationContract(
-            "list_questions",
-            "KimiServerClient.list_questions",
-            "GET",
-            "/sessions/{session_id}/questions",
-            "/api/v1/sessions/{session_id}/questions",
-            query_examples=({"status": "pending"},),
-            response_fields=(
-                _field("items", "array"),
-                _field("items.[].question_id", "string"),
-                _field("items.[].session_id", "string"),
-                _field("items.[].questions", "array"),
-                _field("items.[].questions.[].id", "string"),
-                _field("items.[].questions.[].question", "string"),
-                _field("items.[].questions.[].header", "string", required=False),
-                _field("items.[].questions.[].body", "string", required=False),
-                _field("items.[].questions.[].options", "array"),
-                _field("items.[].questions.[].options.[].id", "string"),
-                _field("items.[].questions.[].options.[].label", "string"),
-                _field(
-                    "items.[].questions.[].options.[].description",
-                    "string",
-                    required=False,
-                ),
-                _field(
-                    "items.[].questions.[].multi_select",
-                    "boolean",
-                    required=False,
-                ),
-                _field(
-                    "items.[].questions.[].allow_other",
-                    "boolean",
-                    required=False,
-                ),
-                _field(
-                    "items.[].questions.[].other_label",
-                    "string",
-                    required=False,
-                ),
-            ),
-        ),
-        RestOperationContract(
-            "resolve_question",
-            "KimiServerClient.resolve_question",
-            "POST",
-            "/sessions/{session_id}/questions/{question_id}",
-            "/api/v1/sessions/{session_id}/questions/{tail}",
-            request_examples=(
+                {"kind": "approval", "decision": "approved"},
+                {"kind": "approval", "decision": "rejected"},
+                {"kind": "approval", "decision": "cancelled"},
+                {"kind": "question", "dismissed": True},
                 {
+                    "kind": "question",
                     "answers": {
                         "q1": {"kind": "single", "option_id": "one"},
                         "q2": {"kind": "multi", "option_ids": ["a", "b"]},
@@ -647,15 +597,19 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     "method": "click",
                 },
             ),
-            response_fields=(_field("resolved", "boolean"),),
-        ),
-        RestOperationContract(
-            "dismiss_question",
-            "KimiServerClient.dismiss_question",
-            "POST",
-            "/sessions/{session_id}/questions/{question_id}:dismiss",
-            "/api/v1/sessions/{session_id}/questions/{tail}",
-            response_fields=(_field("dismissed", "boolean"),),
+            response_fields=(
+                _field(
+                    "outcome",
+                    "string",
+                    values=(
+                        "approved",
+                        "rejected",
+                        "cancelled",
+                        "answered",
+                        "dismissed",
+                    ),
+                ),
+            ),
         ),
         RestOperationContract(
             "list_prompts",
@@ -845,6 +799,42 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("type", "string", values=("error",)),
             _field("payload.code", "integer", "number"),
             _field("payload.msg", "string"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "interaction",
+        "KimiServerClient.subscribe_events",
+        (
+            _field("type", "string", values=("interaction",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("interaction_id", "string"),
+            _field("status", "string", values=("pending", "ended")),
+            _field("kind", "string", values=("approval", "question")),
+            _field(
+                "outcome",
+                "string",
+                required=False,
+                values=("approved", "rejected", "cancelled", "answered", "dismissed"),
+            ),
+            _field("request", "object"),
+            _field("request.tool_name", "string"),
+            _field("request.action", "string"),
+            _field("request.tool_input_display", "any", required=False),
+            _field("request.questions", "array"),
+            _field("request.questions.[].id", "string"),
+            _field("request.questions.[].question", "string"),
+            _field("request.questions.[].header", "string", required=False),
+            _field("request.questions.[].body", "string", required=False),
+            _field("request.questions.[].options", "array"),
+            _field("request.questions.[].options.[].id", "string"),
+            _field("request.questions.[].options.[].label", "string"),
+            _field(
+                "request.questions.[].options.[].description", "string", required=False
+            ),
+            _field("request.questions.[].multi_select", "boolean", required=False),
+            _field("request.questions.[].allow_other", "boolean", required=False),
+            _field("request.questions.[].other_label", "string", required=False),
         ),
     ),
     WebSocketMessageContract(

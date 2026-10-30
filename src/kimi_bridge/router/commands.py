@@ -52,8 +52,8 @@ TASK_STATUSES: frozenset[str] = frozenset(
 )
 PERMISSION_MODE_DESCRIPTIONS = {
     "manual": "Approvals and questions can be answered in chat.",
-    "auto": "Fully autonomous; the agent never asks questions.",
-    "yolo": "Regular tools are auto-approved; the agent may still ask questions.",
+    "auto": "Regular tools are auto-approved; questions are skipped. Feishu/Telegram still review plans.",
+    "yolo": "Regular tools are auto-approved; questions and plan review remain interactive.",
 }
 
 class _CommandMixin:
@@ -338,7 +338,7 @@ class _CommandMixin:
                         replace_existing=False,
                     )
             finally:
-                await self._resume_interaction_polling()
+                await self._resume_interactions()
             await self._send_chunked(
                 adapter,
                 conversation,

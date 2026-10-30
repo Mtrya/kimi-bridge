@@ -144,6 +144,69 @@ def _minimal_documents() -> tuple[dict[str, Any], dict[str, Any]]:
     return openapi, asyncapi
 
 
+def test_interaction_contract_requires_both_discriminated_variants(monkeypatch) -> None:
+    contract = kimi_contract.WebSocketMessageContract(
+        "interaction",
+        "KimiServerClient.subscribe_events",
+        (
+            kimi_contract.SchemaFieldContract(
+                ("kind",), ("string",), values=("approval", "question")
+            ),
+            kimi_contract.SchemaFieldContract(("request", "tool_name"), ("string",)),
+            kimi_contract.SchemaFieldContract(("request", "questions"), ("array",)),
+        ),
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
+    monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (contract,))
+    openapi, asyncapi = _minimal_documents()
+    payload = {
+        "oneOf": [
+            {
+                "type": "object",
+                "required": ["kind", "request"],
+                "properties": {
+                    "kind": {"type": "string", "const": "approval"},
+                    "request": {
+                        "type": "object",
+                        "required": ["tool_name"],
+                        "properties": {"tool_name": {"type": "string"}},
+                    },
+                },
+            },
+            {
+                "type": "object",
+                "required": ["kind", "request"],
+                "properties": {
+                    "kind": {"type": "string", "const": "question"},
+                    "request": {
+                        "type": "object",
+                        "required": ["questions"],
+                        "properties": {
+                            "questions": {"type": "array", "items": {"type": "object"}}
+                        },
+                    },
+                },
+            },
+        ]
+    }
+    asyncapi["components"]["messages"]["interaction"] = {"payload": payload}
+    assert all(
+        check.status == "pass"
+        for check in kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    )
+    payload["oneOf"].pop()
+    failures = {
+        check.id
+        for check in kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+        if check.status == "fail"
+    }
+    assert failures == {
+        "websocket.message.interaction.kind",
+        "websocket.message.interaction.request.questions",
+    }
+
+
 @pytest.mark.parametrize(
     ("persisted_model", "expected_status"),
     [(None, "pass"), ("kimi-code/k3", "fail")],
