@@ -156,16 +156,16 @@ Example:
 - `/compact Preserve the API decisions and remaining test failures`""",
     ),
     "/history": CommandHelp(
-        syntax="/history [count] [--full]",
+        syntax="/history [count] [full]",
         summary="show the newest session messages",
         section="Sessions",
-        details="""**/history [count] [--full]**
+        details="""**/history [count] [full]**
 
 Show the newest visible messages in the bound session's authoritative history — the post-undo, post-compaction view the agent currently sees. Thinking, tool calls, and tool results are omitted; other non-text content becomes `[attachment: <name>]` placeholders.
 
 Arguments:
 - `count` — messages to show, 1-50.
-- `--full` — show complete message bodies instead of truncating each one to 500 characters.
+- `full` — show complete message bodies instead of truncating each one to 500 characters; may appear before or after `count`.
 
 Defaults: `10` when omitted.
 
@@ -174,7 +174,8 @@ Side effects: none. `/undo` and `/switch` confirmations automatically include th
 Example:
 - `/history`
 - `/history 20`
-- `/history 20 --full`""",
+- `/history full`
+- `/history 20 full`""",
     ),
     "/undo": CommandHelp(
         syntax="/undo [count]",
@@ -391,7 +392,7 @@ Example:
         section="Tasks and tools",
         details="""**/tasks [all|completed|failed|cancelled]**
 
-List background tasks of the bound session.
+List numbered background tasks of the bound session. Use the displayed number with `/tasks show` or `/tasks cancel`. Numbers refer to your latest list in this chat and session, including any status filter, and stay fixed until you list tasks again. Changing the bound session clears your task numbers across chats.
 
 Arguments:
 - `all` — include tasks in every status.
@@ -406,34 +407,42 @@ Example:
 - `/tasks all`""",
     ),
     "/tasks show": CommandHelp(
-        syntax="/tasks show <id>",
+        syntax="/tasks show <n|id>",
         summary="inspect a task with an 8 KiB output tail",
         section="Tasks and tools",
-        details="""**/tasks show <id>**
+        details="""**/tasks show <n|id>**
 
 Inspect one task, including at most the last 8 KiB of its output.
 
 Arguments:
+- `n` — a number from your latest `/tasks` list in this chat and session.
 - `id` — a task ID from `/tasks`.
 
+Bare numbers select list positions. Use `/tasks show id <id>` to select an exact ID, including a numeric ID.
+
 Example:
-- `/tasks show 3f2a1b`""",
+- `/tasks show 2`
+- `/tasks show id 123`""",
     ),
     "/tasks cancel": CommandHelp(
-        syntax="/tasks cancel <id>",
+        syntax="/tasks cancel <n|id>",
         summary="cancel a task",
         section="Tasks and tools",
-        details="""**/tasks cancel <id>**
+        details="""**/tasks cancel <n|id>**
 
 Cancel a background task.
 
 Arguments:
+- `n` — a number from your latest `/tasks` list in this chat and session.
 - `id` — a task ID from `/tasks`.
+
+Bare numbers select list positions. Use `/tasks cancel id <id>` to select an exact ID, including a numeric ID.
 
 Side effects: executes immediately, even while a turn is busy.
 
 Example:
-- `/tasks cancel 3f2a1b`""",
+- `/tasks cancel 1`
+- `/tasks cancel id 123`""",
     ),
     "/skills": CommandHelp(
         syntax="/skills",
