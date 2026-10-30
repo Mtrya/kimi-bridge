@@ -612,7 +612,7 @@ class KimiServerClient:
         return [_tool_info_from_wire(item) for item in data["tools"]]
 
     async def _get_pending_interaction_ids(
-        self, session_id: str, connection: ServerConnection
+        self, session_id: str, connection: ServerConnection, *, agent_id: str | None = None
     ) -> frozenset[str]:
         async def read(agent_id: str) -> dict[str, Any]:
             return await self._request_operation(
@@ -622,10 +622,14 @@ class KimiServerClient:
                 connection=connection,
             )
 
-        main = await read(_MAIN_AGENT_ID)
+        main = await read(agent_id if agent_id is not None else _MAIN_AGENT_ID)
         # Interactions are session-wide even when answer events filter to main.
         # Each transcript only lists that agent's pending requests.
-        child_ids = {agent["agentId"] for agent in main["agents"]} - {_MAIN_AGENT_ID}
+        child_ids = (
+            {agent["agentId"] for agent in main["agents"]} - {_MAIN_AGENT_ID}
+            if agent_id is None
+            else set()
+        )
         transcripts = [
             main,
             *await asyncio.gather(*(read(agent_id) for agent_id in child_ids)),
@@ -876,6 +880,19 @@ class KimiServerClient:
                                 session_id, connection
                             ),
                         )
+                        # Frames read before the ack precede this REST snapshot.
+                        # Do not resurrect requests already resolved in that gap.
+                        pending_frames = [
+                            frame
+                            for frame in pending_frames
+                            if not (
+                                frame.get("type") == "interaction"
+                                and frame.get("status") == "pending"
+                                and frame.get("session_id") == session_id
+                                and frame["interaction_id"]
+                                not in interaction_snapshot.pending_ids
+                            )
+                        ]
                         ready.set()
                         subscribed_once = True
                         consecutive_ack_mismatches = 0
@@ -907,6 +924,23 @@ class KimiServerClient:
                                 continue
                             if frame_type == "interaction":
                                 if frame["session_id"] == session_id:
+                                    if (
+                                        frame["status"] == "pending"
+                                        and frame["interaction_id"]
+                                        not in interaction_snapshot.pending_ids
+                                    ):
+                                        # A pending frame buffered in the socket
+                                        # can predate the snapshot, or be new live
+                                        # work. Verify its agent before presenting.
+                                        pending_ids = (
+                                            await self._get_pending_interaction_ids(
+                                                session_id,
+                                                connection,
+                                                agent_id=frame["agent_id"],
+                                            )
+                                        )
+                                        if frame["interaction_id"] not in pending_ids:
+                                            continue
                                     yield _interaction_update_from_wire(frame)
                                 continue
                             if not _is_session_event_frame(frame):
@@ -983,6 +1017,7 @@ class KimiServerClient:
                 except (
                     _WebSocketAckMismatch,
                     ConnectionClosed,
+                    KimiServerTransportError,
                     OSError,
                     TimeoutError,
                 ) as exc:

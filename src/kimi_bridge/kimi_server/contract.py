@@ -53,6 +53,7 @@ class WebSocketMessageContract:
     source: str
     fields: tuple[SchemaFieldContract, ...]
     examples: tuple[Mapping[str, Any], ...] = ()
+    discriminator: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -683,6 +684,16 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
 }
 
 
+_INTERACTION_FIELDS = (
+    _field("type", "string", values=("interaction",)),
+    _field("session_id", "string"),
+    _field("agent_id", "string"),
+    _field("interaction_id", "string"),
+    _field("status", "string", values=("pending", "ended")),
+    _field("request", "object"),
+)
+
+
 KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
     WebSocketMessageContract(
         "client_hello",
@@ -805,22 +816,32 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
         "interaction",
         "KimiServerClient.subscribe_events",
         (
-            _field("type", "string", values=("interaction",)),
-            _field("session_id", "string"),
-            _field("agent_id", "string"),
-            _field("interaction_id", "string"),
-            _field("status", "string", values=("pending", "ended")),
-            _field("kind", "string", values=("approval", "question")),
+            *_INTERACTION_FIELDS,
+            _field("kind", "string", values=("approval",)),
             _field(
                 "outcome",
                 "string",
                 required=False,
-                values=("approved", "rejected", "cancelled", "answered", "dismissed"),
+                values=("approved", "rejected", "cancelled"),
             ),
-            _field("request", "object"),
             _field("request.tool_name", "string"),
             _field("request.action", "string"),
             _field("request.tool_input_display", "any", required=False),
+        ),
+        discriminator=("kind", "approval"),
+    ),
+    WebSocketMessageContract(
+        "interaction",
+        "KimiServerClient.subscribe_events",
+        (
+            *_INTERACTION_FIELDS,
+            _field("kind", "string", values=("question",)),
+            _field(
+                "outcome",
+                "string",
+                required=False,
+                values=("answered", "dismissed", "cancelled"),
+            ),
             _field("request.questions", "array"),
             _field("request.questions.[].id", "string"),
             _field("request.questions.[].question", "string"),
@@ -836,6 +857,7 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("request.questions.[].allow_other", "boolean", required=False),
             _field("request.questions.[].other_label", "string", required=False),
         ),
+        discriminator=("kind", "question"),
     ),
     WebSocketMessageContract(
         "session_event",
@@ -1057,6 +1079,11 @@ def kimi_semantic_contract() -> dict[str, Any]:
                     "source": item.source,
                     "fields": [field_payload(field) for field in item.fields],
                     "examples": [dict(value) for value in item.examples],
+                    **(
+                        {"discriminator": dict([item.discriminator])}
+                        if item.discriminator is not None
+                        else {}
+                    ),
                 }
                 for item in KIMI_WEBSOCKET_MESSAGES
             ],

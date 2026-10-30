@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterable
 from typing import Any
 
+import httpx
 import pytest
 
 from kimi_bridge.compatibility import (
@@ -222,7 +223,10 @@ async def test_interactions_include_subagents_but_filter_other_sessions() -> Non
     client = KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
-        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False})],
+            pending_snapshots=[["interaction-1", "child-request"]],
+        ),
         ws_connect=FakeWebSocketConnect([socket]),
     )
     stream = client.subscribe_events("session-1")
@@ -234,6 +238,137 @@ async def test_interactions_include_subagents_but_filter_other_sessions() -> Non
         assert event.id == "child-request"
         assert event.request.session_id == "session-1"
         assert (await anext(stream)).id == "interaction-1"
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+@pytest.mark.parametrize("failed_request", [1, 2])
+async def test_transcript_transport_failure_reconnects(failed_request) -> None:
+    class FailingHttp(FakeHttpClient):
+        transcript_requests = 0
+
+        async def request(self, method, url, **kwargs):
+            if url.endswith("/transcript"):
+                self.transcript_requests += 1
+                if self.transcript_requests == failed_request:
+                    raise httpx.ConnectError("transient transcript failure")
+            return await super().request(method, url, **kwargs)
+
+    http = FailingHttp([_envelope({"busy": False})] * (failed_request + 1))
+    sockets = [
+        FakeWebSocket(
+            subscribe_payload={"accepted": ["session-1"]},
+            disconnect_after_events=True,
+        )
+        for _ in range(failed_request)
+    ]
+    sockets.append(
+        FakeWebSocket(
+            subscribe_payload={"accepted": ["session-1"]},
+            events=[_session_event(1, "epoch-1", "turn.started")],
+        )
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect(sockets),
+        reconnect_initial_backoff=0,
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        async with asyncio.timeout(1):
+            for _ in range(failed_request):
+                assert isinstance(await anext(stream), InteractionSnapshot)
+            assert (await anext(stream))["type"] == "turn.started"
+        assert http.transcript_requests == failed_request + 1
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_snapshot_filters_resolved_interactions_buffered_before_ack() -> None:
+    pending = _interaction_frame("approval")
+    fresh = dict(pending, interaction_id="still-pending")
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[pending, _interaction_frame("approval", ended=True), fresh],
+        events_before_ack=True,
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=FakeHttpClient(
+            [_envelope({"busy": False})],
+            pending_snapshots=[["still-pending"]],
+        ),
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot(
+            "session-1", frozenset({"still-pending"})
+        )
+        assert await anext(stream) == InteractionUpdate(
+            "session-1", "interaction-1", None, "approved"
+        )
+        assert (await anext(stream)).id == "still-pending"
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_invalid_transcript_is_a_protocol_failure_not_a_reconnect() -> None:
+    http = FakeHttpClient(
+        [_envelope({"busy": False})],
+        transcript_snapshots=[{"agents": [], "pending_interactions": "invalid"}],
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect(
+            [FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})]
+        ),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        with pytest.raises(KimiServerProtocolError):
+            await anext(stream)
+        assert len([r for r in http.requests if r[1].endswith("/transcript")]) == 1
+    finally:
+        await stream.aclose()
+        await client.aclose()
+
+
+async def test_pending_frames_after_ack_are_checked_without_dropping_new_work() -> None:
+    stale = _interaction_frame("approval")
+    fresh = dict(stale, interaction_id="new-request", agent_id="child")
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[stale, fresh],
+    )
+    http = FakeHttpClient(
+        [_envelope({"busy": False})], pending_snapshots=[[], [], ["new-request"]]
+    )
+    client = KimiServerClient(
+        "http://localhost:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([socket]),
+    )
+    stream = client.subscribe_events("session-1")
+    try:
+        assert await anext(stream) == InteractionSnapshot("session-1", frozenset())
+        event = await asyncio.wait_for(anext(stream), 1)
+        assert isinstance(event, InteractionUpdate)
+        assert event.id == "new-request"
+        assert [
+            request[2]["params"]["agent_id"]
+            for request in http.requests
+            if request[1].endswith("/transcript")
+        ] == ["main", "main", "child"]
     finally:
         await stream.aclose()
         await client.aclose()

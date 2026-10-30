@@ -564,6 +564,8 @@ class FakeAdapter:
         self.outcomes: list[tuple[MessageRef, InteractionOutcome]] = []
         self.files: list[tuple[MessageRef, ConversationRef, OutboundFile]] = []
         self.file_error: Exception | None = None
+        self.interaction_error: Exception | None = None
+        self.finish_error: Exception | None = None
         self.transcribed_audio: list[InboundAudio] = []
 
     async def start(
@@ -619,6 +621,8 @@ class FakeAdapter:
     async def present_interaction(
         self, conversation: ConversationRef, prompt: InteractionPrompt
     ) -> MessageRef:
+        if self.interaction_error is not None:
+            raise self.interaction_error
         message = MessageRef(
             conversation, f"interaction-{len(self.interactions) + 1}"
         )
@@ -628,6 +632,8 @@ class FakeAdapter:
     async def finish_interaction(
         self, message: MessageRef, outcome: InteractionOutcome
     ) -> None:
+        if self.finish_error is not None:
+            raise self.finish_error
         self.outcomes.append((message, outcome))
 
 
@@ -3197,10 +3203,18 @@ async def test_interaction_free_policy_does_not_approve_unrelated_requests(
     assert len(router._pending) == 1
 
 
-async def test_automatic_plan_response_failure_is_reported_and_replay_can_retry(
-    delivery_context,
+@pytest.mark.parametrize("resolved_elsewhere", [False, True])
+async def test_automatic_plan_response_failure_retries_without_replay(
+    delivery_context, resolved_elsewhere
 ) -> None:
     router, client, adapter = delivery_context
+    retry_started, retry_release = asyncio.Event(), asyncio.Event()
+
+    async def retry_sleep(_delay):
+        retry_started.set()
+        await retry_release.wait()
+
+    router._poll_sleep = retry_sleep
     adapter.supports_interactions = False
     await router.handle_inbound(adapter, _message("bind"))
     request = _exit_plan_approval(Path("/not-a-plan.md"))
@@ -3210,9 +3224,78 @@ async def test_automatic_plan_response_failure_is_reported_and_replay_can_retry(
     assert len(adapter.final_texts) == 1
     assert client.resolved_approvals == []
     assert adapter.interactions == []
+    await retry_started.wait()
     client.interaction_error = None
-    await router._handle_interaction_event(router._active, event)
-    assert client.resolved_approvals == [("session-1", request.id, "approved")]
+    if resolved_elsewhere:
+        await router._handle_interaction_event(
+            router._active, InteractionUpdate("session-1", request.id, None, "approved")
+        )
+    retry_release.set()
+    await asyncio.wait_for(router._active.interaction_retry_task, 1)
+    assert client.resolved_approvals == (
+        [] if resolved_elsewhere else [("session-1", request.id, "approved")]
+    )
+
+
+@pytest.mark.parametrize("failure", ["session", "present", "finish"])
+async def test_interaction_delivery_failure_preserves_answers_and_retries(
+    delivery_context, monkeypatch, failure
+) -> None:
+    router, client, adapter = delivery_context
+    retry_started, retry_release = asyncio.Event(), asyncio.Event()
+
+    async def retry_sleep(_delay):
+        retry_started.set()
+        await retry_release.wait()
+
+    router._poll_sleep = retry_sleep
+    await router.handle_inbound(adapter, _message("bind"))
+    active = router._active
+    request = _approval()
+    event = InteractionUpdate("session-1", request.id, request)
+    if failure == "finish":
+        await router._handle_interaction_event(active, event)
+        event = InteractionUpdate("session-1", request.id, None, "approved")
+        adapter.finish_error = RuntimeError("card update failed")
+    elif failure == "present":
+        adapter.interaction_error = RuntimeError("card delivery failed")
+    else:
+        get_session = client.get_session
+
+        async def failing_lookup(_session_id):
+            raise KimiServerTransportError("session lookup failed")
+
+        monkeypatch.setattr(client, "get_session", failing_lookup)
+    client.emit("session-1", event)
+    await asyncio.wait_for(retry_started.wait(), 1)
+    client.emit(
+        "session-1", _event("assistant.delta", delta="answer survives", offset=0)
+    )
+    await _wait_for(lambda: active.render.text == "answer survives")
+    assert not active.task.done()
+    adapter.interaction_error = adapter.finish_error = None
+    if failure == "session":
+        monkeypatch.setattr(client, "get_session", get_session)
+    retry_release.set()
+    await asyncio.wait_for(active.interaction_retry_task, 1)
+    assert len(adapter.interactions) == 1
+    assert len(adapter.outcomes) == (1 if failure == "finish" else 0)
+    assert bool(router._pending) == (failure != "finish")
+
+
+async def test_closing_stream_cancels_interaction_retry(delivery_context) -> None:
+    router, client, adapter = delivery_context
+    adapter.supports_interactions = False
+    await router.handle_inbound(adapter, _message("bind"))
+    client.interaction_error = KimiServerTransportError("offline")
+    request = _exit_plan_approval(Path("/plan.md"))
+    await router._handle_interaction_event(
+        router._active, InteractionUpdate("session-1", request.id, request)
+    )
+    retry = router._active.interaction_retry_task
+    await router.close()
+    assert retry.cancelled()
+    assert client.resolved_approvals == []
 
 
 @pytest.mark.parametrize("kind", ["approval", "question"])
@@ -3297,6 +3380,7 @@ async def test_user_resolution_followed_by_ended_event_finishes_once(
     assert client.resolved_approvals == [("session-1", request.id, "approved")]
     assert len(adapter.outcomes) == 1
     assert router._pending == {}
+    assert router._active.handled_interactions == set()
 
 
 @pytest.mark.parametrize("kind", ["approval", "question"])
@@ -3799,8 +3883,9 @@ async def test_restart_server_cancels_pending_interaction_and_makes_callback_sta
     ]
 
 
+@pytest.mark.parametrize("replayed_id", ["approval-1", "approval-2"])
 async def test_restart_server_suspends_interactions_without_holding_lock(
-    tmp_path: Path,
+    tmp_path: Path, replayed_id: str,
 ) -> None:
     class BlockingFinishAdapter(FakeAdapter):
         def __init__(self) -> None:
@@ -3842,14 +3927,19 @@ async def test_restart_server_suspends_interactions_without_holding_lock(
         router._interaction_lock.release()
         assert router._active is not None
         await router._handle_interaction_event(
+            router._active, InteractionSnapshot("session-1", frozenset({replayed_id}))
+        )
+        await router._handle_interaction_event(
             router._active,
-            InteractionUpdate("session-1", "approval-2", _approval("approval-2")),
+            InteractionUpdate("session-1", replayed_id, _approval(replayed_id)),
         )
         assert len(adapter.interactions) == 1
 
         client.approvals.clear()
         adapter.finish_release.set()
         await restart
+        assert adapter.interactions[-1][2].request.id == replayed_id
+        assert len(adapter.interactions) == 2
     finally:
         adapter.finish_release.set()
         await router.close()
@@ -3927,6 +4017,42 @@ async def test_stop_cancels_pending_question_without_dismissing_it(
     assert client.resolved_questions == []
     assert client.dismissed_questions == []
     assert adapter.outcomes[-1][1].state == "cancelled"
+
+
+@pytest.mark.parametrize("session_wide", [False, True])
+async def test_unsuccessful_abort_preserves_pending_and_queued_interactions(
+    delivery_context, session_wide
+) -> None:
+    router, client, adapter = delivery_context
+    await router.handle_inbound(adapter, _message("bind"))
+    client.abort_result = client.stop_result = False
+    first, second = _approval(), _question_request()
+    active = router._active
+    for request in (first, second):
+        await router._handle_interaction_event(
+            active, InteractionUpdate("session-1", request.id, request)
+        )
+    original = next(iter(router._pending.values()))
+    assert await router._cancel_active_work(
+        active.conversation_key,
+        "session-1",
+        detail="Stopped",
+        session_wide=session_wide,
+    ) == (False, False)
+    await router._handle_interaction_event(
+        active, InteractionSnapshot("session-1", frozenset({first.id, second.id}))
+    )
+    assert list(router._pending.values()) == [original]
+    assert adapter.outcomes == []
+    await router.handle_interaction(
+        adapter,
+        _interaction(
+            original.message,
+            interaction_id=original.interaction_id,
+            response=ApprovalResponse("approved"),
+        ),
+    )
+    assert adapter.interactions[-1][2].request == second
 
 
 async def test_stop_aborts_pending_interaction_after_binding_changes(

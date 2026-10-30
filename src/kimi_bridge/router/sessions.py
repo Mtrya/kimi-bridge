@@ -329,6 +329,9 @@ class _SessionMixin:
             return
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
+        if active.interaction_retry_task is not None:
+            active.interaction_retry_task.cancel()
+            await asyncio.gather(active.interaction_retry_task, return_exceptions=True)
         if active.failure_notice_task is not None:
             active.failure_notice_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

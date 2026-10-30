@@ -31,6 +31,7 @@ from ..kimi_server import (
     InteractionSnapshot,
     InteractionUpdate,
     KimiServerOperationError,
+    KimiServerProtocolError,
 )
 from ..platforms.base import InboundInteraction, OutboundFile, PlatformAdapter
 from .formatting import _conversation_key
@@ -38,6 +39,7 @@ from .models import _ActiveStream, _PendingInteraction
 
 
 LOGGER = logging.getLogger(__name__)
+INTERACTION_RETRY_SECONDS = 1.0
 STALE_INTERACTION_TEXT = (
     "This interaction is stale or was already resolved. Run the task again "
     "if you still need it."
@@ -191,7 +193,7 @@ class _InteractionMixin:
                 ),
             )
             if self._active is not None:
-                await self._present_next_interaction(self._active)
+                await self._deliver_interactions(self._active)
 
     async def _cancel_active_work(
         self,
@@ -208,24 +210,29 @@ class _InteractionMixin:
                 session_ids.append(pending.session_id)
             if session_id not in session_ids:
                 session_ids.append(session_id)
-            aborted = False
+            cancelled_sessions: set[str] = set()
             for target_session_id in session_ids:
                 if session_wide:
                     cancelled = await self._client.abort_session(target_session_id)
                 else:
                     cancelled = await self._client.abort_prompt(target_session_id)
-                aborted = cancelled or aborted
-            if pending is not None:
+                if cancelled:
+                    cancelled_sessions.add(target_session_id)
+            cleared_pending = (
+                pending is not None and pending.session_id in cancelled_sessions
+            )
+            if cleared_pending:
+                assert pending is not None
                 await self._clear_pending(pending)
                 await pending.adapter.finish_interaction(
                     pending.message,
                     InteractionOutcome(state="cancelled", detail=detail),
                 )
             active = self._active
-            if active is not None and active.session_id in session_ids:
+            if active is not None and active.session_id in cancelled_sessions:
                 active.handled_interactions.update(active.interactions)
                 active.interactions.clear()
-            return aborted, pending is not None
+            return bool(cancelled_sessions), cleared_pending
 
     async def _cancel_all_pending_interactions(self, detail: str) -> None:
         """Finish every bridge-owned interaction invalidated by a server restart."""
@@ -235,6 +242,9 @@ class _InteractionMixin:
             pending_interactions = tuple(self._pending.values())
             for pending in pending_interactions:
                 await self._clear_pending(pending)
+            if self._active is not None:
+                self._active.interactions.clear()
+                self._active.handled_interactions.clear()
         for pending in pending_interactions:
             try:
                 await pending.adapter.finish_interaction(
@@ -249,6 +259,8 @@ class _InteractionMixin:
     async def _resume_interactions(self) -> None:
         async with self._interaction_lock:
             self._interactions_suspended = False
+            if self._active is not None:
+                await self._deliver_interactions(self._active)
 
     async def _handle_interaction_event(
         self, active: _ActiveStream, event: InteractionUpdate | InteractionSnapshot
@@ -256,7 +268,6 @@ class _InteractionMixin:
         async with self._interaction_lock:
             if (
                 self._active is not active
-                or self._interactions_suspended
                 or event.session_id != active.session_id
             ):
                 return
@@ -287,7 +298,12 @@ class _InteractionMixin:
                 outcome = event.outcome
             for request_id in ended_ids:
                 active.interactions.pop(request_id, None)
-                active.handled_interactions.add(request_id)
+                # Ordered live events cannot replay pending after ended. Only
+                # locally acknowledged responses await a matching ended event.
+                if outcome is None:
+                    active.handled_interactions.add(request_id)
+                else:
+                    active.handled_interactions.discard(request_id)
                 pending = next(
                     (
                         item
@@ -298,25 +314,74 @@ class _InteractionMixin:
                     None,
                 )
                 if pending is not None:
-                    await self._clear_pending(pending)
-                    await pending.adapter.finish_interaction(
-                        pending.message,
-                        InteractionOutcome(
-                            state="completed" if outcome is not None else "stale",
-                            detail=(
-                                f"{outcome.capitalize()} in Kimi."
-                                if outcome
-                                else STALE_INTERACTION_TEXT
-                            ),
-                            approval_decision=(
-                                outcome
-                                if pending.kind == "approval"
-                                and outcome in {"approved", "rejected", "cancelled"}
-                                else None
-                            ),
+                    pending.completion = InteractionOutcome(
+                        state="completed" if outcome is not None else "stale",
+                        detail=(
+                            f"{outcome.capitalize()} in Kimi."
+                            if outcome
+                            else STALE_INTERACTION_TEXT
+                        ),
+                        approval_decision=(
+                            outcome
+                            if pending.kind == "approval"
+                            and outcome in {"approved", "rejected", "cancelled"}
+                            else None
                         ),
                     )
+            await self._deliver_interactions(active)
+
+    async def _deliver_interactions(self, active: _ActiveStream) -> bool:
+        """Deliver queued controls under the lock; retry failures independently."""
+
+        if self._active is not active or self._interactions_suspended:
+            return True
+        try:
+            for pending in tuple(self._pending.values()):
+                if pending.session_id == active.session_id and pending.completion:
+                    await pending.adapter.finish_interaction(
+                        pending.message, pending.completion
+                    )
+                    await self._clear_pending(pending)
             await self._present_next_interaction(active)
+        except KimiServerProtocolError:
+            raise
+        except Exception as exc:
+            LOGGER.exception("interaction delivery failed; retrying")
+            task = active.interaction_retry_task
+            if task is None or task.done():
+                active.interaction_retry_task = asyncio.create_task(
+                    self._retry_interactions(active),
+                    name=f"interaction-retry-{active.session_id}",
+                )
+                active.interaction_retry_task.add_done_callback(
+                    self._interaction_retry_done
+                )
+                try:
+                    await active.adapter.send_final_text(
+                        active.conversation,
+                        f"Interaction delivery failed; retrying: {exc}",
+                    )
+                except Exception:
+                    LOGGER.exception("failed to report interaction delivery failure")
+            return False
+        return True
+
+    async def _retry_interactions(self, active: _ActiveStream) -> None:
+        delay = INTERACTION_RETRY_SECONDS
+        while self._active is active:
+            await self._poll_sleep(delay)
+            async with self._interaction_lock:
+                if await self._deliver_interactions(active):
+                    return
+            delay = min(delay * 2, 30.0)
+
+    def _interaction_retry_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            LOGGER.exception("interaction retry stopped unexpectedly")
 
     async def _present_next_interaction(self, active: _ActiveStream) -> None:
         """Present queued requests while the interaction lock is held."""
@@ -350,18 +415,9 @@ class _InteractionMixin:
                 and isinstance(request, ApprovalRequest)
                 and request.tool_name == "ExitPlanMode"
             ):
-                try:
-                    await self._client.resolve_approval(
-                        active.session_id, request_id, "approved"
-                    )
-                except KimiServerOperationError as exc:
-                    await self._report_operation_error(
-                        active.adapter,
-                        active.conversation,
-                        exc,
-                        operation="Automatic plan approval",
-                    )
-                    return
+                await self._client.resolve_approval(
+                    active.session_id, request_id, "approved"
+                )
                 active.interactions.pop(request_id)
                 active.handled_interactions.add(request_id)
                 continue
@@ -425,7 +481,10 @@ class _InteractionMixin:
     async def _expire_interaction(self, pending: _PendingInteraction) -> None:
         await self._interaction_sleep(self._interaction_timeout_seconds)
         async with self._interaction_lock:
-            if self._pending.get(pending.conversation_key) is not pending:
+            if (
+                self._pending.get(pending.conversation_key) is not pending
+                or pending.completion is not None
+            ):
                 return
             try:
                 if pending.kind == "approval":
@@ -456,13 +515,16 @@ class _InteractionMixin:
                 InteractionOutcome(state="timed_out", detail=detail),
             )
             if self._active is not None:
-                await self._present_next_interaction(self._active)
+                await self._deliver_interactions(self._active)
 
     async def _clear_pending(self, pending: _PendingInteraction) -> None:
         active = self._active
         if active is not None and active.session_id == pending.session_id:
             active.interactions.pop(pending.request_id, None)
-            active.handled_interactions.add(pending.request_id)
+            if pending.completion is None or pending.completion.state == "stale":
+                active.handled_interactions.add(pending.request_id)
+            else:
+                active.handled_interactions.discard(pending.request_id)
         if self._pending.get(pending.conversation_key) is pending:
             self._pending.pop(pending.conversation_key)
         task = pending.timeout_task
