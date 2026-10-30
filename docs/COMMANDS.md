@@ -10,6 +10,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | --- | --- |
 | `/help` | Show the in-chat command index. |
 | `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
+| `/archive` | Archive the bound session through Kimi, preserve its history, and clear every bridge chat binding to it. |
 | `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
 | `/sessions search <keyword>` | Search active sessions by title and workspace path. |
 | `/switch <n\|id\|title>` | Bind a displayed index, explicit session ID, or exact title; the confirmation recaps the newest 2 messages. |
@@ -46,6 +47,8 @@ Task numbers refer to your latest list in the same chat and bound session, inclu
 Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh. Plan usage and quota reset information are not exposed by the public local server.
 
 `/reload` refreshes Kimi Code's configuration, plugins, skills, and agent definitions and rebuilds the bound session with its existing history. It preserves the session ID, selected model, and bridge permission mode. Kimi rejects reload during running agent turns or compaction. Global Kimi settings are refreshed, and new sessions use the latest default model; the bridge's own configuration is loaded at bridge startup.
+
+`/archive` takes no arguments and sends the archive request directly to Kimi, including while the bound session is busy. Kimi stops the session's running work when archiving. The bridge closes that session's event stream and, after confirmation, clears its pending controls and bindings. The next ordinary message creates a session in `default_workspace`; use `/new <cwd>` to choose another workspace. Cached listings containing the archived session are invalidated, so run `/sessions` again before switching by number. A rejected archive leaves bindings intact. If its acknowledgement is lost, the bridge checks Kimi’s stored archive state; when that check is also unavailable, it keeps the binding and asks you to retry `/archive`. Stored bindings are checked before their first prompt after a bridge restart, so an archive confirmed by Kimi still takes effect after a crash.
 
 ## Terminal platform authorization commands
 
@@ -88,7 +91,7 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 | While a turn is busy | Commands |
 | --- | --- |
 | Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop` |
+| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/archive` |
 | Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.

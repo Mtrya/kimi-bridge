@@ -195,6 +195,23 @@ class _InteractionMixin:
             if self._active is not None:
                 await self._deliver_interactions(self._active)
 
+    async def _finish_archived_interactions(self, session_id: str) -> None:
+        # The archive operation holds the interaction lock through disposal.
+        pending_interactions = tuple(
+            pending for pending in self._pending.values()
+            if pending.session_id == session_id
+        )
+        for pending in pending_interactions:
+            await self._clear_pending(pending)
+        for pending in pending_interactions:
+            try:
+                await pending.adapter.finish_interaction(
+                    pending.message,
+                    InteractionOutcome(state="cancelled", detail="Session was archived."),
+                )
+            except Exception:
+                LOGGER.exception("failed to finish interaction for archived session")
+
     async def _cancel_active_work(
         self,
         conversation_key: str,

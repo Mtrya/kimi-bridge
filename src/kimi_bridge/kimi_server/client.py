@@ -53,6 +53,7 @@ from .types import (
     PromptSubmission,
     SecondaryModelConfig,
     ServerConnection,
+    SessionArchiveUncertain,
     SessionProfile,
     SessionStatus,
     SessionUsage,
@@ -364,6 +365,38 @@ class KimiServerClient:
             "get_profile", path_parameters={"session_id": session_id}
         )
         return _session_profile_from_wire(data)
+
+    async def archive_session(self, session_id: str) -> None:
+        """Archive one session and require confirmation before detaching it."""
+
+        try:
+            data = await self._request_operation(
+                "archive_session",
+                path_parameters={"session_id": session_id},
+                json_body={},
+            )
+        except KimiServerTransportError as archive_error:
+            # An archive can commit before its acknowledgement is lost. Read
+            # stored metadata before any caller reconnects the session runtime.
+            try:
+                archived = await self.is_session_archived(session_id)
+            except (KimiServerTransportError, KimiServerAPIError):
+                raise SessionArchiveUncertain(
+                    "Archive could not be confirmed. Retry /archive before continuing."
+                ) from archive_error
+            if archived:
+                return
+            raise
+        if data.get("archived") is not True:
+            raise KimiServerOperationError(
+                f"kimi server did not confirm archiving session {session_id!r}"
+            )
+
+    async def is_session_archived(self, session_id: str) -> bool:
+        """Read stored archive state without materializing the session runtime."""
+
+        session = await self.get_session(session_id)
+        return session.get("archived") is True
 
     async def get_session_status(self, session_id: str) -> SessionStatus:
         data = await self._request_operation(

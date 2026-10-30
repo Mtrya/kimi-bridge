@@ -69,7 +69,7 @@ kimi-bridge
 
 聊天命令包括：
 
-- 会话：`/new`、`/sessions`、`/switch`、`/status`、`/title`、`/usage`、`/compact`、`/undo`；
+- 会话：`/new`、`/archive`、`/sessions`、`/switch`、`/status`、`/title`、`/usage`、`/compact`、`/undo`；
 - 控制：`/mode`、`/model`、`/secondary-model`、`/effort`、`/plan`、`/goal`、`/stop`、`/reload`；
 - 任务与工具：`/tasks`、`/skills`、`/mcp`；
 - 输出：`/send`、`/render-thinking`。

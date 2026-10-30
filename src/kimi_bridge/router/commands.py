@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +16,7 @@ from ..kimi_server import (
     PromptDelivery,
     TaskStatus,
 )
-from ..platforms.base import ActorRef, ConversationRef, PlatformAdapter
+from ..platforms.base import ActorRef, ConversationRef, MessageRef, PlatformAdapter
 from ..state import PERMISSION_MODES, ConversationBinding
 from .files import _load_outbound_file
 from .help import command_help_details, render_help_index
@@ -64,7 +66,7 @@ class _CommandMixin:
         conversation: ConversationRef,
         actor: ActorRef,
         text: str,
-    ) -> None:
+    ) -> Callable[[], Awaitable[None]] | None:
         command, _, argument = text.partition(" ")
         command = command.lower()
         argument = argument.strip()
@@ -100,6 +102,23 @@ class _CommandMixin:
                 adapter,
                 conversation,
                 f"Created session {binding.session_id}\nWorkspace: {binding.workspace}",
+            )
+            return
+        if command == "/archive":
+            if argument:
+                await self._send_chunked(adapter, conversation, "Usage: /archive")
+                return
+            binding = await self._require_binding(
+                conversation_key, adapter, conversation
+            )
+            if binding is None:
+                return
+            await self._archive_session(binding.session_id)
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"Archived session {binding.session_id}. "
+                "Your next message will start a new session.",
             )
             return
         if command == "/sessions":
@@ -220,14 +239,13 @@ class _CommandMixin:
             await self._handle_mcp(conversation_key, adapter, conversation)
             return
         if command == "/compact":
-            await self._handle_compact(
+            return await self._handle_compact(
                 conversation_key,
                 adapter,
                 conversation,
                 actor,
                 argument,
             )
-            return
         if command == "/history":
             await self._handle_history(
                 conversation_key, adapter, conversation, argument
@@ -822,7 +840,7 @@ class _CommandMixin:
         conversation: ConversationRef,
         actor: ActorRef,
         argument: str,
-    ) -> None:
+    ) -> Callable[[], Awaitable[None]] | None:
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
@@ -852,6 +870,32 @@ class _CommandMixin:
             await self._client.compact_session(
                 binding.session_id, instruction=argument or None
             )
+        except Exception as exc:
+            if not future.done():
+                future.set_exception(exc)
+        except BaseException:
+            self._compaction_waiters.pop(binding.session_id, None)
+            if future.done() and not future.cancelled():
+                future.exception()
+            raise
+        completion = partial(
+            self._finish_compact, binding.session_id, waiter, adapter, conversation, progress
+        )
+        if future.done():
+            await completion()
+            return None
+        return completion
+
+    async def _finish_compact(
+        self,
+        session_id: str,
+        waiter: _CompactionWaiter,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        progress: MessageRef,
+    ) -> None:
+        future = waiter.future
+        try:
             outcome = await future
             if outcome.state == "completed":
                 assert outcome.compacted_count is not None
@@ -863,13 +907,15 @@ class _CommandMixin:
                 )
             elif outcome.state == "blocked":
                 text = "Compaction failed: Kimi blocked the compaction."
+            elif outcome.state == "unavailable":
+                text = "Compaction result unavailable after reconnect. Check /history."
             else:
                 text = "Compaction failed: Kimi cancelled the compaction."
         except Exception as exc:
             text = f"Compaction failed: {exc}"
         finally:
-            if self._compaction_waiters.get(binding.session_id) is waiter:
-                self._compaction_waiters.pop(binding.session_id)
+            if self._compaction_waiters.get(session_id) is waiter:
+                self._compaction_waiters.pop(session_id)
             if future.done() and not future.cancelled():
                 future.exception()
         if adapter.supports_edits:

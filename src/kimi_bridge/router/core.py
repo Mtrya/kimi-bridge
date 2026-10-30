@@ -100,7 +100,9 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._interaction_sleep = interaction_sleep
         self._poll_sleep = poll_sleep
         self._clock = clock
-        self._conversation_locks: dict[str, asyncio.Lock] = {}
+        # Bindings, cached listings, and the single active stream span chats.
+        self._inbound_lock = asyncio.Lock()
+        self._command_tasks: set[asyncio.Task[None]] = set()
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
         self._task_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
@@ -114,6 +116,14 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
     async def close(self) -> None:
         self._fail_all_compaction_waiters(KimiServerError("kimi event stream stopped"))
         await self._stop_active_stream()
+        tasks = tuple(self._command_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for waiter in self._compaction_waiters.values():
+            if waiter.future.done() and not waiter.future.cancelled():
+                waiter.future.exception()
+        self._compaction_waiters.clear()
         for pending in tuple(self._pending.values()):
             if pending.timeout_task is not None:
                 pending.timeout_task.cancel()
@@ -141,50 +151,58 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         ):
             return
         conversation_key = _conversation_key(msg)
-        lock = self._conversation_locks.setdefault(conversation_key, asyncio.Lock())
-        async with lock:
+        is_command = (
+            text.startswith("/")
+            and not msg.images
+            and not msg.videos
+            and not msg.files
+            and not msg.audios
+        )
+        completion = None
+        async with self._inbound_lock:
             self._coerce_binding_capabilities(conversation_key, adapter)
-            is_command = (
-                text.startswith("/")
-                and not msg.images
-                and not msg.videos
-                and not msg.files
-                and not msg.audios
-            )
             try:
                 if is_command:
-                    await self._handle_command(
+                    completion = await self._handle_command(
                         conversation_key,
                         adapter,
                         msg.conversation,
                         msg.actor,
                         text,
                     )
-                    return
-                binding = self._state.bindings.get(conversation_key)
-                if binding is None:
-                    self._default_workspace.mkdir(parents=True, exist_ok=True)
-                    binding = await self._create_and_bind(
+                else:
+                    binding = self._state.bindings.get(conversation_key)
+                    if (
+                        binding is not None
+                        and binding.session_id not in self._verified_session_profiles
+                        and await self._client.is_session_archived(binding.session_id)
+                    ):
+                        async with self._interaction_lock:
+                            await self._detach_archived_session(binding.session_id)
+                        binding = None
+                    if binding is None:
+                        self._default_workspace.mkdir(parents=True, exist_ok=True)
+                        binding = await self._create_and_bind(
+                            conversation_key,
+                            self._default_workspace,
+                            _title_from_message(msg),
+                            adapter,
+                        )
+                    await self._ensure_active_stream(
                         conversation_key,
-                        self._default_workspace,
-                        _title_from_message(msg),
+                        binding.session_id,
                         adapter,
+                        msg.conversation,
+                        msg.actor,
                     )
-                await self._ensure_active_stream(
-                    conversation_key,
-                    binding.session_id,
-                    adapter,
-                    msg.conversation,
-                    msg.actor,
-                )
-                content = await self._build_prompt_content(binding, msg, adapter)
-                result = await self._client.submit_prompt(
-                    binding.session_id,
-                    content,
-                    delivery=PromptDelivery.STEER_IF_ACTIVE,
-                    permission_mode=binding.permission_mode,
-                )
-                await self._report_prompt_outcome(adapter, msg.conversation, result)
+                    content = await self._build_prompt_content(binding, msg, adapter)
+                    result = await self._client.submit_prompt(
+                        binding.session_id,
+                        content,
+                        delivery=PromptDelivery.STEER_IF_ACTIVE,
+                        permission_mode=binding.permission_mode,
+                    )
+                    await self._report_prompt_outcome(adapter, msg.conversation, result)
             except KimiServerOperationError as exc:
                 await self._report_operation_error(
                     adapter,
@@ -192,6 +210,16 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                     exc,
                     operation="Command" if is_command else "Prompt",
                 )
+        # Serial platform dispatchers must be free to deliver later commands.
+        if completion is not None:
+            task = asyncio.create_task(completion(), name="kimi-command-completion")
+            self._command_tasks.add(task)
+            task.add_done_callback(self._command_done)
+
+    def _command_done(self, task: asyncio.Task[None]) -> None:
+        self._command_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            LOGGER.error("command completion failed", exc_info=error)
 
     async def _report_operation_error(
         self,

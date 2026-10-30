@@ -52,6 +52,10 @@ class KimiServerTransportError(KimiServerOperationError):
     """A REST request could not complete at the HTTP transport boundary."""
 
 
+class SessionArchiveUncertain(KimiServerOperationError):
+    """The archive acknowledgement and subsequent metadata check both failed."""
+
+
 class PromptDelivery(Enum):
     ENQUEUE = "enqueue"
     STEER_IF_ACTIVE = "steer_if_active"

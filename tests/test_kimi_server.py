@@ -46,6 +46,7 @@ from kimi_bridge.kimi_server import (
     PromptMedia,
     SecondaryModelConfig,
     ServerConnection,
+    SessionArchiveUncertain,
     SessionNotice,
     SessionStatus,
     SessionUsage,
@@ -2966,6 +2967,69 @@ async def test_supervisor_reports_missing_kimi_before_start() -> None:
 
     with pytest.raises(KimiServerStartupError, match="not installed"):
         await supervisor.start()
+
+
+async def test_archive_session_calls_native_action_with_escaped_id() -> None:
+    http = FakeHttpClient([_envelope({"archived": True})])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    await client.archive_session("session /1")
+
+    assert len(http.requests) == 1
+    method, url, options = http.requests[0]
+    assert (method, url) == (
+        "POST", "http://127.0.0.1:43123/api/v1/sessions/session%20%2F1:archive"
+    )
+    assert options["json"] == {}
+
+
+@pytest.mark.parametrize("data", [{}, {"archived": False}, {"archived": "true"}])
+async def test_archive_session_requires_upstream_confirmation(data: dict[str, Any]) -> None:
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1",
+        http_client=FakeHttpClient([_envelope(data)]),
+    )
+    with pytest.raises(KimiServerOperationError):
+        await client.archive_session("session-1")
+
+
+async def test_archive_session_surfaces_native_failure() -> None:
+    http = FakeHttpClient([_envelope(None, code=40401, msg="Session does not exist")])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+    with pytest.raises(KimiServerAPIError) as exc:
+        await client.archive_session("missing")
+    assert exc.value.code == 40401
+    assert len(http.requests) == 1
+
+
+@pytest.mark.parametrize("archived", [True, False, None])
+async def test_archive_lost_acknowledgement_checks_stored_metadata(archived: bool | None) -> None:
+    requests: list[tuple[str, str]] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "POST":
+            raise httpx.ReadError("Archive acknowledgement lost", request=request)
+        if archived is None:
+            raise httpx.ConnectError("Server unavailable", request=request)
+        return httpx.Response(200, json=_envelope({"id": "session-1", "archived": archived}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = KimiServerClient("http://127.0.0.1:43123", "token", http_client=http)
+        if archived is True:
+            await client.archive_session("session-1")
+        elif archived is None:
+            with pytest.raises(SessionArchiveUncertain) as error:
+                await client.archive_session("session-1")
+            assert isinstance(error.value.__cause__, KimiServerTransportError)
+        else:
+            with pytest.raises(KimiServerTransportError) as error:
+                await client.archive_session("session-1")
+            assert isinstance(error.value.__cause__, httpx.ReadError)
+    assert requests == [
+        ("POST", "/api/v1/sessions/session-1:archive"),
+        ("GET", "/api/v1/sessions/session-1"),
+    ]
 
 
 @pytest.mark.parametrize("select_default", [False, True])

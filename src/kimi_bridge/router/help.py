@@ -37,6 +37,19 @@ Example:
 - `/new`
 - `/new /tmp/experiment`""",
     ),
+    "/archive": CommandHelp(
+        syntax="/archive",
+        summary="archive the bound session and clear its chat bindings",
+        section="Sessions",
+        details="""**/archive**
+
+Archive the bound Kimi session and hide it from normal session listings. Takes no arguments. The command is sent directly to Kimi, including while the session is busy; Kimi stops its running work when archiving.
+
+Side effects: preserves Kimi's stored history, closes the session's bridge stream and pending controls, and clears every bridge chat binding to that session. The next ordinary message creates a new session in `default_workspace`; use `/new <cwd>` to choose a different workspace. Cached listings containing the archived session are invalidated; run `/sessions` again before switching by number. If archiving fails, the bindings remain intact.
+
+Example:
+- `/archive`""",
+    ),
     "/sessions": CommandHelp(
         syntax="/sessions",
         summary="list recent sessions",

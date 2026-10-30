@@ -15,6 +15,7 @@ from ..kimi_server import (
     KimiServerOperationError,
     KimiServerProtocolError,
     PermissionMode,
+    SessionArchiveUncertain,
     SessionStatus,
 )
 from ..platforms.base import (
@@ -96,6 +97,68 @@ class _SessionMixin:
             )
             return None
         return status
+
+    async def _archive_session(self, session_id: str) -> None:
+        active = self._active
+        if active is not None and active.session_id == session_id:
+            # Archive emits terminal events while disposing the runtime. Stop
+            # snapshot reads first so they cannot materialize it again.
+            await self._stop_active_stream(preserve_compaction_waiter=True)
+        else:
+            active = None
+        async with self._interaction_lock:
+            try:
+                await self._client.archive_session(session_id)
+            except SessionArchiveUncertain:
+                self._verified_session_profiles.discard(session_id)
+                self._fail_compaction_waiter(
+                    session_id, KimiServerError("Archive outcome is unknown")
+                )
+                raise
+            except Exception as archive_error:
+                if active is not None:
+                    try:
+                        await self._ensure_active_stream(
+                            active.conversation_key,
+                            session_id,
+                            active.adapter,
+                            active.conversation,
+                            active.actor,
+                        )
+                        waiter = self._compaction_waiters.get(session_id)
+                        if waiter is not None and not waiter.future.done():
+                            status = await self._client.get_session_status(session_id)
+                            if not status.busy:
+                                waiter.future.set_result(_CompactionOutcome("unavailable"))
+                    except Exception as restore_error:
+                        self._fail_compaction_waiter(session_id, KimiServerError(str(restore_error)))
+                        raise KimiServerOperationError(
+                            f"{archive_error}; event delivery could not resume: {restore_error}"
+                        ) from archive_error
+                raise
+            await self._detach_archived_session(session_id)
+
+    async def _detach_archived_session(self, session_id: str) -> None:
+        """Drop bridge references only after Kimi confirms the archive."""
+
+        for key, binding in tuple(self._state.bindings.items()):
+            if binding.session_id == session_id:
+                del self._state.bindings[key]
+        self._verified_session_profiles.discard(session_id)
+        # Invalidate the whole listing so remembered numeric choices never shift.
+        for key, choices in tuple(self._session_choices.items()):
+            if any(str(session["id"]) == session_id for session in choices):
+                del self._session_choices[key]
+        for key, (bound_session, _choices) in tuple(self._task_choices.items()):
+            if bound_session == session_id:
+                del self._task_choices[key]
+        self._fail_compaction_waiter(
+            session_id, KimiServerError("Session was archived")
+        )
+        if self._active is not None and self._active.session_id == session_id:
+            await self._stop_active_stream()
+        await self._finish_archived_interactions(session_id)
+        self._state_store.save(self._state)
 
     async def _list_recent_sessions(self) -> list[dict[str, Any]]:
         idle, busy = await asyncio.gather(
@@ -338,11 +401,12 @@ class _SessionMixin:
             raise
         stream_task.add_done_callback(self._stream_done)
 
-    async def _stop_active_stream(self) -> None:
+    async def _stop_active_stream(self, *, preserve_compaction_waiter: bool = False) -> None:
         active = self._active
         self._active = None
         if active is None:
             return
+        active.preserve_compaction_waiter = preserve_compaction_waiter
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
         if active.interaction_retry_task is not None:
@@ -379,7 +443,8 @@ class _SessionMixin:
         finally:
             if failure is None:
                 failure = KimiServerError("kimi event stream stopped")
-            self._fail_compaction_waiter(active.session_id, failure)
+            if not active.preserve_compaction_waiter:
+                self._fail_compaction_waiter(active.session_id, failure)
 
     def _dispatch_compaction_event(
         self,
