@@ -103,17 +103,25 @@ def _format_secondary_models(
     config: SecondaryModelConfig, models: list[ModelInfo]
 ) -> str:
     current = config.default_model or "primary model (inherited)"
-    pool = dict(config.models) if config.models is not None else None
+    pool = dict(config.models or ())
     lines = [f"Secondary model: {current}", "Available models:"]
+    if config.force:
+        lines.insert(1, "Subagent model selection is forced to the default.")
     for model in models:
         display_name = model.display_name or "display name unavailable"
         labels: list[str] = []
         if model.alias == config.default_model:
             labels.append("default")
-        if pool is not None and model.alias in pool:
+        if model.alias in pool:
             labels.append("pool")
         marker = f" [{', '.join(labels)}]" if labels else ""
-        lines.append(f"- {model.alias}{marker} — {display_name}")
+        description = pool.pop(model.alias, "")
+        hint = f" — {description}" if description else ""
+        lines.append(f"- {model.alias}{marker} — {display_name}{hint}")
+    for alias, description in pool.items():
+        marker = "default, pool" if alias == config.default_model else "pool"
+        hint = f" — {description}" if description else ""
+        lines.append(f"- {alias} [{marker}] — unavailable in catalog{hint}")
     return "\n".join(lines)
 
 

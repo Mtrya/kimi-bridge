@@ -234,34 +234,6 @@ class _InteractionMixin:
                 active.interactions.clear()
             return bool(cancelled_sessions), cleared_pending
 
-    async def _cancel_all_pending_interactions(self, detail: str) -> None:
-        """Finish every bridge-owned interaction invalidated by a server restart."""
-
-        async with self._interaction_lock:
-            self._interactions_suspended = True
-            pending_interactions = tuple(self._pending.values())
-            for pending in pending_interactions:
-                await self._clear_pending(pending)
-            if self._active is not None:
-                self._active.interactions.clear()
-                self._active.handled_interactions.clear()
-        for pending in pending_interactions:
-            try:
-                await pending.adapter.finish_interaction(
-                    pending.message,
-                    InteractionOutcome(state="cancelled", detail=detail),
-                )
-            except Exception:
-                LOGGER.exception(
-                    "failed to finish interaction during server restart"
-                )
-
-    async def _resume_interactions(self) -> None:
-        async with self._interaction_lock:
-            self._interactions_suspended = False
-            if self._active is not None:
-                await self._deliver_interactions(self._active)
-
     async def _handle_interaction_event(
         self, active: _ActiveStream, event: InteractionUpdate | InteractionSnapshot
     ) -> None:
@@ -333,7 +305,7 @@ class _InteractionMixin:
     async def _deliver_interactions(self, active: _ActiveStream) -> bool:
         """Deliver queued controls under the lock; retry failures independently."""
 
-        if self._active is not active or self._interactions_suspended:
+        if self._active is not active:
             return True
         try:
             for pending in tuple(self._pending.values()):
@@ -386,7 +358,7 @@ class _InteractionMixin:
     async def _present_next_interaction(self, active: _ActiveStream) -> None:
         """Present queued requests while the interaction lock is held."""
 
-        if self._interactions_suspended or self._active is not active:
+        if self._active is not active:
             return
         while active.interactions:
             if active.conversation_key in self._pending:
