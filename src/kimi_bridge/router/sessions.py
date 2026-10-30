@@ -507,7 +507,8 @@ class _SessionMixin:
             return
         try:
             if await self._client.is_session_archived(binding.session_id):
-                await self._detach_archived_session(binding.session_id)
+                async with self._interaction_lock:
+                    await self._detach_archived_session(binding.session_id)
                 return
             await self._ensure_active_stream(
                 conversation_key,
