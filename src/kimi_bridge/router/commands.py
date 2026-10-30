@@ -843,9 +843,13 @@ class _CommandMixin:
             if future.done() and not future.cancelled():
                 future.exception()
             raise
-        return partial(
+        completion = partial(
             self._finish_compact, binding.session_id, waiter, adapter, conversation, progress
         )
+        if future.done():
+            await completion()
+            return None
+        return completion
 
     async def _finish_compact(
         self,
@@ -868,6 +872,8 @@ class _CommandMixin:
                 )
             elif outcome.state == "blocked":
                 text = "Compaction failed: Kimi blocked the compaction."
+            elif outcome.state == "unavailable":
+                text = "Compaction result unavailable after reconnect. Check /history."
             else:
                 text = "Compaction failed: Kimi cancelled the compaction."
         except Exception as exc:

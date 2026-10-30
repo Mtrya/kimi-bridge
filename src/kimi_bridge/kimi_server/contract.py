@@ -318,7 +318,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "GET",
             "/sessions/{session_id}",
             "/api/v1/sessions/{session_id}",
-            response_fields=_SESSION_FIELDS,
+            response_fields=(*_SESSION_FIELDS, _field("archived", "boolean", required=False)),
         ),
         RestOperationContract(
             "get_profile",

@@ -74,6 +74,7 @@ class _ActiveStream:
     handled_interactions: set[str] = field(default_factory=set)
     interaction_retry_task: asyncio.Task[None] | None = None
     failure_notice_task: asyncio.Task[None] | None = None
+    preserve_compaction_waiter: bool = False
 
 
 @dataclass(slots=True)
@@ -94,7 +95,7 @@ class _PendingInteraction:
 
 @dataclass(frozen=True, slots=True)
 class _CompactionOutcome:
-    state: Literal["completed", "blocked", "cancelled"]
+    state: Literal["completed", "blocked", "cancelled", "unavailable"]
     compacted_count: int | None = None
     tokens_before: int | None = None
     tokens_after: int | None = None
