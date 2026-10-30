@@ -39,6 +39,7 @@ from .formatting import (
     _format_usage,
     _model_effort_choices,
     _model_supports_thinking,
+    _sort_tasks,
 )
 from .models import _CompactionWaiter
 
@@ -692,30 +693,54 @@ class _CommandMixin:
                 if argument == "all"
                 else cast(TaskStatus, argument or "running")
             )
-            tasks = await self._client.list_tasks(binding.session_id, status=status)
+            tasks = _sort_tasks(
+                await self._client.list_tasks(binding.session_id, status=status)
+            )
+            choice_key = (conversation_key, conversation)
+            self._task_choices.pop(choice_key, None)
             await self._send_chunked(
                 adapter, conversation, _format_tasks(tasks, status)
             )
+            self._task_choices[choice_key] = (
+                binding.session_id,
+                tuple(task.id for task in tasks),
+            )
             return
         parts = argument.split()
-        if len(parts) == 2 and parts[0] == "show":
-            task = await self._client.get_task(
-                binding.session_id,
-                parts[1],
-                output_bytes=TASK_OUTPUT_BYTES,
-            )
-            await self._send_chunked(adapter, conversation, _format_task_detail(task))
-            return
-        if len(parts) == 2 and parts[0] == "cancel":
-            await self._client.cancel_task(binding.session_id, parts[1])
-            await self._send_chunked(
-                adapter, conversation, f"Cancelled task {parts[1]}"
-            )
+        if len(parts) == 2 and parts[0] in {"show", "cancel"}:
+            task_id = parts[1]
+            if task_id.isdecimal():
+                choices = self._task_choices.get((conversation_key, conversation))
+                index = int(task_id) - 1
+                if (
+                    choices is None
+                    or choices[0] != binding.session_id
+                    or not 0 <= index < len(choices[1])
+                ):
+                    await self._send_chunked(
+                        adapter,
+                        conversation,
+                        "Task number unavailable. Run /tasks to list tasks in this session.",
+                    )
+                    return
+                task_id = choices[1][index]
+            if parts[0] == "show":
+                task = await self._client.get_task(
+                    binding.session_id,
+                    task_id,
+                    output_bytes=TASK_OUTPUT_BYTES,
+                )
+                await self._send_chunked(adapter, conversation, _format_task_detail(task))
+            else:
+                await self._client.cancel_task(binding.session_id, task_id)
+                await self._send_chunked(
+                    adapter, conversation, f"Cancelled task {task_id}"
+                )
             return
         await self._send_chunked(
             adapter,
             conversation,
-            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <id> | /tasks cancel <id>",
+            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id>",
         )
 
     async def _handle_skills(
@@ -850,9 +875,9 @@ class _CommandMixin:
         argument: str,
     ) -> None:
         arguments = argument.split()
-        full = arguments.count("--full") == 1
+        full = arguments.count("full") == 1
         if full:
-            arguments.remove("--full")
+            arguments.remove("full")
         if not arguments:
             count = HISTORY_DEFAULT_COUNT
         elif len(arguments) == 1 and (
@@ -865,7 +890,7 @@ class _CommandMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Usage: /history [1-{HISTORY_MAX_COUNT}] [--full]",
+                f"Usage: /history [1-{HISTORY_MAX_COUNT}] [full]",
             )
             return
         binding = await self._require_binding(conversation_key, adapter, conversation)
