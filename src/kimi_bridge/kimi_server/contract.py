@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 6
+KIMI_SEMANTIC_CONTRACT_VERSION = 7
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -652,50 +652,33 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             response_fields=(_field("aborted", "boolean"),),
         ),
         RestOperationContract(
-            "snapshot",
-            "KimiServerClient.get_snapshot/_snapshot_resync",
+            "transcript",
+            "KimiServerClient.get_snapshot",
             "GET",
-            "/sessions/{session_id}/snapshot",
-            "/api/v1/sessions/{session_id}/snapshot",
+            "/sessions/{session_id}/transcript",
+            "/api/v1/sessions/{session_id}/transcript",
+            query_examples=({"agent_id": "main", "page_size": 100},),
             response_fields=(
-                _field("as_of_seq", "integer"),
-                _field("epoch", "string"),
-                _field("messages.items", "array"),
-                _field("messages.items.[].role", "string"),
-                _field(
-                    "messages.items.[].prompt_id",
-                    "string",
-                    required=False,
-                ),
-                _field("messages.items.[].content", "array"),
-                _field(
-                    "messages.items.[].content.[].text",
-                    "string",
-                    required=False,
-                ),
-                _field(
-                    "messages.items.[].content.[].thinking",
-                    "string",
-                    required=False,
-                ),
-                _field("in_flight_turn", "object"),
-                _field(
-                    "in_flight_turn.turn_id",
-                    "integer",
-                    "number",
-                    required=False,
-                ),
-                _field(
-                    "in_flight_turn.current_prompt_id",
-                    "string",
-                    required=False,
-                ),
-                _field(
-                    "in_flight_turn.assistant_text", "string", required=False
-                ),
-                _field(
-                    "in_flight_turn.thinking_text", "string", required=False
-                ),
+                _field("items", "array"),
+                _field("items.[].kind", "string", values=("turn", "marker", "taskref")),
+                _field("items.[].ordinal", "integer"),
+                _field("items.[].state", "string", values=("queued", "running", "completed", "failed", "cancelled")),
+                _field("items.[].triggerPromptId", "string", required=False),
+                _field("items.[].prompt", "string", required=False),
+                _field("items.[].attachmentIds", "array", required=False),
+                _field("items.[].attachmentIds.[]", "string", required=False),
+                _field("items.[].steps", "array"),
+                _field("items.[].steps.[].frames", "array"),
+                _field("items.[].steps.[].frames.[].kind", "string"),
+                _field("items.[].steps.[].frames.[].role", "string"),
+                _field("items.[].steps.[].frames.[].text", "string"),
+                _field("items.[].steps.[].frames.[].attachmentIds", "array", required=False),
+                _field("items.[].steps.[].frames.[].attachmentIds.[]", "string", required=False),
+                _field("has_more", "boolean"),
+                _field("attachments", "array"),
+                _field("attachments.[].attachmentId", "string"),
+                _field("attachments.[].mediaType", "string"),
+                _field("attachments.[].name", "string", required=False),
             ),
         ),
     )
@@ -771,7 +754,7 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
     ),
     WebSocketMessageContract(
         "subscribe_ack",
-        "KimiServerClient._send_subscribe/subscribe_events",
+        "KimiServerClient._send_subscribe/subscribe_events/get_snapshot",
         (
             _field("type", "string", values=("ack",)),
             _field("id", "string"),

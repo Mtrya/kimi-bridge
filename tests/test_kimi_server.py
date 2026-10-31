@@ -507,6 +507,9 @@ class FakeHttpClient:
             return FakeResponse(
                 _envelope(
                     {
+                        "items": [],
+                        "attachments": [],
+                        "has_more": False,
                         "agents": [{"agentId": "main", "type": "main"}],
                         "pending_interactions": next(self._pending_snapshots)
                         if self._pending_snapshots is not None
@@ -790,10 +793,17 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
                 }
             ),
             _envelope({"aborted": True}),
-            _envelope({"as_of_seq": 4, "epoch": "epoch-1"}),
+            _envelope({"busy": False}),
         ]
     )
-    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+    ws = FakeWebSocket(subscribe_payload={
+        "accepted": ["session-1"],
+        "cursors": {"session-1": {"seq": 4, "epoch": "epoch-1"}},
+    })
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http,
+        ws_connect=FakeWebSocketConnect([ws]),
+    )
 
     assert await client.check_server_version() == "0.28.1"
     assert await client.get_config() == {"default_model": "kimi-code/k3"}
@@ -815,6 +825,8 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
     assert await client.get_snapshot("session-1") == {
         "as_of_seq": 4,
         "epoch": "epoch-1",
+        "messages": {"items": [], "has_more": False},
+        "in_flight_turn": None,
     }
 
     assert [request[0:2] for request in http.requests] == [
@@ -829,7 +841,8 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
             "POST",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts/prompt-1:abort",
         ),
-        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/status"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript"),
     ]
     assert http.requests[3][2]["json"] == {
         "metadata": {"cwd": str(tmp_path.resolve())},
@@ -855,6 +868,72 @@ async def test_rest_envelope_error_is_raised() -> None:
         await client.get_snapshot("missing")
 
     assert caught.value.code == 40401
+
+
+async def test_snapshot_keeps_live_subscription_and_uses_event_watermark() -> None:
+    live = FakeWebSocket(
+        subscribe_payload={
+            "accepted": ["session-1"],
+            "cursors": {"session-1": {"seq": 1, "epoch": "event-epoch"}},
+        },
+        events=[
+            _session_event(2, "event-epoch", "turn.started"),
+            _session_event(3, "event-epoch", "turn.ended"),
+        ],
+    )
+    watermark = FakeWebSocket(subscribe_payload={
+        "accepted": ["session-1"],
+        "cursors": {"session-1": {"seq": 3, "epoch": "event-epoch"}},
+    })
+    http = FakeHttpClient(
+        [_envelope({"busy": False}), _envelope({"busy": False})],
+        transcript_snapshots=[
+            {"agents": [{"agentId": "main"}], "pending_interactions": []},
+            {"seq": 987, "items": [], "attachments": [], "has_more": False},
+        ],
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http,
+        ws_connect=FakeWebSocketConnect([live, watermark]),
+    )
+    events = _session_events(client, "session-1")
+    assert (await anext(events))["seq"] == 2
+    snapshot = await asyncio.wait_for(client.get_snapshot("session-1"), 1)
+    assert (snapshot["as_of_seq"], snapshot["epoch"]) == (3, "event-epoch")
+    assert (await anext(events))["seq"] == 3
+    assert client._active_ws is live
+    assert not live.closed
+    assert http.requests[-1][2]["params"] == {"agent_id": "main", "page_size": 100}
+    assert all(not url.endswith("/snapshot") for _, url, _ in http.requests)
+    await events.aclose()
+
+
+@pytest.mark.parametrize("payload", [
+    {"accepted": [], "not_found": ["session-1"]},
+    {"accepted": ["session-1"], "cursors": {}},
+    {"accepted": ["session-1"], "cursors": {"session-1": {"seq": 3}}},
+])
+async def test_snapshot_requires_an_accepted_subscription_with_event_cursor(payload) -> None:
+    http = FakeHttpClient([_envelope({"busy": False})])
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http,
+        ws_connect=FakeWebSocketConnect([FakeWebSocket(subscribe_payload=payload)]),
+    )
+    with pytest.raises(KimiServerProtocolError):
+        await client.get_snapshot("session-1")
+    assert len(http.requests) == 1
+
+
+async def test_snapshot_handshake_timeout_is_a_transport_error() -> None:
+    ws = FakeWebSocket(subscribe_payload={})
+    ws._incoming.get_nowait()  # No server hello arrives.
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", timeout=.01,
+        http_client=FakeHttpClient([_envelope({"busy": False})]),
+        ws_connect=FakeWebSocketConnect([ws]),
+    )
+    with pytest.raises(KimiServerTransportError):
+        await client.get_snapshot("session-1")
 
 
 async def test_client_restart_requires_and_delegates_to_managed_supervisor() -> None:
@@ -2362,12 +2441,16 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
             _session_event(9, "epoch-new", "turn.ended"),
         ],
     )
+    watermark = FakeWebSocket(subscribe_payload={
+        "accepted": ["session-1"],
+        "cursors": {"session-1": {"seq": 8, "epoch": "epoch-new"}},
+    })
     actions: list[str] = []
-    ws_connect = FakeWebSocketConnect([first, second], actions=actions)
+    ws_connect = FakeWebSocketConnect([first, watermark, second], actions=actions)
     http = FakeHttpClient(
         [
             _envelope({"busy": True}),
-            _envelope({"as_of_seq": 8, "epoch": "epoch-new"}),
+            _envelope({"busy": True}),
             _envelope({"busy": True}),
         ],
         actions=actions,
@@ -2390,6 +2473,8 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
     assert resync["snapshot"] == {
         "as_of_seq": 8,
         "epoch": "epoch-new",
+        "messages": {"items": [], "has_more": False},
+        "in_flight_turn": None,
     }
     assert (await asyncio.wait_for(anext(events), 1))["seq"] == 9
     await events.aclose()
@@ -2405,7 +2490,11 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
         ),
         (
             "GET",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
         ),
         (
             "GET",
@@ -2420,7 +2509,9 @@ async def test_epoch_change_resyncs_from_snapshot_and_reuses_cursor() -> None:
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
-        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/snapshot",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
+        "ws:ws://127.0.0.1:43123/api/v1/ws",
+        "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/status",
         "ws:ws://127.0.0.1:43123/api/v1/ws",
         "http:GET:http://127.0.0.1:43123/api/v1/sessions/session-1/transcript",

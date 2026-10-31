@@ -160,6 +160,17 @@ async def probe_kimi_compatibility(
                 "KimiServerClient.probe_subscription",
             )
         )
+        snapshot = await client.get_snapshot(session_id)
+        if snapshot["messages"]["items"] or snapshot["in_flight_turn"] is not None:
+            raise RuntimeError("new probe session has unexpected transcript content")
+        runtime_checks.append(
+            _pass(
+                "runtime.behavior.transcript_snapshot",
+                "runtime",
+                "transcript history and a session-event watermark form an empty snapshot",
+                "KimiServerClient.get_snapshot",
+            )
+        )
 
     return KimiCompatibilityProbe(
         product=supervisor.executable_identity.product.value,

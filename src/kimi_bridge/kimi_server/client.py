@@ -34,6 +34,7 @@ from .contract import (
 from .events import _EventCursor, _advance_cursor, _cursor_from_mapping
 from .prompts import deliver_prompt
 from .supervisor import KimiServerSupervisor
+from .transcript import snapshot_from_transcript
 from .types import (
     GoalControl,
     GoalInfo,
@@ -120,6 +121,7 @@ class KimiServerClient:
 
         self._supervisor = supervisor
         self._http = http_client or httpx.AsyncClient(timeout=timeout)
+        self._timeout = timeout
         self._owns_http = http_client is None
         self._ws_connect = ws_connect
         self._sleep = sleep
@@ -838,9 +840,53 @@ class KimiServerClient:
         return bool(data["aborted"])
 
     async def get_snapshot(self, session_id: str) -> dict[str, Any]:
-        return await self._request_operation(
-            "snapshot", path_parameters={"session_id": session_id}
+        """Read history without racing Kimi's append-log bookkeeping.
+
+        The legacy snapshot endpoint reads the active wire log through its
+        writer's store. A concurrent append can then be mistaken for an external
+        modification, blocking cron submission. Transcript uses a separate read
+        cache. Its seq belongs to another journal, so obtain the event watermark
+        first from a short-lived subscription, leaving the live stream alone.
+        """
+
+        connection = await self._connection_info()
+        await self._materialize_session(session_id, connection)
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with self._ws_connect(
+                    _websocket_url(connection.base_url),
+                    additional_headers={
+                        "Authorization": f"Bearer {connection.token}"
+                    },
+                    ping_interval=None,
+                    max_size=None,
+                ) as ws:
+                    await self._expect_server_hello(ws)
+                    await self._send_client_hello(ws)
+                    ack, _pending = await self._send_subscribe(ws, session_id, None)
+                    payload = ack["payload"]
+                    if session_id not in payload.get("accepted", []):
+                        raise KimiServerProtocolError(
+                            f"snapshot subscription was not accepted for {session_id!r}"
+                        )
+                    cursor = _cursor_from_mapping(
+                        payload.get("cursors", {}).get(session_id)
+                    )
+                    if not isinstance(cursor.epoch, str) or not cursor.epoch:
+                        raise KimiServerProtocolError(
+                            "snapshot subscription cursor has no epoch"
+                        )
+        except (OSError, TimeoutError, ConnectionClosed, InvalidStatus) as exc:
+            raise KimiServerTransportError(
+                f"kimi server snapshot subscription failed: {type(exc).__name__}"
+            ) from exc
+        transcript = await self._request_operation(
+            "transcript",
+            path_parameters={"session_id": session_id},
+            params={"agent_id": _MAIN_AGENT_ID, "page_size": 100},
+            connection=connection,
         )
+        return snapshot_from_transcript(transcript, cursor)
 
     async def wait_until_subscribed(
         self, session_id: str, *, timeout: float = 15.0
