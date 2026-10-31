@@ -5302,7 +5302,7 @@ async def test_delta_throttle_final_edit_and_router_chunking(
     finally:
         await router.close()
 
-    assert delays == [1.5]
+    assert delays == pytest.approx([1.5])
     assert adapter.sent == [
         (MessageRef(conversation, "message-1"), conversation, "abc"),
         (MessageRef(conversation, "message-2"), conversation, "ef"),
@@ -5353,7 +5353,7 @@ async def test_first_answer_flush_waits_for_min_chars(
     finally:
         await router.close()
 
-    assert delays == [15.0]
+    assert delays == pytest.approx([15.0])
     assert adapter.sent == [
         (MessageRef(conversation, "message-1"), conversation, "abcdef")
     ]
@@ -5392,7 +5392,7 @@ async def test_first_answer_flush_backstop_releases_short_opening_chunk(
     finally:
         await router.close()
 
-    assert delays == [5.0]
+    assert delays == pytest.approx([5.0])
     assert adapter.sent == [
         (MessageRef(conversation, "message-1"), conversation, "abc")
     ]

@@ -307,6 +307,12 @@ async def test_live_probe_monitors_create_time_model_persistence(
         async def probe_subscription(self, _session_id: str) -> None:
             self.subscription_calls += 1
 
+        async def get_snapshot(self, _session_id: str) -> dict[str, Any]:
+            return {
+                "as_of_seq": 0, "epoch": "epoch-1",
+                "messages": {"items": []}, "in_flight_turn": None,
+            }
+
     client = FakeProbeClient()
     supervisor = SimpleNamespace(
         connection=SimpleNamespace(token="secret"),
