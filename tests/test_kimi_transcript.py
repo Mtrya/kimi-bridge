@@ -180,3 +180,33 @@ def test_tool_only_final_step_does_not_reuse_an_earlier_answer() -> None:
     )
     assert _persisted_assistant_text(snapshot) == ""
     assert _persisted_thinking_text(snapshot) is None
+
+
+def test_unresolved_attachment_keeps_a_placeholder_without_losing_the_message() -> None:
+    snapshot = snapshot_from_transcript(
+        {
+            "items": [
+                {
+                    "kind": "turn",
+                    "ordinal": 1,
+                    "state": "completed",
+                    "attachmentIds": ["missing", "known"],
+                    "steps": [],
+                }
+            ],
+            "attachments": [
+                {"attachmentId": "known", "mediaType": "image/png", "name": "plot.png"}
+            ],
+            "has_more": False,
+        },
+        _EventCursor(10, "epoch"),
+    )
+    assert snapshot["messages"]["items"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "attachment", "name": "missing"},
+                {"type": "image/png", "name": "plot.png"},
+            ],
+        }
+    ]

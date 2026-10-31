@@ -83,7 +83,10 @@ def _text_parts(
 ) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
     for attachment_id in source.get("attachmentIds", []):
-        attachment = attachments[attachment_id]
+        attachment = attachments.get(attachment_id)
+        if attachment is None:
+            parts.append({"type": "attachment", "name": attachment_id})
+            continue
         part = {"type": attachment["mediaType"]}
         if "name" in attachment:
             part["name"] = attachment["name"]
