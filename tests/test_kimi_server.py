@@ -525,12 +525,16 @@ class FakeWebSocket:
         self,
         *,
         subscribe_payload: dict[str, Any],
+        subscribe_payloads: Iterable[dict[str, Any]] | None = None,
         events: Iterable[dict[str, Any]] = (),
         events_before_ack: bool = False,
         disconnect_after_events: bool = False,
         mismatched_subscribe_ack: bool = False,
     ) -> None:
         self._subscribe_payload = subscribe_payload
+        self._subscribe_payloads = (
+            iter(subscribe_payloads) if subscribe_payloads is not None else None
+        )
         self._events = list(events)
         self._events_before_ack = events_before_ack
         self._disconnect_after_events = disconnect_after_events
@@ -582,6 +586,8 @@ class FakeWebSocket:
                 )
             )
         elif frame["type"] == "subscribe":
+            if self._subscribe_payloads is not None:
+                self._subscribe_payload = next(self._subscribe_payloads)
             if self._events_before_ack:
                 for event in self._events:
                     self._incoming.put_nowait(json.dumps(event))
@@ -934,6 +940,49 @@ async def test_snapshot_handshake_timeout_is_a_transport_error() -> None:
     )
     with pytest.raises(KimiServerTransportError):
         await client.get_snapshot("session-1")
+
+
+@pytest.mark.parametrize("after", [
+    {"seq": 8, "epoch": "event-epoch"},
+    {"seq": 7, "epoch": "replacement-epoch"},
+])
+async def test_snapshot_retries_when_a_boundary_crosses_the_transcript_read(after) -> None:
+    def ack(cursor):
+        return {"accepted": ["session-1"], "cursors": {"session-1": cursor}}
+
+    watermark = FakeWebSocket(
+        subscribe_payload={},
+        subscribe_payloads=[
+            ack({"seq": 7, "epoch": "event-epoch"}), ack(after), ack(after),
+        ],
+    )
+    transcripts = [
+        {
+            "seq": 500,
+            "items": [{
+                "kind": "turn", "ordinal": 2, "state": "running",
+                "steps": [{"frames": [{
+                    "kind": "text", "role": "assistant", "text": text,
+                }]}],
+            }],
+            "attachments": [], "has_more": False,
+        }
+        for text in ("Raced step", "Stable step")
+    ]
+    http = FakeHttpClient(
+        [_envelope({"busy": True})], transcript_snapshots=transcripts,
+    )
+    client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=http,
+        ws_connect=FakeWebSocketConnect([watermark]),
+    )
+
+    snapshot = await client.get_snapshot("session-1")
+
+    assert snapshot["as_of_seq"] == after["seq"]
+    assert snapshot["epoch"] == after["epoch"]
+    assert snapshot["in_flight_turn"]["assistant_text"] == "Stable step"
+    assert len([r for r in http.requests if r[1].endswith("/transcript")]) == 2
 
 
 async def test_client_restart_requires_and_delegates_to_managed_supervisor() -> None:
