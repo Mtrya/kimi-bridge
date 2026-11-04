@@ -595,6 +595,7 @@ class FakeGitHub:
         self.label_exists = False
         self.issues: list[dict[str, Any]] = []
         self.comments: list[str] = []
+        self.assignments: list[int] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -616,12 +617,23 @@ class FakeGitHub:
                 "state": "open",
                 "body": payload["body"],
                 "title": payload["title"],
+                "assignees": [{"login": login} for login in payload.get("assignees", [])],
             }
             self.issues.append(issue)
             return httpx.Response(201, json=issue, request=request)
         if request.method == "POST" and path.endswith("/comments"):
             self.comments.append(payload["body"])
             return httpx.Response(201, json={"id": 1}, request=request)
+        if request.method == "POST" and path.endswith("/assignees"):
+            number = int(path.split("/")[-2])
+            issue = self.issues[number - 1]
+            assignees = issue.setdefault("assignees", [])
+            assignees.extend(
+                {"login": login} for login in payload["assignees"]
+                if {"login": login} not in assignees
+            )
+            self.assignments.append(number)
+            return httpx.Response(201, json=issue, request=request)
         if request.method == "PATCH" and "/issues/" in path:
             number = int(path.rsplit("/", 1)[-1])
             issue = self.issues[number - 1]
@@ -658,6 +670,15 @@ def test_rolling_issue_deduplicates_and_closes_on_recovery() -> None:
     assert automation.synchronize(drift) == "opened-source-drift-issue"
     assert automation.synchronize(drift) == "source-drift-unchanged"
     assert len(fake.issues) == 1
+    assert fake.issues[0]["assignees"] == [{"login": "Mtrya"}]
+    assert not fake.assignments
+    fake.issues[0]["assignees"] = [{"login": "another-maintainer"}]
+    assert automation.synchronize(drift) == "source-drift-unchanged"
+    assert fake.issues[0]["assignees"] == [
+        {"login": "another-maintainer"}, {"login": "Mtrya"},
+    ]
+    assert automation.synchronize(drift) == "source-drift-unchanged"
+    assert fake.assignments == [1]
 
     assert automation.synchronize(_report("matched")) == "closed-recovered-source-drift"
     assert fake.issues[0]["state"] == "closed"

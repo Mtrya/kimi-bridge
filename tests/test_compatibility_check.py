@@ -1154,7 +1154,7 @@ class FakeGitHub:
         self.content_updates = 0
         self.content_refs: list[str] = []
         self.updated_paths: list[str] = []
-        self.ci_dispatches = 0
+        self.assignments: list[int] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -1229,12 +1229,18 @@ class FakeGitHub:
         if path.endswith("/pulls/1"):
             self.pulls[0].update(payload)
             return self._json(self.pulls[0])
-        if path == "/graphql":
-            return self._json({"data": {"enablePullRequestAutoMerge": {}}})
-        if path.endswith("/actions/workflows/ci.yml/dispatches"):
-            assert payload == {"ref": AUTOMATION_BRANCH}
-            self.ci_dispatches += 1
-            return httpx.Response(204)
+        if path.endswith("/assignees"):
+            number = int(path.split("/")[-2])
+            item = next(
+                item for item in self.pulls + self.issues if item["number"] == number
+            )
+            assignees = item.setdefault("assignees", [])
+            assignees.extend(
+                {"login": login} for login in payload["assignees"]
+                if {"login": login} not in assignees
+            )
+            self.assignments.append(number)
+            return self._json(item, status=201)
         if path.endswith("/labels/upstream-drift"):
             return self._json({"name": "upstream-drift"})
         if path.endswith("/issues"):
@@ -1252,6 +1258,7 @@ class FakeGitHub:
                 "state": "open",
                 "title": payload["title"],
                 "body": payload["body"],
+                "assignees": [{"login": login} for login in payload.get("assignees", [])],
             }
             self.issues.append(issue)
             return self._json(issue, status=201)
@@ -1414,6 +1421,8 @@ def test_github_promotion_drift_dedup_and_recovery(
     )
     assert AUTOMATION_BRANCH == "automation/kimi-code-compatibility"
     assert len(fake.pulls) == 1
+    assert fake.pulls[0]["assignees"] == [{"login": "Mtrya"}]
+    assert fake.assignments == [1]
     assert f'version = "{next_bridge_version}"' in fake.pyproject
     assert f'version = "{next_bridge_version}"' in fake.uv_lock
     assert fake.branch_content["releases"][-1]["bridge"] == next_bridge_version
@@ -1427,13 +1436,20 @@ def test_github_promotion_drift_dedup_and_recovery(
         "src/kimi_bridge/compatibility-map.json",
     ]
     assert fake.content_refs == ["base-sha", "base-sha", "base-sha"]
-    assert fake.ci_dispatches == 1
     assert synchronize_reports(compatible_unknown, automation) == (
         "unchanged-promotion-pr",
     )
     assert len(fake.pulls) == 1
     assert fake.content_updates == 3
-    assert fake.ci_dispatches == 1
+    assert fake.assignments == [1]
+    fake.pulls[0]["assignees"] = [{"login": "another-maintainer"}]
+    assert synchronize_reports(compatible_unknown, automation) == (
+        "unchanged-promotion-pr",
+    )
+    assert fake.pulls[0]["assignees"] == [
+        {"login": "another-maintainer"}, {"login": "Mtrya"},
+    ]
+    assert fake.assignments == [1, 1]
     fake.merge_promotion()
     assert synchronize_reports(compatible_unknown, automation) == ()
     assert fake.content_updates == 3
@@ -1444,6 +1460,11 @@ def test_github_promotion_drift_dedup_and_recovery(
     assert synchronize_reports(broken, automation) == ("created-drift-issue",)
     assert synchronize_reports(broken, automation) == ("unchanged-drift-issue",)
     assert len(fake.issues) == 1
+    assert fake.issues[0]["assignees"] == [{"login": "Mtrya"}]
+    fake.issues[0]["assignees"] = []
+    assert synchronize_reports(broken, automation) == ("unchanged-drift-issue",)
+    assert fake.issues[0]["assignees"] == [{"login": "Mtrya"}]
+    assert fake.assignments == [1, 1, 2]
     assert "**windows**" in fake.issues[0]["body"]
 
     changed = _reports_for_all_platforms(

@@ -51,6 +51,7 @@ _RETRY_DELAY_BUDGET = 60.0
 _ISSUE_MARKER = "<!-- kimi-bridge:platform-source-monitor"
 _ISSUE_LABEL = "upstream-drift"
 _ISSUE_TITLE = "Platform source-contract drift detected"
+_ISSUE_ASSIGNEE = "Mtrya"
 
 
 class _RetryableFetchError(SourceFetchError):
@@ -344,10 +345,24 @@ class GitHubIssueAutomation:
             self._request(
                 "POST",
                 f"/repos/{self.repository}/issues",
-                json={"title": _ISSUE_TITLE, "body": body, "labels": [_ISSUE_LABEL]},
+                json={
+                    "title": _ISSUE_TITLE,
+                    "body": body,
+                    "labels": [_ISSUE_LABEL],
+                    "assignees": [_ISSUE_ASSIGNEE],
+                },
             )
             return "opened-source-drift-issue"
         number = int(issue["number"])
+        if not any(
+            assignee["login"] == _ISSUE_ASSIGNEE
+            for assignee in issue.get("assignees", [])
+        ):
+            self._request(
+                "POST",
+                f"/repos/{self.repository}/issues/{number}/assignees",
+                json={"assignees": [_ISSUE_ASSIGNEE]},
+            )
         existing_body = issue.get("body")
         if (
             issue.get("state") == "open"
