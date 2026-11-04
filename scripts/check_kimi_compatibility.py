@@ -1182,7 +1182,6 @@ class GitHubApiAutomation:
                 json={"title": title, "body": body},
             )
             action = "updated-promotion-pr"
-        self._dispatch_ci()
         self._enable_auto_merge(str(pull["node_id"]))
         return action
 
@@ -1359,13 +1358,6 @@ class GitHubApiAutomation:
                 "variables": {"id": pull_request_id},
             },
         )
-
-    def _dispatch_ci(self) -> None:
-        response = self._client.post(
-            f"/repos/{self.repository}/actions/workflows/ci.yml/dispatches",
-            json={"ref": AUTOMATION_BRANCH},
-        )
-        response.raise_for_status()
 
     def _run_link_suffix(self) -> str:
         return f"\n\n[Workflow run]({self.run_url})" if self.run_url else ""

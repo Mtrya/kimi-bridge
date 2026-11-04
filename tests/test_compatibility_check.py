@@ -1154,7 +1154,6 @@ class FakeGitHub:
         self.content_updates = 0
         self.content_refs: list[str] = []
         self.updated_paths: list[str] = []
-        self.ci_dispatches = 0
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -1231,10 +1230,6 @@ class FakeGitHub:
             return self._json(self.pulls[0])
         if path == "/graphql":
             return self._json({"data": {"enablePullRequestAutoMerge": {}}})
-        if path.endswith("/actions/workflows/ci.yml/dispatches"):
-            assert payload == {"ref": AUTOMATION_BRANCH}
-            self.ci_dispatches += 1
-            return httpx.Response(204)
         if path.endswith("/labels/upstream-drift"):
             return self._json({"name": "upstream-drift"})
         if path.endswith("/issues"):
@@ -1427,13 +1422,11 @@ def test_github_promotion_drift_dedup_and_recovery(
         "src/kimi_bridge/compatibility-map.json",
     ]
     assert fake.content_refs == ["base-sha", "base-sha", "base-sha"]
-    assert fake.ci_dispatches == 1
     assert synchronize_reports(compatible_unknown, automation) == (
         "unchanged-promotion-pr",
     )
     assert len(fake.pulls) == 1
     assert fake.content_updates == 3
-    assert fake.ci_dispatches == 1
     fake.merge_promotion()
     assert synchronize_reports(compatible_unknown, automation) == ()
     assert fake.content_updates == 3
