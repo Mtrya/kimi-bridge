@@ -109,4 +109,6 @@ Platform compatibility has three separate evidence levels. The daily public-sour
 
 Protocol-specific source projections live beside their platform adapters. `src/kimi_bridge/platforms/source_contract.py` owns platform-neutral source requests, fetched evidence, reports, validation, and digest logic, while `scripts/check_platform_source_contracts.py` owns bounded fetching, inspection execution, JSON report persistence, and rolling drift-issue synchronization. Pull-request tests use deterministic local fixtures; `.github/workflows/platform-source-contract-monitor.yml` performs the daily networked inspection on `main`.
 
+Compatibility promotion PRs and Kimi Code or platform drift issues are assigned to `Mtrya`. For promotion PRs, the maintainer approves the pending GitHub Actions runs, reviews the results, and merges the PR. Dependabot PRs enable auto-merge after successful CI, subject to branch protection.
+
 See [Configuration](CONFIGURATION.md), [Commands](COMMANDS.md), and the [installation guide](../INSTALL.en_US.md) for operator-facing behavior.

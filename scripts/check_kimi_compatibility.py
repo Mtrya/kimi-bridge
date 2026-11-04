@@ -53,6 +53,7 @@ MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 PROBE_MODEL_ALIAS = "compatibility/probe"
 PROBE_PROVIDER_ID = "compatibility"
 AUTOMATION_BRANCH = "automation/kimi-code-compatibility"
+AUTOMATION_ASSIGNEE = "Mtrya"
 PROMOTION_MARKER = "<!-- kimi-bridge:compatibility-promotion -->"
 DRIFT_MARKER = "<!-- kimi-bridge:upstream-drift -->"
 DRIFT_LABEL = "upstream-drift"
@@ -975,7 +976,7 @@ def synchronize_reports(
     Promotion and recovery require every canary platform to be compatible
     with the same kimi-code version; any platform failure records drift. The
     latest all-platform result is authoritative, so recovered versions remain
-    eligible for automatic promotion.
+    eligible for a promotion PR.
     """
 
     summaries = summarize_report_batches(reports)
@@ -1066,7 +1067,7 @@ class GitHubApiAutomation:
                 "body": (
                     f"Compatibility recovered with kimi-code {summary.version} "
                     f"on {', '.join(summary.platforms)}. The latest "
-                    f"all-platform result is eligible for automatic promotion."
+                    f"all-platform result is eligible for a promotion PR."
                     + self._run_link_suffix()
                 )
             },
@@ -1085,6 +1086,8 @@ class GitHubApiAutomation:
             sorted(summaries, key=lambda item: kimi_code_version_sort_key(item.version))
         )
         pull = self._find_promotion_pull()
+        if pull is not None:
+            self._assign_maintainer(pull)
         paths = (
             "pyproject.toml",
             "uv.lock",
@@ -1175,6 +1178,7 @@ class GitHubApiAutomation:
                 },
             )
             action = "created-promotion-pr"
+            self._assign_maintainer(pull)
         else:
             self._request(
                 "PATCH",
@@ -1182,12 +1186,13 @@ class GitHubApiAutomation:
                 json={"title": title, "body": body},
             )
             action = "updated-promotion-pr"
-        self._enable_auto_merge(str(pull["node_id"]))
         return action
 
     def record_drift(self, summary: CompatibilitySummary) -> str:
         self._invalidate_promotion(summary)
         issue = self._find_drift_issue(summary.version, state="open")
+        if issue is not None:
+            self._assign_maintainer(issue)
         state_marker = (
             f"<!-- version:{summary.version} "
             f"failure-digest:{summary.failure_digest} -->"
@@ -1216,7 +1221,12 @@ class GitHubApiAutomation:
             self._request(
                 "POST",
                 f"/repos/{self.repository}/issues",
-                json={"title": title, "body": body, "labels": [DRIFT_LABEL]},
+                json={
+                    "title": title,
+                    "body": body,
+                    "labels": [DRIFT_LABEL],
+                    "assignees": [AUTOMATION_ASSIGNEE],
+                },
             )
             return "created-drift-issue"
         self._request(
@@ -1346,17 +1356,16 @@ class GitHubApiAutomation:
             },
         )
 
-    def _enable_auto_merge(self, pull_request_id: str) -> None:
+    def _assign_maintainer(self, item: Mapping[str, Any]) -> None:
+        if any(
+            assignee["login"] == AUTOMATION_ASSIGNEE
+            for assignee in item.get("assignees", [])
+        ):
+            return
         self._request(
             "POST",
-            "/graphql",
-            json={
-                "query": (
-                    "mutation($id:ID!){enablePullRequestAutoMerge(input:{"
-                    "pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{id}}}"
-                ),
-                "variables": {"id": pull_request_id},
-            },
+            f"/repos/{self.repository}/issues/{item['number']}/assignees",
+            json={"assignees": [AUTOMATION_ASSIGNEE]},
         )
 
     def _run_link_suffix(self) -> str:
