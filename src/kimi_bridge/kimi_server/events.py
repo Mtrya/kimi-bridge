@@ -2,131 +2,77 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
+from .transcript import snapshot_from_transcript, stream_text_from_step
 from .types import KimiServerProtocolError, SessionNotice
 
 
-_TERMINAL_PROMPT_STATES = frozenset({"completed", "failed"})
+_TERMINAL_PROMPT_STATES = frozenset({"completed", "failed", "aborted"})
 _TERMINAL_TURN_STATES = frozenset({"completed", "failed", "cancelled"})
-
-
-@dataclass(slots=True)
-class _FrameState:
-    kind: str
-    role: str | None = None
-    text: str = ""
-
-
-@dataclass(slots=True)
-class _StepState:
-    ordinal: int
-    state: str | None = None
-    usage: dict[str, Any] | None = None
-
-
-@dataclass(slots=True)
-class _TurnState:
-    turn_id: str
-    ordinal: int
-    state: str = "queued"
-    prompt_id: str | None = None
+_VISIBLE_MARKERS = frozenset({"compaction", "notice"})
 
 
 @dataclass(slots=True)
 class TranscriptProjection:
-    """Fold one agent's transcript operations into semantic session events.
+    """Reduce one agent's journal into a transcript and semantic output.
 
-    Kimi 2.5 streams ``transcript.reset``/``transcript.ops`` frames whose
-    batches carry cumulative sequence numbers. The projection keeps the
-    authoritative turn/step/frame state, applies each operation batch once,
-    and re-emits the bridge's semantic event vocabulary (turn lifecycle,
-    deltas, notices, prompt completion, compaction) on top.
+    Native turns own their steps and frames. A mutation therefore updates
+    the same tree used for both stream deltas and recovery snapshots.
     """
 
     session_id: str
     seq: int | None = None
     started: bool = False
-    _turns: dict[str, _TurnState] = field(default_factory=dict)
-    _steps: dict[str, _StepState] = field(default_factory=dict)
-    _frames: dict[str, _FrameState] = field(default_factory=dict)
+    _items: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _attachments: dict[str, dict[str, Any]] = field(default_factory=dict)
     _prompts: dict[str, str] = field(default_factory=dict)
+    _has_more: bool = False
 
-    def usage_totals(self) -> dict[str, int] | None:
-        """Sum the per-step usage records seen for the subscribed agent."""
+    def snapshot(self, *, seq: int | None = None) -> dict[str, Any]:
+        """Return the semantic snapshot of exactly the reduced journal."""
 
-        if not self._steps:
-            return None
-        totals = {
-            "inputOther": 0,
-            "output": 0,
-            "inputCacheRead": 0,
-            "inputCacheCreation": 0,
-        }
-        seen = False
-        for step in self._steps.values():
-            if step.usage is None:
-                continue
-            seen = True
-            for name in totals:
-                value = step.usage.get(name)
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    totals[name] += int(value)
-        return totals if seen else None
+        return snapshot_from_transcript(
+            {
+                "seq": self.seq if seq is None else seq,
+                "items": list(self._items.values()),
+                "attachments": list(self._attachments.values()),
+                "has_more": self._has_more,
+            }
+        )
 
     def apply_reset(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        """Rebuild state from a reset snapshot and report a resync."""
-
         seq = _required_int(payload, "seq")
         snapshot = payload.get("snapshot")
         if not isinstance(snapshot, dict):
             raise KimiServerProtocolError("transcript.reset snapshot must be an object")
-        resync: dict[str, Any] | None = None
-        if self.started or any(
-            isinstance(item, dict)
-            and item.get("kind") == "turn"
-            and item.get("state") == "running"
+        was_started = self.started
+        items = [
+            _copy_item(item)
             for item in snapshot.get("items") or ()
-        ):
-            resync = _resync_event(self.session_id, "transcript_reset", snapshot, seq)
-        self._turns.clear()
-        self._steps.clear()
-        self._frames.clear()
-        self._prompts.clear()
-        items = snapshot.get("items")
-        if isinstance(items, list):
-            for item in items:
-                if not isinstance(item, dict) or item.get("kind") != "turn":
-                    continue
-                turn = _turn_from_wire(item)
-                self._turns[turn.turn_id] = turn
-                for step in item.get("steps") or ():
-                    if not isinstance(step, dict):
-                        continue
-                    step_state = _step_from_wire(step)
-                    self._steps[step["stepId"]] = step_state
-                    for frame in step.get("frames") or ():
-                        if not isinstance(frame, dict):
-                            continue
-                        frame_id = frame.get("frameId")
-                        if isinstance(frame_id, str):
-                            self._frames[frame_id] = _frame_from_wire(frame)
-        prompts = snapshot.get("prompts")
-        if isinstance(prompts, list):
-            for prompt in prompts:
-                if isinstance(prompt, dict):
-                    prompt_id = prompt.get("promptId")
-                    status = prompt.get("status")
-                    if isinstance(prompt_id, str) and isinstance(status, str):
-                        self._prompts[prompt_id] = status
+            if item.get("kind") != "marker" or item.get("marker") in _VISIBLE_MARKERS
+        ]
+        self._items = {_item_id(item): item for item in items}
+        self._attachments = {
+            item["attachmentId"]: deepcopy(item)
+            for item in snapshot.get("attachments") or ()
+        }
+        self._prompts = {
+            prompt["promptId"]: prompt["status"]
+            for prompt in snapshot.get("prompts") or ()
+        }
+        self._has_more = bool(
+            payload.get("has_more_older", snapshot.get("hasMoreOlder", False))
+        )
         self.seq = seq
         self.started = True
-        return [resync] if resync is not None else []
+        if was_started or any(item.get("state") == "running" for item in items):
+            return [self._resync("transcript_reset", seq)]
+        return []
 
     def apply_ops(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        """Apply one operation batch and return its semantic events."""
-
         seq = _required_int(payload, "seq")
         if self.seq is not None and seq <= self.seq:
             return []
@@ -144,111 +90,167 @@ class TranscriptProjection:
 
     def _apply_op(self, op: dict[str, Any], seq: int) -> list[dict[str, Any]]:
         kind = op.get("op")
+        if kind == "reset":
+            return self.apply_reset({"seq": seq, "snapshot": op["snapshot"]})
         if kind == "turn.upsert":
             return self._apply_turn_upsert(op, seq)
         if kind == "step.upsert":
             return self._apply_step_upsert(op, seq)
-        if kind == "frame.upsert":
-            self._apply_frame_upsert(op)
-            return []
-        if kind == "append":
-            return self._apply_append(op, seq)
+        if kind in ("frame.upsert", "append"):
+            return self._apply_frame_change(op, seq)
         if kind == "marker.upsert":
-            return self._apply_marker_upsert(op, seq)
+            item = deepcopy(op["item"])
+            if item.get("marker") not in _VISIBLE_MARKERS:
+                return []
+            identity = _item_id(item)
+            previous = self._items.get(identity)
+            self._items[identity] = item
+            if previous == item:
+                return []
+            payload = item.get("payload") or {}
+            if item.get("marker") == "compaction":
+                return self._compaction_events(payload, seq)
+            if item.get("marker") == "notice":
+                return self._notice_events(payload, seq)
+            return []
         if kind == "prompt.upsert":
             return self._apply_prompt_upsert(op, seq)
-        if kind in ("items.remove", "interaction.upsert", "attachment.upsert"):
+        if kind == "items.remove":
+            removed = [
+                self._items.pop(identity)
+                for identity in op["ids"]
+                if identity in self._items
+            ]
+            return [self._resync("transcript_items_removed", seq)] if removed else []
+        if kind == "attachment.upsert":
+            attachment = deepcopy(op["attachment"])
+            self._attachments[attachment["attachmentId"]] = attachment
+            return []
+        if kind == "interaction.upsert":
+            # Session-wide flat interaction frames own approval/question delivery.
             return []
         raise KimiServerProtocolError(f"unknown transcript op {kind!r}")
 
-    def _apply_turn_upsert(
-        self, op: dict[str, Any], seq: int
-    ) -> list[dict[str, Any]]:
-        turn = _turn_from_wire(op["turn"])
-        previous = self._turns.get(turn.turn_id)
-        self._turns[turn.turn_id] = turn
-        events: list[dict[str, Any]] = []
-        if previous is None or previous.state != turn.state:
-            if turn.state == "running":
-                events.append(_event(self.session_id, seq, {
-                    "type": "turn.started",
-                    "turnId": turn.ordinal,
-                }))
-            elif turn.state in _TERMINAL_TURN_STATES:
-                events.append(_event(self.session_id, seq, {
-                    "type": "turn.ended",
-                    "turnId": turn.ordinal,
-                    "reason": turn.state,
-                }))
+    def _apply_turn_upsert(self, op: dict[str, Any], seq: int) -> list[dict[str, Any]]:
+        turn = deepcopy(op["turn"])
+        identity = _item_id(turn)
+        previous = self._items.get(identity)
+        turn["steps"] = previous["steps"] if previous is not None else []
+        self._items[identity] = turn
+        state = turn["state"]
+        if previous is not None and previous["state"] == state:
+            return []
+        if state == "running":
+            return [
+                _event(
+                    self.session_id,
+                    seq,
+                    {"type": "turn.started", "turnId": turn["ordinal"]},
+                )
+            ]
+        if state in _TERMINAL_TURN_STATES:
+            return [
+                _event(
+                    self.session_id,
+                    seq,
+                    {
+                        "type": "turn.ended",
+                        "turnId": turn["ordinal"],
+                        "reason": state,
+                    },
+                )
+            ]
+        return []
+
+    def _apply_step_upsert(self, op: dict[str, Any], seq: int) -> list[dict[str, Any]]:
+        turn = self._turn(op["turnId"])
+        step = deepcopy(op["step"])
+        previous = _find(turn["steps"], "stepId", step["stepId"])
+        step["frames"] = previous["frames"] if previous is not None else []
+        _upsert(turn["steps"], "stepId", step)
+        if previous is None:
+            return [
+                _event(
+                    self.session_id,
+                    seq,
+                    {"type": "turn.step.started", "step": step["ordinal"]},
+                )
+            ]
+        return []
+
+    def _apply_frame_change(self, op: dict[str, Any], seq: int) -> list[dict[str, Any]]:
+        target = op if op["op"] == "frame.upsert" else op["target"]
+        turn = self._turn(target["turnId"])
+        step = _find(turn["steps"], "stepId", target["stepId"])
+        if step is None:
+            raise KimiServerProtocolError(
+                f"transcript references unknown step {target['stepId']!r}"
+            )
+        before = stream_text_from_step(step)
+        if op["op"] == "frame.upsert":
+            frame = _copy_frame(op["frame"])
+            previous = _find(step["frames"], "frameId", frame["frameId"])
+            _upsert(step["frames"], "frameId", frame)
+            if frame["kind"] == "notice" and previous != frame:
+                return self._notice_events(frame, seq)
+        else:
+            frame = _find(step["frames"], "frameId", target["frameId"])
+            if frame is None:
+                raise KimiServerProtocolError(
+                    f"transcript references unknown frame {target['frameId']!r}"
+                )
+            offset = _required_int(op, "offset")
+            text = op.get("text")
+            if not isinstance(text, str):
+                raise KimiServerProtocolError("append text must be a string")
+            frame["text"] = _utf16_prefix(frame["text"], offset) + text
+        if not self._is_current_step(turn, step):
+            return []
+        after = stream_text_from_step(step)
+        if any(not current.startswith(prior) for prior, current in zip(before, after)):
+            return [self._resync("transcript_text_corrected", seq)]
+        events = []
+        for name, prior, current in zip(
+            ("assistant.delta", "thinking.delta"), before, after
+        ):
+            if current != prior:
+                event = _event(
+                    self.session_id, seq, {"type": name, "delta": current[len(prior) :]}
+                )
+                event["offset"] = len(prior)
+                events.append(event)
         return events
 
-    def _apply_step_upsert(
-        self, op: dict[str, Any], seq: int
-    ) -> list[dict[str, Any]]:
-        step = _step_from_wire(op["step"])
-        step_id = op["step"]["stepId"]
-        previous = self._steps.get(step_id)
-        self._steps[step_id] = step
-        if previous is None and step.state == "running":
-            return [
-                _event(self.session_id, seq, {
-                    "type": "turn.step.started",
-                    "step": step.ordinal,
-                })
-            ]
-        return []
+    def _turn(self, identity: str) -> dict[str, Any]:
+        turn = self._items.get(identity)
+        if turn is None or turn["kind"] != "turn":
+            raise KimiServerProtocolError(
+                f"transcript references unknown turn {identity!r}"
+            )
+        return turn
 
-    def _apply_frame_upsert(self, op: dict[str, Any]) -> None:
-        frame = _frame_from_wire(op["frame"])
-        frame_id = op["frame"]["frameId"]
-        self._frames[frame_id] = frame
+    def _is_current_step(self, turn: dict[str, Any], step: dict[str, Any]) -> bool:
+        current = next(
+            (
+                item
+                for item in reversed(self._items.values())
+                if item["kind"] == "turn" and item["state"] != "queued"
+            ),
+            None,
+        )
+        return turn is current and bool(turn["steps"]) and step is turn["steps"][-1]
 
-    def _apply_append(self, op: dict[str, Any], seq: int) -> list[dict[str, Any]]:
-        target = op.get("target")
-        if not isinstance(target, dict):
-            raise KimiServerProtocolError("append op target must be an object")
-        frame_id = target.get("frameId")
-        frame = self._frames.get(frame_id) if isinstance(frame_id, str) else None
-        if frame is None:
-            return []
-        offset = op.get("offset")
-        text = op.get("text")
-        if not isinstance(offset, int) or isinstance(offset, bool):
-            raise KimiServerProtocolError("append op offset must be an integer")
-        if not isinstance(text, str):
-            raise KimiServerProtocolError("append op text must be a string")
-        frame.text = frame.text[:offset] + text
-        if frame.kind == "thinking":
-            return [
-                _event(self.session_id, seq, {
-                    "type": "thinking.delta",
-                    "delta": text,
-                })
-            ]
-        if frame.kind == "text" and frame.role == "assistant":
-            return [
-                _event(self.session_id, seq, {
-                    "type": "assistant.delta",
-                    "delta": text,
-                })
-            ]
-        return []
-
-    def _apply_marker_upsert(
-        self, op: dict[str, Any], seq: int
-    ) -> list[dict[str, Any]]:
-        item = op.get("item")
-        if not isinstance(item, dict):
-            raise KimiServerProtocolError("marker.upsert item must be an object")
-        marker = item.get("marker")
-        payload = item.get("payload")
-        if not isinstance(payload, dict):
-            raise KimiServerProtocolError("marker payload must be an object")
-        if marker == "compaction":
-            return self._compaction_events(payload, seq)
-        if marker == "notice":
-            return self._notice_events(payload, seq)
-        return []
+    def _resync(self, reason: str, seq: int) -> dict[str, Any]:
+        return {
+            "type": "resync_required",
+            "session_id": self.session_id,
+            "payload": {
+                "type": "resync_required",
+                "session_id": self.session_id,
+                "reason": reason,
+            },
+            "snapshot": self.snapshot(seq=seq),
+        }
 
     def _compaction_events(
         self, payload: dict[str, Any], seq: int
@@ -256,10 +258,14 @@ class TranscriptProjection:
         phase = payload.get("phase")
         if phase == "started":
             return [
-                _event(self.session_id, seq, {
-                    "type": "compaction.started",
-                    "trigger": payload.get("trigger"),
-                })
+                _event(
+                    self.session_id,
+                    seq,
+                    {
+                        "type": "compaction.started",
+                        "trigger": payload.get("trigger"),
+                    },
+                )
             ]
         if phase in ("blocked", "cancelled"):
             return [_event(self.session_id, seq, {"type": f"compaction.{phase}"})]
@@ -270,17 +276,21 @@ class TranscriptProjection:
                     "compaction completed marker has no result"
                 )
             return [
-                _event(self.session_id, seq, {
-                    "type": "compaction.completed",
-                    "result": result,
-                })
+                _event(
+                    self.session_id,
+                    seq,
+                    {
+                        "type": "compaction.completed",
+                        "result": result,
+                    },
+                )
             ]
         return []
 
-    def _notice_events(
-        self, payload: dict[str, Any], seq: int
-    ) -> list[dict[str, Any]]:
+    def _notice_events(self, payload: dict[str, Any], seq: int) -> list[dict[str, Any]]:
         level = payload.get("level")
+        if level == "info":
+            return []
         message = payload.get("message")
         event = payload.get("event")
         if not isinstance(message, str) or not message:
@@ -318,58 +328,81 @@ class TranscriptProjection:
         if previous == status or status not in _TERMINAL_PROMPT_STATES:
             return []
         return [
-            _event(self.session_id, seq, {
-                "type": "prompt.completed",
-                "promptId": prompt_id,
-            })
+            _event(
+                self.session_id,
+                seq,
+                {
+                    "type": "prompt.completed",
+                    "promptId": prompt_id,
+                },
+            )
         ]
 
 
-def _turn_from_wire(value: dict[str, Any]) -> _TurnState:
-    turn_id = value.get("turnId")
-    ordinal = value.get("ordinal")
-    state = value.get("state")
-    if not isinstance(turn_id, str) or not turn_id:
-        raise KimiServerProtocolError("turn has an invalid turnId")
-    if not isinstance(ordinal, int) or isinstance(ordinal, bool):
-        raise KimiServerProtocolError("turn has an invalid ordinal")
-    if not isinstance(state, str):
-        raise KimiServerProtocolError("turn has an invalid state")
-    prompt_id = value.get("triggerPromptId")
-    return _TurnState(
-        turn_id=turn_id,
-        ordinal=ordinal,
-        state=state,
-        prompt_id=prompt_id if isinstance(prompt_id, str) else None,
-    )
+def _utf16_prefix(text: str, offset: int) -> str:
+    """Translate Kimi's JavaScript string offset before emitting Python offsets."""
+
+    encoded = text.encode("utf-16-le")
+    if not 0 <= offset * 2 <= len(encoded):
+        raise KimiServerProtocolError("append offset is outside the frame text")
+    try:
+        return encoded[: offset * 2].decode("utf-16-le")
+    except UnicodeDecodeError as exc:
+        raise KimiServerProtocolError(
+            "append offset splits a UTF-16 character"
+        ) from exc
 
 
-def _step_from_wire(value: dict[str, Any]) -> _StepState:
-    ordinal = value.get("ordinal")
-    state = value.get("state")
-    usage = value.get("usage")
-    if not isinstance(ordinal, int) or isinstance(ordinal, bool):
-        raise KimiServerProtocolError("step has an invalid ordinal")
-    return _StepState(
-        ordinal=ordinal,
-        state=state if isinstance(state, str) else None,
-        usage=usage if isinstance(usage, dict) else None,
-    )
+def _copy_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    """Retain renderable fields without caching native tool inputs and output."""
+
+    if frame["kind"] not in {"text", "thinking", "tool", "notice"}:
+        raise KimiServerProtocolError(
+            f"unknown transcript frame kind {frame['kind']!r}"
+        )
+    return {
+        key: deepcopy(value)
+        for key, value in frame.items()
+        if key
+        in {"frameId", "kind", "role", "text", "attachmentIds", "level", "message"}
+    }
 
 
-def _frame_from_wire(value: dict[str, Any]) -> _FrameState:
-    kind = value.get("kind")
-    role = value.get("role")
-    text = value.get("text")
-    if not isinstance(kind, str):
-        raise KimiServerProtocolError("frame has an invalid kind")
-    if not isinstance(text, str):
-        text = ""
-    return _FrameState(
-        kind=kind,
-        role=role if isinstance(role, str) else None,
-        text=text,
-    )
+def _copy_item(item: dict[str, Any]) -> dict[str, Any]:
+    copied = deepcopy({key: value for key, value in item.items() if key != "steps"})
+    if item["kind"] == "turn":
+        copied["steps"] = [
+            {
+                **deepcopy(
+                    {key: value for key, value in step.items() if key != "frames"}
+                ),
+                "frames": [_copy_frame(frame) for frame in step.get("frames") or ()],
+            }
+            for step in item.get("steps") or ()
+        ]
+    return copied
+
+
+def _item_id(item: dict[str, Any]) -> str:
+    key = {"turn": "turnId", "marker": "markerId"}.get(item.get("kind"))
+    identity = item.get(key) if key else None
+    if not isinstance(identity, str) or not identity:
+        raise KimiServerProtocolError("transcript item has invalid kind or identity")
+    return identity
+
+
+def _find(
+    items: list[dict[str, Any]], key: str, identity: str
+) -> dict[str, Any] | None:
+    return next((item for item in items if item[key] == identity), None)
+
+
+def _upsert(items: list[dict[str, Any]], key: str, value: dict[str, Any]) -> None:
+    for index, item in enumerate(items):
+        if item[key] == value[key]:
+            items[index] = value
+            return
+    items.append(value)
 
 
 def _event(session_id: str, seq: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -378,34 +411,6 @@ def _event(session_id: str, seq: int, payload: dict[str, Any]) -> dict[str, Any]
         "session_id": session_id,
         "seq": seq,
         "payload": payload,
-    }
-
-
-def _resync_event(
-    session_id: str,
-    reason: str,
-    snapshot: dict[str, Any],
-    seq: int,
-) -> dict[str, Any]:
-    from .transcript import snapshot_from_transcript
-
-    bridge_snapshot = snapshot_from_transcript(
-        {
-            "items": snapshot.get("items") or [],
-            "attachments": snapshot.get("attachments") or [],
-            "has_more": bool(snapshot.get("hasMoreOlder")),
-            "seq": seq,
-        }
-    )
-    return {
-        "type": "resync_required",
-        "session_id": session_id,
-        "payload": {
-            "type": "resync_required",
-            "session_id": session_id,
-            "reason": reason,
-        },
-        "snapshot": bridge_snapshot,
     }
 
 

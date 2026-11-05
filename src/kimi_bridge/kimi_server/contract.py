@@ -120,7 +120,7 @@ _SESSION_FIELDS = (
     _field("updated_at", "any"),
     _field("busy", "boolean"),
     _field("metadata.cwd", "string"),
-    _field("agent_config.model", "string", required=False),
+    _field("agent_config.model", "string"),
     _field(
         "agent_config.permission_mode",
         "string",
@@ -129,6 +129,10 @@ _SESSION_FIELDS = (
     ),
     _field("usage.context_tokens", "integer"),
     _field("usage.context_limit", "integer", required=False),
+    _field("usage.input_tokens", "integer"),
+    _field("usage.output_tokens", "integer"),
+    _field("usage.cache_read_tokens", "integer"),
+    _field("usage.cache_creation_tokens", "integer"),
 )
 _SESSION_LIST_FIELDS = tuple(
     SchemaFieldContract(
@@ -150,7 +154,7 @@ _PROFILE_FIELDS = (
         values=("none", "approval", "question"),
     ),
     _field("metadata.cwd", "string"),
-    _field("agent_config.model", "string", required=False),
+    _field("agent_config.model", "string"),
     _field("agent_config.thinking", "string", required=False),
     _field(
         "agent_config.permission_mode",
@@ -198,6 +202,16 @@ _TASK_LIST_FRAME_FIELDS = tuple(
     )
     for item in _TASK_FRAME_FIELDS
 )
+_TASK_RESPONSE_FIELDS = tuple(
+    SchemaFieldContract(
+        ("task", *item.path),
+        item.types,
+        required=False,
+        values=item.values,
+        required_if_parent_present=item.required,
+    )
+    for item in _TASK_FRAME_FIELDS
+)
 
 
 KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
@@ -238,12 +252,8 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                 },
                 {"secondary_model": {"models": {"kimi-code/k3": "Hard tasks"}}},
             ),
-            request_fields=(
-                _field("secondary_model", "object", required=False),
-            ),
-            response_fields=(
-                _field("secondary_model", "object", required=False),
-            ),
+            request_fields=(_field("secondary_model", "object", required=False),),
+            response_fields=(_field("secondary_model", "object", required=False),),
         ),
         RestOperationContract(
             "models",
@@ -273,9 +283,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             request_media_type="multipart/form-data",
             request_examples=({"file": "binary", "name": "photo.png"},),
             request_fields=(_field("file", "string", format="binary"),),
-            response_fields=(
-                _field("id", "string"),
-            ),
+            response_fields=(_field("id", "string"),),
         ),
         RestOperationContract(
             "create_session",
@@ -330,7 +338,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "get_session",
-            "KimiServerClient.get_session/get_session_status",
+            "KimiServerClient.get_session/get_session_status/get_session_usage",
             "GET",
             "/sessions/{session_id}",
             "/api/v1/sessions/{session_id}",
@@ -786,9 +794,7 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("type", "string", values=("pong",)),
             _field("payload.nonce", "string"),
         ),
-        (
-            {"type": "pong", "payload": {"nonce": "nonce-1"}},
-        ),
+        ({"type": "pong", "payload": {"nonce": "nonce-1"}},),
     ),
     WebSocketMessageContract(
         "error",
@@ -948,7 +954,6 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("session_id", "string"),
             _field("agent_id", "string"),
             _field("task_id", "string"),
-            _field("since_offset", "integer", required=False),
             _field("tail_bytes", "integer", required=False),
         ),
         (
@@ -958,7 +963,6 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
                 "session_id": "session-1",
                 "agent_id": "main",
                 "task_id": "bash-1",
-                "since_offset": 0,
                 "tail_bytes": 8192,
             },
         ),
@@ -985,13 +989,25 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
     ),
     WebSocketMessageContract(
         "task_watch_ack",
-        "KimiServerClient.get_task/cancel_task response frames",
+        "KimiServerClient.get_task response",
         (
             _field("type", "string", values=("response",)),
             _field("request_id", "string"),
             _field("code", "integer", "number"),
             _field("msg", "string", required=False),
             _field("task", "object", required=False),
+            *_TASK_RESPONSE_FIELDS,
+        ),
+    ),
+    WebSocketMessageContract(
+        "task_stop_ack",
+        "KimiServerClient.cancel_task response",
+        (
+            _field("type", "string", values=("response",)),
+            _field("request_id", "string"),
+            _field("code", "integer", "number"),
+            _field("task", "object", required=False),
+            *_TASK_RESPONSE_FIELDS,
         ),
     ),
 )
@@ -1034,7 +1050,6 @@ KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
                 "string",
                 values=("running", "completed", "interrupted", "failed"),
             ),
-            _field("step.usage", "object", required=False),
         ),
     ),
     TranscriptOpContract(
@@ -1044,8 +1059,10 @@ KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
             _field("turnId", "string"),
             _field("stepId", "string"),
             _field("frame.frameId", "string"),
-            _field("frame.kind", "string", values=("text", "thinking", "tool")),
-            _field("frame.text", "string"),
+            _field(
+                "frame.kind", "string", values=("text", "thinking", "tool", "notice")
+            ),
+            _field("frame.text", "string", required=False),
             _field("frame.role", "string", required=False),
         ),
     ),
@@ -1078,7 +1095,14 @@ KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
             _field(
                 "prompt.status",
                 "string",
-                values=("running", "queued", "completed", "failed"),
+                values=(
+                    "running",
+                    "queued",
+                    "blocked",
+                    "completed",
+                    "failed",
+                    "aborted",
+                ),
             ),
         ),
     ),
@@ -1086,6 +1110,19 @@ KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
         "items.remove",
         "TranscriptProjection state pruning",
         (_field("ids", "array"),),
+    ),
+    TranscriptOpContract(
+        "attachment.upsert",
+        "TranscriptProjection snapshot attachments",
+        (
+            _field("attachment.attachmentId", "string"),
+            _field("attachment.mediaType", "string"),
+        ),
+    ),
+    TranscriptOpContract(
+        "interaction.upsert",
+        "Flat interaction frames provide session-wide delivery",
+        (_field("interaction", "object"),),
     ),
 )
 
@@ -1162,10 +1199,12 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
         ),
     ),
     SessionEventContract(
-        "compaction.blocked", "TranscriptProjection/ChatRouter._dispatch_compaction_event"
+        "compaction.blocked",
+        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
     ),
     SessionEventContract(
-        "compaction.cancelled", "TranscriptProjection/ChatRouter._dispatch_compaction_event"
+        "compaction.cancelled",
+        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
     ),
 )
 

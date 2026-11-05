@@ -20,7 +20,7 @@ from kimi_bridge.compatibility import (
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
-from kimi_bridge.kimi_server import KimiContractCheck
+from kimi_bridge.kimi_server import KimiContractCheck, KimiServerAPIError
 from kimi_bridge.kimi_server import contract as kimi_contract
 from kimi_bridge.kimi_server import probe as probe_module
 
@@ -274,6 +274,18 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         async def get_default_model(self) -> str:
             return "kimi-code/k3"
 
+        async def get_session_model(self, session_id: str) -> Any:
+            return SimpleNamespace(alias="kimi-code/k3")
+
+        async def update_profile(self, session_id: str, **profile: Any) -> Any:
+            return SimpleNamespace(model=profile["model"])
+
+        async def get_task(self, session_id: str, task_id: str) -> Any:
+            raise KimiServerAPIError(40406, "task not found")
+
+        async def cancel_task(self, session_id: str, task_id: str) -> bool:
+            raise KimiServerAPIError(40406, "task not found")
+
         async def get_secondary_model(self) -> Any:
             return SimpleNamespace(default_model="kimi-code/k3")
 
@@ -281,9 +293,7 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
             self.secondary_model_updates.append(model)
             return SimpleNamespace(default_model=model)
 
-        async def create_session(
-            self, _workspace: str, **profile: Any
-        ) -> str:
+        async def create_session(self, _workspace: str, **profile: Any) -> str:
             self.created_profiles.append(profile)
             return "session-1"
 
@@ -303,13 +313,9 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
     client = FakeProbeClient()
     supervisor = SimpleNamespace(
         connection=SimpleNamespace(token="secret"),
-        executable_identity=SimpleNamespace(
-            product=SimpleNamespace(value="kimi-code")
-        ),
+        executable_identity=SimpleNamespace(product=SimpleNamespace(value="kimi-code")),
     )
-    monkeypatch.setattr(
-        probe_module, "KimiServerClient", lambda **_kwargs: client
-    )
+    monkeypatch.setattr(probe_module, "KimiServerClient", lambda **_kwargs: client)
     monkeypatch.setattr(
         probe_module, "evaluate_kimi_semantic_contract", lambda *_args, **_kwargs: ()
     )
@@ -330,10 +336,11 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         "runtime.lifecycle.websocket.subscribe_v2_resumes",
         "runtime.lifecycle.websocket.agent_burst_before_ack",
         "runtime.lifecycle.websocket.transcript_seq_resume",
+        "runtime.behavior.task.direct_commands",
+        "runtime.behavior.session.profile_binding",
     ):
         assert any(
-            item.id == identifier and item.status == "pass"
-            for item in result.checks
+            item.id == identifier and item.status == "pass" for item in result.checks
         )
 
 
@@ -454,7 +461,8 @@ def test_semantic_projection_checks_requests_messages_and_transcript_ops(
         "TranscriptProjection._apply_turn_upsert",
         (
             kimi_contract.SchemaFieldContract(
-                ("turn", "state"), ("string",),
+                ("turn", "state"),
+                ("string",),
                 values=("running", "completed"),
             ),
         ),
@@ -493,9 +501,7 @@ def test_semantic_projection_checks_requests_messages_and_transcript_ops(
                                                 "items": {
                                                     "type": "object",
                                                     "properties": {
-                                                        "seq": {
-                                                            "type": "integer"
-                                                        },
+                                                        "seq": {"type": "integer"},
                                                         "ops": {
                                                             "type": "array",
                                                             "items": {
@@ -537,10 +543,10 @@ def test_semantic_projection_checks_requests_messages_and_transcript_ops(
                                                     "required": ["seq", "ops"],
                                                 },
                                             }
-                                        }
+                                        },
                                     },
                                     "required": ["code", "data"],
-                                }
+                                },
                             }
                         }
                     }
@@ -552,17 +558,36 @@ def test_semantic_projection_checks_requests_messages_and_transcript_ops(
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert not [item for item in checks if item.status == "fail"]
 
+    journal_variants = openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"][
+        "get"
+    ]["responses"]["200"]["content"]["application/json"]["schema"]["properties"][
+        "data"
+    ]["properties"]["batches"]["items"]["properties"]["ops"]["items"]["oneOf"]
+    journal_variants.append(
+        {
+            "type": "object",
+            "properties": {"op": {"type": "string", "enum": ["unknown.operation"]}},
+            "required": ["op"],
+        }
+    )
+    assert "transcript.ops.vocabulary" in {
+        check.id
+        for check in kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+        if check.status == "fail"
+    }
+    journal_variants.pop()
+
     openapi["paths"]["/api/v1/example"]["get"]["requestBody"] = {
         "required": True,
         "content": {"application/json": {"schema": {"type": "object"}}},
     }
-    openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"][
-        "get"
-    ]["responses"]["200"]["content"]["application/json"]["schema"][
+    openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"]["get"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"]["properties"]["data"][
         "properties"
-    ]["data"]["properties"]["batches"]["items"]["properties"]["ops"][
-        "items"
-    ]["oneOf"][0]["properties"]["turn"]["properties"].pop("state")
+    ]["batches"]["items"]["properties"]["ops"]["items"]["oneOf"][0]["properties"][
+        "turn"
+    ]["properties"].pop("state")
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     failures = {item.id for item in checks if item.status == "fail"}
     assert "rest.example.request" in failures

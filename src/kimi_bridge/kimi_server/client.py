@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ from .types import (
     TaskStatus,
     ToolInfo,
 )
+from .task_output import TaskOutputTail
 from .wire import (
     _goal_info_from_wire,
     _interaction_update_from_wire,
@@ -72,6 +74,7 @@ from .wire import (
     _secondary_model_config_from_wire,
     _session_profile_from_wire,
     _session_status_from_wire,
+    _session_usage_from_wire,
     _skill_info_from_wire,
     _task_info_from_wire,
     _tool_info_from_wire,
@@ -132,7 +135,6 @@ class KimiServerClient:
         self._subscription_lock = asyncio.Lock()
         self._secondary_model_lock = asyncio.Lock()
         self._subscription_ready: dict[str, asyncio.Event] = {}
-        self._transcripts: dict[str, TranscriptProjection] = {}
         self._agent_frames: dict[str, dict[str, Any]] = {}
         self._usage_frames: dict[str, dict[str, Any]] = {}
         self._active_ws: Any | None = None
@@ -267,9 +269,10 @@ class KimiServerClient:
         """Restart the supervised Kimi server and wait for its replacement."""
 
         if self._supervisor is None:
-            raise KimiServerOperationError("server restart requires a managed kimi server")
+            raise KimiServerOperationError(
+                "server restart requires a managed kimi server"
+            )
         connection = await self._supervisor.restart()
-        self._transcripts.clear()
         self._agent_frames.clear()
         self._usage_frames.clear()
         return connection
@@ -407,51 +410,23 @@ class KimiServerClient:
         return session.get("archived") is True
 
     async def get_session_status(self, session_id: str) -> SessionStatus:
-        """Return live session status from stored metadata and agent frames.
-
-        Kimi 2.5 removed the session status endpoint; the stored session
-        object carries busy state, agent configuration, and context usage.
-        The effective thinking effort is resolved per prompt and is only
-        published through agent frames, so it supplements the stored value.
-        """
+        """Combine stored work state with effective settings from the live feed."""
 
         data = await self._request_operation(
             "get_session", path_parameters={"session_id": session_id}
         )
-        status = _session_status_from_wire(data)
-        agent = self._agent_frames.get(session_id)
-        if not status.thinking_effort:
-            thinking = agent.get("thinking") if agent is not None else None
-            if isinstance(thinking, str) and thinking:
-                status = replace(status, thinking_effort=thinking)
-        return status
+        return _session_status_from_wire(
+            data,
+            agent=self._agent_frames.get(session_id),
+            usage=self._usage_frames.get(session_id),
+        )
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
-        """Return usage from per-step transcript records and usage frames."""
+        """Read cumulative native counters, with live context-window values."""
 
-        totals = self._transcripts.get(session_id)
-        summed = totals.usage_totals() if totals is not None else None
-        usage = self._usage_frames.get(session_id)
-        context = usage if usage is not None else {}
-        context_tokens = context.get("context_tokens")
-        context_limit = context.get("max_context_tokens")
-        return SessionUsage(
-            input_tokens=(
-                int(summed["inputOther"]) if summed is not None else None
-            ),
-            output_tokens=(int(summed["output"]) if summed is not None else None),
-            cache_read_tokens=(
-                int(summed["inputCacheRead"]) if summed is not None else None
-            ),
-            cache_creation_tokens=(
-                int(summed["inputCacheCreation"]) if summed is not None else None
-            ),
-            context_tokens=(
-                int(context_tokens) if context_tokens is not None else None
-            ),
-            context_limit=(
-                int(context_limit) if context_limit is not None else None
-            ),
+        data = await self.get_session(session_id)
+        return _session_usage_from_wire(
+            data["usage"], live=self._usage_frames.get(session_id)
         )
 
     async def compact_session(
@@ -666,16 +641,26 @@ class KimiServerClient:
     async def list_tasks(
         self, session_id: str, *, status: TaskStatus | None = None
     ) -> list[TaskInfo]:
-        """List the tasks the subscribed agents are running right now.
+        """Discover running tasks through the coarsest native subscription."""
 
-        Kimi 2.5 moved task discovery onto the WebSocket: subscribing to a
-        session pushes a ``task.list`` frame with every task an agent is
-        currently running, so the bridge deliberately sees no ended tasks.
-        """
-
-        frames = await self._task_socket_frames(session_id)
+        async with self._task_socket() as ws:
+            async with asyncio.timeout(self._timeout):
+                _, frames = await self._subscribe(
+                    ws,
+                    session_id,
+                    {
+                        "session_id": session_id,
+                        "transcript": {_MAIN_AGENT_ID: "turn"},
+                    },
+                )
         task_list = next(
-            (frame for frame in frames if frame.get("type") == "task.list"),
+            (
+                frame
+                for frame in frames
+                if frame.get("type") == "task.list"
+                and frame.get("session_id") == session_id
+                and frame.get("agent_id") == _MAIN_AGENT_ID
+            ),
             None,
         )
         if task_list is None:
@@ -686,82 +671,37 @@ class KimiServerClient:
             _task_info_from_wire(task, session_id=session_id)
             for task in task_list["tasks"]
         ]
-        if status is not None:
-            tasks = [task for task in tasks if task.status == status]
-        return tasks
+        return [task for task in tasks if status is None or task.status == status]
 
     async def get_task(
-        self,
-        session_id: str,
-        task_id: str,
-        *,
-        output_bytes: int = 8192,
+        self, session_id: str, task_id: str, *, output_bytes: int = 8192
     ) -> TaskInfo:
-        """Watch one task and return its state plus any streamed output."""
+        """Inspect a known task, including ended tasks, and its bounded output tail."""
 
-        if output_bytes < 0:
-            raise ValueError("output_bytes must be non-negative")
-        frames = await self._task_socket_frames(
-            session_id,
-            request={
-                "type": "task.watch",
-                "session_id": session_id,
-                "agent_id": _MAIN_AGENT_ID,
-                "task_id": task_id,
-                "since_offset": 0,
-                "tail_bytes": output_bytes,
-            },
+        if not 0 <= output_bytes <= 1048576:
+            raise ValueError("output_bytes must be between 0 and 1048576")
+        task, output = await self._task_command(
+            session_id, task_id, "task.watch", output_bytes=output_bytes
         )
-        response = next(
-            (frame for frame in frames if frame.get("type") == "response"), None
-        )
-        if response is None:
-            raise KimiServerProtocolError(
-                f"task watch for {task_id!r} was not acknowledged"
-            )
-        if response.get("code") != 0:
-            raise KimiServerAPIError(
-                response.get("code", -1),
-                str(response.get("msg") or "task watch failed"),
-            )
-        task = response.get("task")
-        if not isinstance(task, dict):
-            raise KimiServerProtocolError("task watch response has no task")
         info = _task_info_from_wire(task, session_id=session_id)
-        output = "".join(
-            str(frame.get("text") or "")
-            for frame in frames
-            if frame.get("type") == "task.output" and frame.get("task_id") == task_id
-        )
-        if output:
-            preview = output[-output_bytes:] if output_bytes else ""
-            return replace(info, output_preview=preview, output_bytes=len(output))
+        if output.end is not None and (output.end > 0 or not info.output_preview):
+            info = replace(info, output_preview=output.text, output_bytes=output.end)
+        elif info.output_preview is not None:
+            preview = info.output_preview.encode("utf-8")
+            info = replace(
+                info,
+                output_preview=(
+                    preview[-output_bytes:].decode("utf-8", errors="ignore")
+                    if output_bytes
+                    else ""
+                ),
+            )
         return info
 
     async def cancel_task(self, session_id: str, task_id: str) -> bool:
-        """Stop one running task through the WebSocket task command."""
+        """Stop a task directly and return as soon as the server acknowledges it."""
 
-        frames = await self._task_socket_frames(
-            session_id,
-            request={
-                "type": "task.stop",
-                "session_id": session_id,
-                "agent_id": _MAIN_AGENT_ID,
-                "task_id": task_id,
-            },
-        )
-        response = next(
-            (frame for frame in frames if frame.get("type") == "response"), None
-        )
-        if response is None:
-            raise KimiServerProtocolError(
-                f"task stop for {task_id!r} was not acknowledged"
-            )
-        if response.get("code") != 0:
-            raise KimiServerAPIError(
-                response.get("code", -1),
-                str(response.get("msg") or "task stop failed"),
-            )
+        await self._task_command(session_id, task_id, "task.stop")
         return True
 
     async def list_skills(self, session_id: str) -> list[SkillInfo]:
@@ -1055,7 +995,6 @@ class KimiServerClient:
         # A new consumer needs a baseline; only this generator's transport
         # reconnects may resume from its existing presentation state.
         projection = TranscriptProjection(session_id)
-        self._transcripts[session_id] = projection
         reconnect_delay = self._reconnect_initial_backoff
         subscribed_once = False
         consecutive_ack_mismatches = 0
@@ -1107,6 +1046,15 @@ class KimiServerClient:
                                 not in interaction_snapshot.pending_ids
                             )
                         ]
+                        for frame in pending_frames:
+                            if (
+                                frame.get("session_id") == session_id
+                                and frame.get("agent_id") == _MAIN_AGENT_ID
+                            ):
+                                if frame.get("type") == "agent":
+                                    self._agent_frames[session_id] = dict(frame)
+                                elif frame.get("type") == "usage":
+                                    self._usage_frames[session_id] = dict(frame)
                         ready.set()
                         subscribed_once = True
                         consecutive_ack_mismatches = 0
@@ -1217,112 +1165,105 @@ class KimiServerClient:
                         type(exc).__name__,
                         reconnect_delay,
                     )
-                    await self._sleep(reconnect_delay)
-                    reconnect_delay = min(
-                        reconnect_delay * 2, self._reconnect_max_backoff
-                    )
                 finally:
                     ready.clear()
                     self._active_ws = None
+                    self._agent_frames.pop(session_id, None)
+                    self._usage_frames.pop(session_id, None)
+                if self._closed:
+                    break
+                await self._sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, self._reconnect_max_backoff)
 
-    async def _task_socket_frames(
-        self,
-        session_id: str,
-        *,
-        request: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        """Open a one-shot task socket and collect its relevant frames.
-
-        Task discovery rides the subscription stream: subscribing pushes the
-        agent's current ``task.list``, and task commands are answered by
-        ``response`` frames matched on their ``request_id``.
-        """
-
+    @asynccontextmanager
+    async def _task_socket(self) -> AsyncIterator[Any]:
         connection = await self._connection_info()
         try:
-            async with asyncio.timeout(self._timeout):
-                async with self._ws_connect(
-                    _websocket_url(connection.base_url),
-                    additional_headers={
-                        "Authorization": f"Bearer {connection.token}"
-                    },
-                    ping_interval=None,
-                    max_size=None,
-                ) as ws:
+            async with self._ws_connect(
+                _websocket_url(connection.base_url),
+                additional_headers={"Authorization": f"Bearer {connection.token}"},
+                ping_interval=None,
+                max_size=None,
+                open_timeout=self._timeout,
+            ) as ws:
+                async with asyncio.timeout(self._timeout):
                     await self._expect_server_hello(ws)
                     await self._send_client_hello(ws)
-                    _, pending_frames = await self._send_task_subscribe(
-                        ws, session_id
-                    )
-                    frames = [
-                        frame
-                        for frame in pending_frames
-                        if frame.get("type")
-                        in ("task.list", "task", "task.output", "response")
-                    ]
-                    if request is not None:
-                        request_id = uuid.uuid4().hex
-                        await self._send_json(
-                            ws,
-                            {
-                                "request_id": request_id,
-                                **{
-                                    key: value
-                                    for key, value in request.items()
-                                    if key != "request_id"
-                                },
-                            },
-                        )
-                        while True:
-                            frame = await self._receive_json(ws)
-                            frame_type = frame.get("type")
-                            if frame_type == "ping":
-                                await self._send_pong(ws, frame)
-                                continue
-                            if frame_type == "error":
-                                self._raise_ws_error(frame)
-                            if (
-                                frame.get("type") == "response"
-                                and frame.get("request_id") == request_id
-                            ):
-                                frames.append(frame)
-                                break
-                            if frame_type in ("task", "task.output"):
-                                frames.append(frame)
-                        await self._drain_task_output(ws, frames)
-                    return frames
+                yield ws
         except (OSError, TimeoutError, ConnectionClosed, InvalidStatus) as exc:
             raise KimiServerTransportError(
                 f"kimi server task exchange failed: {type(exc).__name__}"
             ) from exc
 
-    async def _drain_task_output(
-        self, ws: Any, frames: list[dict[str, Any]]
-    ) -> None:
-        """Collect task output within a fixed window after acknowledgement."""
+    async def _task_command(
+        self, session_id: str, task_id: str, command: str, *, output_bytes: int = 0
+    ) -> tuple[dict[str, Any], TaskOutputTail]:
+        request_id = uuid.uuid4().hex
+        request = {
+            "type": command,
+            "request_id": request_id,
+            "session_id": session_id,
+            "agent_id": _MAIN_AGENT_ID,
+            "task_id": task_id,
+        }
+        if command == "task.watch":
+            request["tail_bytes"] = max(1, output_bytes)
+        output = TaskOutputTail(output_bytes)
+        async with self._task_socket() as ws:
+            async with asyncio.timeout(self._timeout):
+                await self._send_json(ws, request)
+                while True:
+                    frame = await self._receive_task_frame(ws)
+                    if self._is_task_output(frame, session_id, task_id):
+                        output.append(frame)
+                    if (
+                        frame.get("type") == "response"
+                        and frame.get("request_id") == request_id
+                    ):
+                        if frame.get("code") != 0:
+                            raise KimiServerAPIError(
+                                frame.get("code", -1),
+                                str(frame.get("msg") or "task command failed"),
+                            )
+                        task = frame.get("task")
+                        if not isinstance(task, dict) or task.get("task_id") != task_id:
+                            raise KimiServerProtocolError(
+                                "task response has no matching task"
+                            )
+                        break
+            if command == "task.watch" and output_bytes and output.end is None:
+                # The initial tail may precede or follow the acknowledgement.
+                # Empty/unavailable task logs need not produce an output frame.
+                try:
+                    async with asyncio.timeout(
+                        min(self._timeout, _TASK_OUTPUT_GRACE_SECONDS)
+                    ):
+                        while output.end is None:
+                            frame = await self._receive_task_frame(ws)
+                            if self._is_task_output(frame, session_id, task_id):
+                                output.append(frame)
+                except (TimeoutError, ConnectionClosed, OSError):
+                    pass
+        return task, output
 
-        deadline = asyncio.get_running_loop().time() + _TASK_OUTPUT_GRACE_SECONDS
+    async def _receive_task_frame(self, ws: Any) -> dict[str, Any]:
         while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return
-            try:
-                raw = await asyncio.wait_for(ws.recv(), remaining)
-            except (asyncio.TimeoutError, ConnectionClosed):
-                return
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            frame = json.loads(raw)
-            if not isinstance(frame, dict):
-                raise KimiServerProtocolError("WebSocket frame must be a JSON object")
-            frame_type = frame.get("type")
-            if frame_type == "ping":
+            frame = await self._receive_json(ws)
+            if frame.get("type") == "ping":
                 await self._send_pong(ws, frame)
                 continue
-            if frame_type in ("task.output", "task"):
-                frames.append(frame)
-                continue
-            return
+            if frame.get("type") == "error":
+                self._raise_ws_error(frame)
+            return frame
+
+    @staticmethod
+    def _is_task_output(frame: dict[str, Any], session_id: str, task_id: str) -> bool:
+        return (
+            frame.get("type") == "task.output"
+            and frame.get("session_id") == session_id
+            and frame.get("agent_id") == _MAIN_AGENT_ID
+            and frame.get("task_id") == task_id
+        )
 
     async def _request_operation(
         self,
@@ -1478,15 +1419,6 @@ class KimiServerClient:
         }
         if seq is not None:
             payload["transcript_since"] = {_MAIN_AGENT_ID: seq}
-        return await self._subscribe(ws, session_id, payload)
-
-    async def _send_task_subscribe(
-        self, ws: Any, session_id: str
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        payload: dict[str, Any] = {
-            "session_id": session_id,
-            "transcript": {_MAIN_AGENT_ID: "turn"},
-        }
         return await self._subscribe(ws, session_id, payload)
 
     async def _subscribe(

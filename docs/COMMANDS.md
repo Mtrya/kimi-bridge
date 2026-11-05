@@ -33,8 +33,8 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/goal cancel` | Cancel the current goal and its active prompt/interaction. |
 | `/stop` | Abort the active main-agent turn, discard queued prompts, and cancel its pending interaction. Detached tasks continue. |
 | `/reload` | Reload Kimi settings and refresh the bound session while the server and bridge stay online. Requires an idle session. |
-| `/tasks [all\|completed\|failed\|cancelled]` | List numbered running tasks. Kimi's task stream only reports tasks an agent is running right now, so `all` and the terminal-status filters also show running tasks only. |
-| `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, with at most the last 8 KiB of streamed output. Ended tasks can no longer be inspected. |
+| `/tasks [all\|completed\|failed\|cancelled]` | List numbered running tasks. `all` also lists only running tasks; terminal-status filters return no tasks because Kimi omits ended tasks from discovery. |
+| `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, including a known ended task, with at most the last 8 KiB of output. |
 | `/tasks cancel <n\|id>` | Cancel a task by displayed number or explicit ID. |
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |

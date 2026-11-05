@@ -380,26 +380,9 @@ def _evaluate_transcript_ops_contract(
     checks: list[KimiContractCheck] = []
     if not semantic_contract.KIMI_TRANSCRIPT_OPS:
         return checks
-    paths = openapi.get("paths")
-    operation = (
-        paths.get("/api/v1/sessions/{session_id}/transcript/ops")
-        if isinstance(paths, dict)
-        else None
-    )
-    method_spec = (
-        operation.get("get") if isinstance(operation, dict) else None
-    )
-    ops_schema = None
-    if isinstance(method_spec, dict):
-        for data_schema in _success_data_schemas(method_spec):
-            batches = _field_states(
-                data_schema, ("batches", "[]", "ops", "[]")
-            )
-            if batches:
-                ops_schema = batches[0][0]
-                break
+    ops_schema = _transcript_ops_schema(openapi)
     if ops_schema is None:
-        checks.append(
+        return [
             _contract_check(
                 "transcript.ops.journal",
                 "transcript",
@@ -407,18 +390,32 @@ def _evaluate_transcript_ops_contract(
                 "the transcript ops journal schema is unavailable",
                 "evaluate_kimi_semantic_contract",
             )
-        )
-        return checks
+        ]
     variants = _schema_alternatives(ops_schema)
+    actual_ops: set[str] = set()
+    for variant in variants:
+        for schema, _required in _field_states(variant, ("op",)):
+            actual_ops.update(
+                schema.get("enum", [schema["const"]] if "const" in schema else [])
+            )
+    declared_ops = {contract.op for contract in semantic_contract.KIMI_TRANSCRIPT_OPS}
+    checks.append(
+        _contract_check(
+            "transcript.ops.vocabulary",
+            "transcript",
+            actual_ops == declared_ops,
+            "every journal operation is explicitly handled by the decoder; "
+            f"unhandled={sorted(actual_ops - declared_ops)}, missing={sorted(declared_ops - actual_ops)}",
+            "TranscriptProjection._apply_op",
+        )
+    )
     for contract in semantic_contract.KIMI_TRANSCRIPT_OPS:
         matches = [
             variant
             for variant in variants
             if _field_matches(
                 variant,
-                SchemaFieldContract(
-                    ("op",), ("string",), values=(contract.op,)
-                ),
+                SchemaFieldContract(("op",), ("string",), values=(contract.op,)),
             )
         ]
         checks.append(
@@ -430,24 +427,35 @@ def _evaluate_transcript_ops_contract(
                 contract.source,
             )
         )
-        if not matches:
-            continue
-        for requirement in contract.fields:
+        for requirement in contract.fields if matches else ():
             checks.append(
                 _contract_check(
-                    "transcript.op."
-                    f"{contract.op}.{'.'.join(requirement.path)}",
+                    f"transcript.op.{contract.op}.{'.'.join(requirement.path)}",
                     "transcript",
-                    any(
-                        _field_matches(variant, requirement)
-                        for variant in matches
-                    ),
-                    "op field "
-                    f"{'.'.join(requirement.path)} keeps a compatible shape",
+                    any(_field_matches(variant, requirement) for variant in matches),
+                    f"op field {'.'.join(requirement.path)} keeps a compatible shape",
                     contract.source,
                 )
             )
     return checks
+
+
+def _transcript_ops_schema(openapi: Mapping[str, Any]) -> dict[str, Any] | None:
+    paths = openapi.get("paths")
+    operation = (
+        paths.get("/api/v1/sessions/{session_id}/transcript/ops")
+        if isinstance(paths, dict)
+        else None
+    )
+    method_spec = operation.get("get") if isinstance(operation, dict) else None
+    ops_schema = None
+    if isinstance(method_spec, dict):
+        for data_schema in _success_data_schemas(method_spec):
+            batches = _field_states(data_schema, ("batches", "[]", "ops", "[]"))
+            if batches:
+                ops_schema = batches[0][0]
+                break
+    return ops_schema
 
 
 def _contract_check(

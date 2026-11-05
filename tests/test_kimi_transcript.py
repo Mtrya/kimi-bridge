@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
+from kimi_bridge.kimi_server import KimiServerProtocolError
+from kimi_bridge.kimi_server.events import TranscriptProjection
 from kimi_bridge.kimi_server.transcript import snapshot_from_transcript
 from kimi_bridge.router.formatting import (
     _format_history,
@@ -279,7 +283,7 @@ def test_projection_folds_turn_step_delta_and_prompt_lifecycle() -> None:
                         "stepId": "t0.1",
                         "frameId": "t0.1.f1",
                     },
-                    "offset": 8,
+                    "offset": 9,
                     "text": "hard",
                 },
                 {
@@ -383,14 +387,10 @@ def test_projection_folds_turn_step_delta_and_prompt_lifecycle() -> None:
             "payload": {"type": "prompt.completed", "promptId": "prompt-1"},
         },
     ]
-    assert projection.usage_totals() == {
-        "inputOther": 10,
-        "output": 2,
-        "inputCacheRead": 4,
-        "inputCacheCreation": 1,
-    }
     # Replayed batches at or below the applied sequence are ignored.
-    assert projection.apply_ops(_ops_frame([{"op": "items.remove", "ids": []}], 3)) == []
+    assert (
+        projection.apply_ops(_ops_frame([{"op": "items.remove", "ids": []}], 3)) == []
+    )
 
 
 def test_projection_emits_delta_events_for_append_ops() -> None:
@@ -410,6 +410,28 @@ def test_projection_emits_delta_events_for_append_ops() -> None:
                     },
                 },
                 {
+                    "op": "step.upsert",
+                    "turnId": "t0",
+                    "step": {
+                        "kind": "step",
+                        "stepId": "t0.1",
+                        "turnId": "t0",
+                        "ordinal": 1,
+                        "state": "running",
+                    },
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f3",
+                        "role": "user",
+                        "text": "",
+                    },
+                },
+                {
                     "op": "frame.upsert",
                     "turnId": "t0",
                     "stepId": "t0.1",
@@ -423,17 +445,6 @@ def test_projection_emits_delta_events_for_append_ops() -> None:
                         "kind": "text",
                         "frameId": "f2",
                         "role": "assistant",
-                        "text": "",
-                    },
-                },
-                {
-                    "op": "frame.upsert",
-                    "turnId": "t0",
-                    "stepId": "t0.1",
-                    "frame": {
-                        "kind": "text",
-                        "frameId": "f3",
-                        "role": "user",
                         "text": "",
                     },
                 },
@@ -486,12 +497,14 @@ def test_projection_emits_delta_events_for_append_ops() -> None:
             "type": "session_event",
             "session_id": "session-1",
             "seq": 3,
+            "offset": 0,
             "payload": {"type": "thinking.delta", "delta": "think"},
         },
         {
             "type": "session_event",
             "session_id": "session-1",
             "seq": 3,
+            "offset": 0,
             "payload": {"type": "assistant.delta", "delta": "answer"},
         },
     ]
@@ -684,6 +697,336 @@ def test_initial_reset_restores_the_running_answer_and_thinking_prefixes() -> No
         }],
     })
     assert [event["payload"] for event in suffix] == [{"type": "assistant.delta", "delta": "suffix"}]
+
+
+def _running_projection() -> TranscriptProjection:
+    projection = TranscriptProjection("session-1")
+    projection.apply_reset(
+        {
+            "seq": 1,
+            "snapshot": {
+                "items": [
+                    {
+                        "kind": "turn",
+                        "turnId": "t1",
+                        "ordinal": 1,
+                        "state": "running",
+                        "origin": {"kind": "user"},
+                        "triggerPromptId": "prompt-1",
+                        "prompt": "Hello",
+                        "steps": [
+                            {
+                                "kind": "step",
+                                "stepId": "s1",
+                                "turnId": "t1",
+                                "ordinal": 1,
+                                "state": "running",
+                                "frames": [
+                                    {
+                                        "frameId": "f1",
+                                        "kind": "text",
+                                        "role": "assistant",
+                                        "text": "prefix ",
+                                    },
+                                    {
+                                        "frameId": "thought",
+                                        "kind": "thinking",
+                                        "text": "thinking",
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+                "attachments": [],
+                "interactions": [],
+                "prompts": [],
+            },
+        }
+    )
+    return projection
+
+
+@pytest.mark.parametrize("operation", ["append", "frame.upsert"])
+def test_text_corrections_emit_the_reduced_snapshot(operation: str) -> None:
+    projection = _running_projection()
+    if operation == "append":
+        op = {
+            "op": operation,
+            "target": {
+                "type": "frame",
+                "turnId": "t1",
+                "stepId": "s1",
+                "frameId": "f1",
+            },
+            "offset": 0,
+            "text": "corrected",
+        }
+    else:
+        op = {
+            "op": operation,
+            "turnId": "t1",
+            "stepId": "s1",
+            "frame": {
+                "kind": "text",
+                "frameId": "f1",
+                "role": "assistant",
+                "text": "corrected",
+            },
+        }
+    batch = {"seq": 2, "ops": [op]}
+    events = projection.apply_ops(batch)
+    assert len(events) == 1
+    assert events[0]["type"] == "resync_required"
+    assert events[0]["snapshot"] == projection.snapshot()
+    assert _in_flight_assistant_text(events[0]["snapshot"]) == "corrected"
+    assert _in_flight_thinking_text(events[0]["snapshot"]) == "thinking"
+    assert events[0]["snapshot"]["in_flight_turn"]["step"] == 1
+    assert projection.apply_ops(batch) == []
+
+
+def test_multiple_frames_use_aggregate_offsets_and_survive_parent_updates() -> None:
+    projection = _running_projection()
+    events = projection.apply_ops(
+        {
+            "seq": 2,
+            "ops": [
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t1",
+                    "stepId": "s1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f2",
+                        "role": "assistant",
+                        "text": "tail",
+                    },
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t1",
+                        "stepId": "s1",
+                        "frameId": "f2",
+                    },
+                    "offset": 4,
+                    "text": "!",
+                },
+                {
+                    "op": "step.upsert",
+                    "turnId": "t1",
+                    "step": {
+                        "kind": "step",
+                        "stepId": "s1",
+                        "turnId": "t1",
+                        "ordinal": 1,
+                        "state": "completed",
+                    },
+                },
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t1",
+                        "ordinal": 1,
+                        "state": "running",
+                        "origin": {"kind": "user"},
+                    },
+                },
+            ],
+        }
+    )
+    assert [(e["offset"], e["payload"]["delta"]) for e in events] == [
+        (7, "tail"),
+        (11, "!"),
+    ]
+    assert _in_flight_assistant_text(projection.snapshot()) == "prefix tail!"
+
+
+def test_native_utf16_offsets_become_semantic_python_offsets() -> None:
+    projection = _running_projection()
+    projection.apply_ops(
+        {
+            "seq": 2,
+            "ops": [
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t1",
+                    "stepId": "s1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f1",
+                        "role": "assistant",
+                        "text": "A🙂",
+                    },
+                }
+            ],
+        }
+    )
+    events = projection.apply_ops(
+        {
+            "seq": 3,
+            "ops": [
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t1",
+                        "stepId": "s1",
+                        "frameId": "f1",
+                    },
+                    "offset": 3,
+                    "text": "tail",
+                }
+            ],
+        }
+    )
+    assert events[0]["offset"] == 2
+    assert events[0]["payload"]["delta"] == "tail"
+    assert _in_flight_assistant_text(projection.snapshot()) == "A🙂tail"
+    with pytest.raises(KimiServerProtocolError, match="UTF-16"):
+        projection.apply_ops(
+            {
+                "seq": 4,
+                "ops": [
+                    {
+                        "op": "append",
+                        "target": {
+                            "type": "frame",
+                            "turnId": "t1",
+                            "stepId": "s1",
+                            "frameId": "f1",
+                        },
+                        "offset": 2,
+                        "text": "broken",
+                    }
+                ],
+            }
+        )
+
+
+def test_removing_a_turn_prunes_its_steps_and_frames() -> None:
+    projection = _running_projection()
+    events = projection.apply_ops(
+        {"seq": 2, "ops": [{"op": "items.remove", "ids": ["t1"]}]}
+    )
+    assert events[0]["snapshot"]["messages"]["items"] == []
+    assert events[0]["snapshot"]["in_flight_turn"] is None
+    assert events[0]["snapshot"]["turn_ids"] == []
+    with pytest.raises(KimiServerProtocolError, match="unknown turn"):
+        projection.apply_ops(
+            {
+                "seq": 3,
+                "ops": [
+                    {
+                        "op": "append",
+                        "target": {
+                            "type": "frame",
+                            "turnId": "t1",
+                            "stepId": "s1",
+                            "frameId": "f1",
+                        },
+                        "offset": 0,
+                        "text": "orphan",
+                    }
+                ],
+            }
+        )
+
+
+def test_native_undo_reset_operation_replaces_nonempty_history() -> None:
+    projection = _running_projection()
+    # Native Kimi 2.5 emits this operation inside transcript.ops after undo.
+    events = projection.apply_ops(
+        {
+            "seq": 9,
+            "ops": [
+                {
+                    "op": "reset",
+                    "agentId": "main",
+                    "snapshot": {
+                        "items": [],
+                        "interactions": [],
+                        "attachments": [],
+                        "prompts": [],
+                    },
+                }
+            ],
+        }
+    )
+    assert events[0]["snapshot"]["as_of_seq"] == 9
+    assert events[0]["snapshot"]["messages"]["items"] == []
+    assert projection.snapshot()["turn_ids"] == []
+
+
+@pytest.mark.parametrize("state", ["completed", "interrupted", "failed"])
+def test_terminal_only_steps_still_advance_the_render_boundary(state: str) -> None:
+    projection = _running_projection()
+    events = projection.apply_ops(
+        {
+            "seq": 2,
+            "ops": [
+                {
+                    "op": "step.upsert",
+                    "turnId": "t1",
+                    "step": {
+                        "kind": "step",
+                        "stepId": "s2",
+                        "turnId": "t1",
+                        "ordinal": 2,
+                        "state": state,
+                    },
+                }
+            ],
+        }
+    )
+    assert [event["payload"] for event in events] == [
+        {"type": "turn.step.started", "step": 2}
+    ]
+    assert _in_flight_assistant_text(projection.snapshot()) == ""
+    assert _persisted_assistant_text(projection.snapshot()) == ""
+
+
+def test_attachment_upserts_are_available_in_recovery_snapshots() -> None:
+    projection = _running_projection()
+    projection.apply_ops(
+        {
+            "seq": 2,
+            "ops": [
+                {
+                    "op": "attachment.upsert",
+                    "attachment": {
+                        "attachmentId": "image-1",
+                        "mediaType": "image/png",
+                        "name": "plot.png",
+                    },
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t1",
+                    "stepId": "s1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f1",
+                        "role": "assistant",
+                        "text": "prefix ",
+                        "attachmentIds": ["image-1"],
+                    },
+                },
+            ],
+        }
+    )
+    assert {"type": "image/png", "name": "plot.png"} in projection.snapshot()[
+        "messages"
+    ]["items"][-1]["content"]
+
+
+def test_missing_optional_transcript_sequence_preserves_an_unknown_watermark() -> None:
+    snapshot = snapshot_from_transcript(
+        {"items": [], "attachments": [], "has_more": False}
+    )
+    assert snapshot["as_of_seq"] is None
 
 
 def test_projection_maps_failed_turns_to_terminal_notices() -> None:
