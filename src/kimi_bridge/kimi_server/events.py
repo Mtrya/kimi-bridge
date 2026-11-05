@@ -149,6 +149,13 @@ class TranscriptProjection:
                 )
             ]
         if state in _TERMINAL_TURN_STATES:
+            current = self._current_turn()
+            if (
+                current is not turn
+                and current is not None
+                and current["state"] == "running"
+            ):
+                return []
             return [
                 _event(
                     self.session_id,
@@ -229,16 +236,25 @@ class TranscriptProjection:
             )
         return turn
 
+    def _current_turn(self) -> dict[str, Any] | None:
+        """Prefer running work over a later queued turn that has already ended."""
+
+        latest = None
+        for item in reversed(self._items.values()):
+            if item["kind"] != "turn" or item["state"] == "queued":
+                continue
+            if item["state"] == "running":
+                return item
+            if latest is None:
+                latest = item
+        return latest
+
     def _is_current_step(self, turn: dict[str, Any], step: dict[str, Any]) -> bool:
-        current = next(
-            (
-                item
-                for item in reversed(self._items.values())
-                if item["kind"] == "turn" and item["state"] != "queued"
-            ),
-            None,
+        return (
+            turn is self._current_turn()
+            and bool(turn["steps"])
+            and step is turn["steps"][-1]
         )
-        return turn is current and bool(turn["steps"]) and step is turn["steps"][-1]
 
     def _resync(self, reason: str, seq: int) -> dict[str, Any]:
         return {

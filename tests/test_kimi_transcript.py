@@ -747,6 +747,154 @@ def _running_projection() -> TranscriptProjection:
     return projection
 
 
+@pytest.mark.parametrize("state", ["cancelled", "failed", "completed"])
+@pytest.mark.parametrize("operation", ["append", "frame.upsert"])
+def test_ended_queued_turn_does_not_interrupt_running_output(
+    state: str, operation: str
+) -> None:
+    projection = _running_projection()
+    queued = {
+        "kind": "turn",
+        "turnId": "t2",
+        "ordinal": 2,
+        "state": "queued",
+        "origin": {"kind": "user"},
+    }
+    assert (
+        projection.apply_ops({"seq": 2, "ops": [{"op": "turn.upsert", "turn": queued}]})
+        == []
+    )
+    assert (
+        projection.apply_ops(
+            {
+                "seq": 3,
+                "ops": [{"op": "turn.upsert", "turn": {**queued, "state": state}}],
+            }
+        )
+        == []
+    )
+
+    # Reattachment must choose the same running turn as the existing stream.
+    restored = TranscriptProjection("session-1")
+    restored.apply_reset(
+        {
+            "seq": 3,
+            "snapshot": {
+                "items": [
+                    {
+                        "kind": "turn",
+                        "turnId": "t1",
+                        "ordinal": 1,
+                        "state": "running",
+                        "steps": [
+                            {
+                                "stepId": "s1",
+                                "ordinal": 1,
+                                "state": "running",
+                                "frames": [
+                                    {
+                                        "frameId": "f1",
+                                        "kind": "text",
+                                        "role": "assistant",
+                                        "text": "prefix ",
+                                    },
+                                    {
+                                        "frameId": "thought",
+                                        "kind": "thinking",
+                                        "text": "thinking",
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                    {**queued, "state": state},
+                ],
+            },
+        }
+    )
+    ops = []
+    for frame_id, kind, prefix in (
+        ("f1", "text", "prefix "),
+        ("thought", "thinking", "thinking"),
+    ):
+        if operation == "append":
+            ops.append(
+                {
+                    "op": operation,
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t1",
+                        "stepId": "s1",
+                        "frameId": frame_id,
+                    },
+                    "offset": len(prefix),
+                    "text": "tail",
+                }
+            )
+        else:
+            frame = {"frameId": frame_id, "kind": kind, "text": prefix + "tail"}
+            if kind == "text":
+                frame["role"] = "assistant"
+            ops.append(
+                {"op": operation, "turnId": "t1", "stepId": "s1", "frame": frame}
+            )
+
+    for stream in (projection, restored):
+        events = stream.apply_ops({"seq": 4, "ops": ops})
+        assert [(event["payload"], event["offset"]) for event in events] == [
+            ({"type": "assistant.delta", "delta": "tail"}, 7),
+            ({"type": "thinking.delta", "delta": "tail"}, 8),
+        ]
+        assert _in_flight_assistant_text(stream.snapshot(), turn_id=1) == "prefix tail"
+        assert _in_flight_thinking_text(stream.snapshot(), turn_id=1) == "thinkingtail"
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "cancelled"])
+def test_latest_terminal_turn_still_emits_output_without_running_work(
+    state: str,
+) -> None:
+    projection = _running_projection()
+    events = projection.apply_ops(
+        {
+            "seq": 2,
+            "ops": [
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t1",
+                        "ordinal": 1,
+                        "state": state,
+                    },
+                }
+            ],
+        }
+    )
+    assert [event["payload"]["type"] for event in events] == ["turn.ended"]
+    events = projection.apply_ops(
+        {
+            "seq": 3,
+            "ops": [
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t1",
+                        "stepId": "s1",
+                        "frameId": "f1",
+                    },
+                    "offset": 7,
+                    "text": "tail",
+                }
+            ],
+        }
+    )
+    assert [event["payload"] for event in events] == [
+        {"type": "assistant.delta", "delta": "tail"}
+    ]
+    assert _persisted_assistant_text(projection.snapshot()) == "prefix tail"
+
+
 @pytest.mark.parametrize("operation", ["append", "frame.upsert"])
 def test_text_corrections_emit_the_reduced_snapshot(operation: str) -> None:
     projection = _running_projection()
