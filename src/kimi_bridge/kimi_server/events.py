@@ -83,7 +83,12 @@ class TranscriptProjection:
         if not isinstance(snapshot, dict):
             raise KimiServerProtocolError("transcript.reset snapshot must be an object")
         resync: dict[str, Any] | None = None
-        if self.started:
+        if self.started or any(
+            isinstance(item, dict)
+            and item.get("kind") == "turn"
+            and item.get("state") == "running"
+            for item in snapshot.get("items") or ()
+        ):
             resync = _resync_event(self.session_id, "transcript_reset", snapshot, seq)
         self._turns.clear()
         self._steps.clear()

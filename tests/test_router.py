@@ -6115,6 +6115,34 @@ async def test_resync_snapshot_rebuilds_in_flight_stream(
     ]
 
 
+async def test_deferred_resync_preserves_the_prefix_at_the_next_step(tmp_path: Path) -> None:
+    client = FakeKimiClient()
+    adapter = FakeAdapter(supports_edits=False)
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=StateStore(tmp_path / "state.json"),
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    conversation_key = "feishu:cli_bot:ou_user"
+    try:
+        await router.handle_inbound(adapter, _message("hello"))
+        await router.dispatch_event(conversation_key, {
+            "type": "resync_required",
+            "payload": {"type": "resync_required"},
+            "snapshot": {
+                "in_flight_turn": {"turn_id": 1, "assistant_text": "existing "},
+                "messages": {"items": []},
+            },
+        })
+        await router.dispatch_event(conversation_key, _event("assistant.delta", delta="suffix"))
+        await router.dispatch_event(conversation_key, _event("turn.step.started", step=2))
+        assert [text for _, _, text in adapter.sent] == ["existing suffix"]
+        assert adapter.edits == []
+    finally:
+        await router.close()
+
+
 async def test_render_thinking_is_default_off_persisted_and_idempotent(
     tmp_path: Path,
 ) -> None:

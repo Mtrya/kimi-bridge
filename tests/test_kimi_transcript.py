@@ -639,9 +639,51 @@ def test_projection_reset_rebuilds_state_and_reports_resync() -> None:
     assert resync["payload"]["reason"] == "transcript_reset"
     assert resync["snapshot"]["as_of_seq"] == 7
     assert projection.seq == 7
-    # An initial reset never reports a resync.
+    # An idle initial reset does not require a resync.
     fresh = TranscriptProjection("session-1")
     assert fresh.apply_reset({"agent_id": "main", "seq": 1, "snapshot": {"items": []}}) == []
+
+
+def test_initial_reset_restores_the_running_answer_and_thinking_prefixes() -> None:
+    from kimi_bridge.kimi_server.events import TranscriptProjection
+
+    projection = TranscriptProjection("session-1")
+    events = projection.apply_reset({
+        "seq": 5,
+        "snapshot": {
+            "items": [{
+                "kind": "turn",
+                "turnId": "turn-1",
+                "ordinal": 1,
+                "state": "running",
+                "steps": [{
+                    "stepId": "step-1",
+                    "ordinal": 1,
+                    "state": "running",
+                    "frames": [
+                        {"frameId": "thought-1", "kind": "thinking", "text": "existing thought"},
+                        {"frameId": "answer-1", "kind": "text", "role": "assistant", "text": "existing "},
+                    ],
+                }],
+            }],
+        },
+    })
+    assert len(events) == 1
+    assert events[0]["type"] == "resync_required"
+    snapshot = events[0]["snapshot"]
+    assert _in_flight_assistant_text(snapshot) == "existing "
+    assert _in_flight_thinking_text(snapshot) == "existing thought"
+
+    suffix = projection.apply_ops({
+        "seq": 6,
+        "ops": [{
+            "op": "append",
+            "target": {"type": "frame", "turnId": "turn-1", "stepId": "step-1", "frameId": "answer-1"},
+            "offset": 9,
+            "text": "suffix",
+        }],
+    })
+    assert [event["payload"] for event in suffix] == [{"type": "assistant.delta", "delta": "suffix"}]
 
 
 def test_projection_maps_failed_turns_to_terminal_notices() -> None:

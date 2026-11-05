@@ -1446,7 +1446,7 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     # The output drain ends once a non-task frame arrives after the response.
     watch_socket._task_output_frames_after_response = [
         {
-            "type": "task_output",
+            "type": "task.output",
             "session_id": "session-1",
             "agent_id": "main",
             "task_id": "bash-1",
@@ -2229,6 +2229,113 @@ def _prompt_completed_ops(seq: int) -> dict[str, Any]:
         ],
         seq,
     )
+
+
+@pytest.mark.parametrize("output_position", ["before_subscribe_ack", "before_response", "after_response"])
+async def test_task_watch_collects_output_around_acknowledgements(output_position: str) -> None:
+    output = {
+        "type": "task.output",
+        "session_id": "session-1",
+        "agent_id": "main",
+        "task_id": "bash-1",
+        "offset": 0,
+        "text": "task output",
+    }
+    socket = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=[] if output_position == "after_response" else [output],
+        events_before_ack=output_position == "before_subscribe_ack",
+    )
+    socket._task_output_frames_after_response = [
+        *([output] if output_position == "after_response" else []),
+        {"type": "goal", "session_id": "session-1", "agent_id": "main"},
+    ]
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect([socket]),
+    ) as client:
+        task = await client.get_task("session-1", "bash-1")
+    assert task.output_preview == output["text"]
+    assert task.output_bytes == len(output["text"])
+
+
+@pytest.mark.parametrize("frame_type", ["task.output", "task"])
+async def test_task_watch_returns_while_task_frames_keep_arriving(frame_type: str) -> None:
+    class StreamingTaskSocket(FakeWebSocket):
+        output_offset = 0
+
+        async def recv(self) -> str:
+            if not self._incoming.empty():
+                return await super().recv()
+            await asyncio.sleep(0.01)
+            frame = {
+                "type": frame_type,
+                "session_id": "session-1",
+                "agent_id": "main",
+            }
+            if frame_type == "task.output":
+                frame.update(task_id="bash-1", offset=self.output_offset, text=".")
+                self.output_offset += 1
+            else:
+                frame.update(_task_payload("bash-1"))
+                frame["event_created_at"] = "2026-11-05T00:00:00Z"
+            return json.dumps(frame)
+
+    socket = StreamingTaskSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        task_responses=[{"type": "response", "code": 0, "task": _task_payload("bash-1")}],
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect([socket]),
+        timeout=2.0,
+    ) as client:
+        task = await client.get_task("session-1", "bash-1")
+    assert task.id == "bash-1"
+    assert task.status == "running"
+    if frame_type == "task.output":
+        assert task.output_preview
+
+
+async def test_new_subscription_seeds_a_fresh_consumer_with_the_running_prefix() -> None:
+    running_turn = {
+        "kind": "turn",
+        "turnId": "turn-1",
+        "ordinal": 1,
+        "state": "running",
+        "steps": [{
+            "stepId": "step-1",
+            "ordinal": 1,
+            "state": "running",
+            "frames": [{
+                "frameId": "answer-1", "kind": "text", "role": "assistant", "text": "existing ",
+            }],
+        }],
+    }
+    sockets = [
+        FakeWebSocket(subscribe_payload={"accepted": ["session-1"]}),
+        FakeWebSocket(subscribe_payload={"accepted": ["session-1"]}),
+    ]
+    for socket in sockets:
+        socket._reset_snapshot_items = [running_turn]
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect(sockets),
+    ) as client:
+        for _ in sockets:
+            events = _session_events(client, "session-1")
+            try:
+                baseline = await asyncio.wait_for(anext(events), 1)
+                assert baseline["type"] == "resync_required"
+                assert baseline["snapshot"]["in_flight_turn"]["assistant_text"] == "existing "
+            finally:
+                await events.aclose()
 
 
 async def test_subscribe_v2_resumes_the_session_without_a_status_call() -> None:

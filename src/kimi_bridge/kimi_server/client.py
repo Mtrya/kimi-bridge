@@ -731,7 +731,7 @@ class KimiServerClient:
         output = "".join(
             str(frame.get("text") or "")
             for frame in frames
-            if frame.get("type") == "task_output" and frame.get("task_id") == task_id
+            if frame.get("type") == "task.output" and frame.get("task_id") == task_id
         )
         if output:
             preview = output[-output_bytes:] if output_bytes else ""
@@ -1052,9 +1052,10 @@ class KimiServerClient:
         """
 
         ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
-        projection = self._transcripts.setdefault(
-            session_id, TranscriptProjection(session_id)
-        )
+        # A new consumer needs a baseline; only this generator's transport
+        # reconnects may resume from its existing presentation state.
+        projection = TranscriptProjection(session_id)
+        self._transcripts[session_id] = projection
         reconnect_delay = self._reconnect_initial_backoff
         subscribed_once = False
         consecutive_ack_mismatches = 0
@@ -1257,7 +1258,7 @@ class KimiServerClient:
                         frame
                         for frame in pending_frames
                         if frame.get("type")
-                        in ("task.list", "task", "task_output", "response")
+                        in ("task.list", "task", "task.output", "response")
                     ]
                     if request is not None:
                         request_id = uuid.uuid4().hex
@@ -1286,7 +1287,7 @@ class KimiServerClient:
                             ):
                                 frames.append(frame)
                                 break
-                            if frame_type in ("task", "task_output"):
+                            if frame_type in ("task", "task.output"):
                                 frames.append(frame)
                         await self._drain_task_output(ws, frames)
                     return frames
@@ -1298,7 +1299,7 @@ class KimiServerClient:
     async def _drain_task_output(
         self, ws: Any, frames: list[dict[str, Any]]
     ) -> None:
-        """Collect output frames that follow a task watch acknowledgement."""
+        """Collect task output within a fixed window after acknowledgement."""
 
         deadline = asyncio.get_running_loop().time() + _TASK_OUTPUT_GRACE_SECONDS
         while True:
@@ -1318,12 +1319,8 @@ class KimiServerClient:
             if frame_type == "ping":
                 await self._send_pong(ws, frame)
                 continue
-            if frame_type in ("task_output", "task"):
+            if frame_type in ("task.output", "task"):
                 frames.append(frame)
-                deadline = (
-                    asyncio.get_running_loop().time()
-                    + _TASK_OUTPUT_GRACE_SECONDS
-                )
                 continue
             return
 
