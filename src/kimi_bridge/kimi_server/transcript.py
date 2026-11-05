@@ -4,13 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from .events import _EventCursor
 
-
-def snapshot_from_transcript(
-    transcript: dict[str, Any], cursor: _EventCursor
-) -> dict[str, Any]:
-    """Keep transcript sequence numbers separate from session-event cursors."""
+def snapshot_from_transcript(transcript: dict[str, Any]) -> dict[str, Any]:
+    """Keep the transcript's own sequence watermark on the bridge snapshot."""
 
     attachments = {item["attachmentId"]: item for item in transcript["attachments"]}
     messages: list[dict[str, Any]] = []
@@ -23,7 +19,7 @@ def snapshot_from_transcript(
         if opener:
             messages.append(_message("user", opener, prompt_id))
         last_assistant: list[dict[str, Any]] = []
-        for step in turn["steps"]:
+        for step in turn.get("steps") or ():
             assistant: list[dict[str, Any]] = []
             for frame in step["frames"]:
                 if frame["kind"] == "thinking":
@@ -59,8 +55,7 @@ def snapshot_from_transcript(
             if prompt_id is not None:
                 in_flight["current_prompt_id"] = prompt_id
     return {
-        "as_of_seq": cursor.seq,
-        "epoch": cursor.epoch,
+        "as_of_seq": transcript["seq"],
         "messages": {
             "items": messages[-100:],
             "has_more": transcript["has_more"] or len(messages) > 100,

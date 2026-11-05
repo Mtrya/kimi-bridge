@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from kimi_bridge.kimi_server.events import _EventCursor
 from kimi_bridge.kimi_server.transcript import snapshot_from_transcript
 from kimi_bridge.router.formatting import (
     _format_history,
@@ -93,11 +92,10 @@ def test_transcript_preserves_message_boundaries_media_and_prompt_ownership() ->
                     "steps": [],
                 },
             ],
-        },
-        _EventCursor(42, "events-epoch"),
+        }
     )
 
-    assert (snapshot["as_of_seq"], snapshot["epoch"]) == (42, "events-epoch")
+    assert snapshot["as_of_seq"] == 999
     assert snapshot["in_flight_turn"] is None
     assert snapshot["messages"]["has_more"] is True
     assert _persisted_assistant_text(snapshot, prompt_id="prompt-7") == "All correct"
@@ -136,19 +134,18 @@ def test_running_transcript_uses_current_step_and_clears_on_completion() -> None
             },
         ],
     }
-    transcript = {"items": [turn], "attachments": [], "has_more": False}
-    cursor = _EventCursor(50, "epoch")
-    snapshot = snapshot_from_transcript(transcript, cursor)
+    transcript = {"items": [turn], "attachments": [], "has_more": False, "seq": 50}
+    snapshot = snapshot_from_transcript(transcript)
     assert _in_flight_assistant_text(snapshot, turn_id=12) == "Current answer"
     assert _in_flight_thinking_text(snapshot, turn_id=12) == "Current thought"
     assert _in_flight_assistant_text(snapshot, turn_id=11) is None
     assert snapshot["in_flight_turn"]["current_prompt_id"] == "prompt-12"
 
     turn["steps"].append({"frames": []})
-    snapshot = snapshot_from_transcript(transcript, cursor)
+    snapshot = snapshot_from_transcript(transcript)
     assert _in_flight_assistant_text(snapshot, turn_id=12) == ""
     turn["state"] = "completed"
-    assert snapshot_from_transcript(transcript, cursor)["in_flight_turn"] is None
+    assert snapshot_from_transcript(transcript)["in_flight_turn"] is None
 
 
 def test_tool_only_final_step_does_not_reuse_an_earlier_answer() -> None:
@@ -175,8 +172,8 @@ def test_tool_only_final_step_does_not_reuse_an_earlier_answer() -> None:
             ],
             "attachments": [],
             "has_more": False,
-        },
-        _EventCursor(10, "epoch"),
+            "seq": 10,
+        }
     )
     assert _persisted_assistant_text(snapshot) == ""
     assert _persisted_thinking_text(snapshot) is None
@@ -198,8 +195,8 @@ def test_unresolved_attachment_keeps_a_placeholder_without_losing_the_message() 
                 {"attachmentId": "known", "mediaType": "image/png", "name": "plot.png"}
             ],
             "has_more": False,
-        },
-        _EventCursor(10, "epoch"),
+            "seq": 10,
+        }
     )
     assert snapshot["messages"]["items"] == [
         {
@@ -210,3 +207,468 @@ def test_unresolved_attachment_keeps_a_placeholder_without_losing_the_message() 
             ],
         }
     ]
+
+
+def _ops_frame(ops: list[dict], seq: int) -> dict:
+    """One transcript.ops payload, as extracted from the frame by the client."""
+
+    return {"ops": ops, "seq": seq}
+
+
+def test_projection_folds_turn_step_delta_and_prompt_lifecycle() -> None:
+    from kimi_bridge.kimi_server.events import TranscriptProjection
+
+    projection = TranscriptProjection("session-1")
+    streaming = projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "prompt.upsert",
+                    "prompt": {
+                        "promptId": "prompt-1",
+                        "status": "running",
+                    },
+                },
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "running",
+                        "triggerPromptId": "prompt-1",
+                    },
+                },
+                {
+                    "op": "step.upsert",
+                    "turnId": "t0",
+                    "step": {
+                        "kind": "step",
+                        "stepId": "t0.1",
+                        "turnId": "t0",
+                        "ordinal": 1,
+                        "state": "running",
+                    },
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "thinking",
+                        "frameId": "t0.1.f1",
+                        "text": "",
+                    },
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "t0.1.f1",
+                    },
+                    "offset": 0,
+                    "text": "Thinking ",
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "t0.1.f1",
+                    },
+                    "offset": 8,
+                    "text": "hard",
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "t0.1.f2",
+                        "role": "assistant",
+                        "text": "",
+                    },
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "t0.1.f2",
+                    },
+                    "offset": 0,
+                    "text": "ok",
+                },
+            ],
+            2,
+        )
+    )
+    assert [event["payload"] for event in streaming] == [
+        {"type": "turn.started", "turnId": 0},
+        {"type": "turn.step.started", "step": 1},
+        {"type": "thinking.delta", "delta": "Thinking "},
+        {"type": "thinking.delta", "delta": "hard"},
+        {"type": "assistant.delta", "delta": "ok"},
+    ]
+    events = []
+    for event in projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "thinking",
+                        "frameId": "t0.1.f1",
+                        "text": "Thinking hard",
+                    },
+                },
+                {
+                    "op": "step.upsert",
+                    "turnId": "t0",
+                    "step": {
+                        "kind": "step",
+                        "stepId": "t0.1",
+                        "turnId": "t0",
+                        "ordinal": 1,
+                        "state": "completed",
+                        "usage": {
+                            "inputOther": 10,
+                            "output": 2,
+                            "inputCacheRead": 4,
+                            "inputCacheCreation": 1,
+                        },
+                    },
+                },
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "completed",
+                        "triggerPromptId": "prompt-1",
+                    },
+                },
+                {
+                    "op": "prompt.upsert",
+                    "prompt": {
+                        "promptId": "prompt-1",
+                        "status": "completed",
+                    },
+                },
+            ],
+            3,
+        )
+    ):
+        events.append(event)
+    # Frame consolidation and terminal upserts deduplicate streaming events.
+    assert events == [
+        {
+            "type": "session_event",
+            "session_id": "session-1",
+            "seq": 3,
+            "payload": {"type": "turn.ended", "turnId": 0, "reason": "completed"},
+        },
+        {
+            "type": "session_event",
+            "session_id": "session-1",
+            "seq": 3,
+            "payload": {"type": "prompt.completed", "promptId": "prompt-1"},
+        },
+    ]
+    assert projection.usage_totals() == {
+        "inputOther": 10,
+        "output": 2,
+        "inputCacheRead": 4,
+        "inputCacheCreation": 1,
+    }
+    # Replayed batches at or below the applied sequence are ignored.
+    assert projection.apply_ops(_ops_frame([{"op": "items.remove", "ids": []}], 3)) == []
+
+
+def test_projection_emits_delta_events_for_append_ops() -> None:
+    from kimi_bridge.kimi_server.events import TranscriptProjection
+
+    projection = TranscriptProjection("session-1")
+    projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "running",
+                    },
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {"kind": "thinking", "frameId": "f1", "text": ""},
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f2",
+                        "role": "assistant",
+                        "text": "",
+                    },
+                },
+                {
+                    "op": "frame.upsert",
+                    "turnId": "t0",
+                    "stepId": "t0.1",
+                    "frame": {
+                        "kind": "text",
+                        "frameId": "f3",
+                        "role": "user",
+                        "text": "",
+                    },
+                },
+            ],
+            2,
+        )
+    )
+    deltas = projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "f1",
+                    },
+                    "offset": 0,
+                    "text": "think",
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "f2",
+                    },
+                    "offset": 0,
+                    "text": "answer",
+                },
+                {
+                    "op": "append",
+                    "target": {
+                        "type": "frame",
+                        "turnId": "t0",
+                        "stepId": "t0.1",
+                        "frameId": "f3",
+                    },
+                    "offset": 0,
+                    "text": "tool result",
+                },
+            ],
+            3,
+        )
+    )
+    assert deltas == [
+        {
+            "type": "session_event",
+            "session_id": "session-1",
+            "seq": 3,
+            "payload": {"type": "thinking.delta", "delta": "think"},
+        },
+        {
+            "type": "session_event",
+            "session_id": "session-1",
+            "seq": 3,
+            "payload": {"type": "assistant.delta", "delta": "answer"},
+        },
+    ]
+
+
+def test_projection_maps_notices_and_compaction_markers() -> None:
+    from kimi_bridge.kimi_server.events import (
+        TranscriptProjection,
+        session_notice_from_event,
+    )
+
+    projection = TranscriptProjection("session-1")
+    events = projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "marker.upsert",
+                    "item": {
+                        "kind": "marker",
+                        "markerId": "m1",
+                        "marker": "compaction",
+                        "payload": {"phase": "started", "trigger": "manual"},
+                    },
+                },
+                {
+                    "op": "marker.upsert",
+                    "item": {
+                        "kind": "marker",
+                        "markerId": "m2",
+                        "marker": "notice",
+                        "payload": {
+                            "level": "error",
+                            "message": "Model not set",
+                            "event": {
+                                "code": "model.not_configured",
+                                "message": "Model not set",
+                                "retryable": False,
+                            },
+                        },
+                    },
+                },
+                {
+                    "op": "marker.upsert",
+                    "item": {
+                        "kind": "marker",
+                        "markerId": "m3",
+                        "marker": "notice",
+                        "payload": {
+                            "level": "warning",
+                            "message": "Low context",
+                        },
+                    },
+                },
+                {
+                    "op": "marker.upsert",
+                    "item": {
+                        "kind": "marker",
+                        "markerId": "m4",
+                        "marker": "compaction",
+                        "payload": {
+                            "phase": "completed",
+                            "result": {
+                                "compactedCount": 3,
+                                "tokensBefore": 100,
+                                "tokensAfter": 80,
+                            },
+                        },
+                    },
+                },
+            ],
+            2,
+        )
+    )
+    payloads = [event["payload"] for event in events]
+    assert payloads == [
+        {"type": "compaction.started", "trigger": "manual"},
+        {
+            "type": "error",
+            "message": "Model not set",
+            "code": "model.not_configured",
+            "retryable": False,
+        },
+        {"type": "warning", "message": "Low context"},
+        {
+            "type": "compaction.completed",
+            "result": {
+                "compactedCount": 3,
+                "tokensBefore": 100,
+                "tokensAfter": 80,
+            },
+        },
+    ]
+    assert session_notice_from_event(events[1]) is not None
+    assert session_notice_from_event(events[1]).kind == "error"
+    assert session_notice_from_event(events[2]).kind == "warning"
+
+
+def test_projection_reset_rebuilds_state_and_reports_resync() -> None:
+    from kimi_bridge.kimi_server.events import TranscriptProjection
+
+    projection = TranscriptProjection("session-1")
+    projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "running",
+                    },
+                }
+            ],
+            4,
+        )
+    )
+    resync_events = projection.apply_reset(
+        {
+            "type": "transcript.reset",
+            "agent_id": "main",
+            "seq": 7,
+            "snapshot": {
+                "items": [
+                    {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "completed",
+                        "triggerPromptId": "prompt-1",
+                        "steps": [],
+                    }
+                ],
+                "interactions": [],
+                "attachments": [],
+                "prompts": [],
+                "hasMoreOlder": False,
+            },
+            "has_more_older": False,
+        }
+    )
+    assert len(resync_events) == 1
+    resync = resync_events[0]
+    assert resync["type"] == "resync_required"
+    assert resync["payload"]["reason"] == "transcript_reset"
+    assert resync["snapshot"]["as_of_seq"] == 7
+    assert projection.seq == 7
+    # An initial reset never reports a resync.
+    fresh = TranscriptProjection("session-1")
+    assert fresh.apply_reset({"agent_id": "main", "seq": 1, "snapshot": {"items": []}}) == []
+
+
+def test_projection_maps_failed_turns_to_terminal_notices() -> None:
+    from kimi_bridge.kimi_server.events import (
+        TranscriptProjection,
+        session_notice_from_event,
+    )
+
+    projection = TranscriptProjection("session-1")
+    (event,) = projection.apply_ops(
+        _ops_frame(
+            [
+                {
+                    "op": "turn.upsert",
+                    "turn": {
+                        "kind": "turn",
+                        "turnId": "t0",
+                        "ordinal": 0,
+                        "state": "failed",
+                        "error": "Model not set",
+                    },
+                }
+            ],
+            2,
+        )
+    )
+    notice = session_notice_from_event(event)
+    assert notice is not None
+    assert notice.kind == "error"
+    assert notice.message == "The turn failed before completing."

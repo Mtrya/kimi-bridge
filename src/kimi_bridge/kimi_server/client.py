@@ -7,6 +7,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -31,7 +32,7 @@ from .contract import (
     KIMI_REST_OPERATIONS,
     KIMI_WEBSOCKET_PATH,
 )
-from .events import _EventCursor, _advance_cursor, _cursor_from_mapping
+from .events import TranscriptProjection
 from .prompts import deliver_prompt
 from .supervisor import KimiServerSupervisor
 from .transcript import snapshot_from_transcript
@@ -80,6 +81,7 @@ from .wire import (
 LOGGER = logging.getLogger(__name__)
 _MAIN_AGENT_ID = "main"
 _MAX_CONSECUTIVE_ACK_MISMATCHES = 3
+_TASK_OUTPUT_GRACE_SECONDS = 1.0
 
 
 class _WebSocketAckMismatch(KimiServerProtocolError):
@@ -130,7 +132,9 @@ class KimiServerClient:
         self._subscription_lock = asyncio.Lock()
         self._secondary_model_lock = asyncio.Lock()
         self._subscription_ready: dict[str, asyncio.Event] = {}
-        self._usage_totals: dict[str, SessionUsage] = {}
+        self._transcripts: dict[str, TranscriptProjection] = {}
+        self._agent_frames: dict[str, dict[str, Any]] = {}
+        self._usage_frames: dict[str, dict[str, Any]] = {}
         self._active_ws: Any | None = None
         self._closed = False
 
@@ -265,7 +269,9 @@ class KimiServerClient:
         if self._supervisor is None:
             raise KimiServerOperationError("server restart requires a managed kimi server")
         connection = await self._supervisor.restart()
-        self._usage_totals.clear()
+        self._transcripts.clear()
+        self._agent_frames.clear()
+        self._usage_frames.clear()
         return connection
 
     async def check_server_version(
@@ -401,25 +407,51 @@ class KimiServerClient:
         return session.get("archived") is True
 
     async def get_session_status(self, session_id: str) -> SessionStatus:
+        """Return live session status from stored metadata and agent frames.
+
+        Kimi 2.5 removed the session status endpoint; the stored session
+        object carries busy state, agent configuration, and context usage.
+        The effective thinking effort is resolved per prompt and is only
+        published through agent frames, so it supplements the stored value.
+        """
+
         data = await self._request_operation(
-            "session_status", path_parameters={"session_id": session_id}
+            "get_session", path_parameters={"session_id": session_id}
         )
-        return _session_status_from_wire(data)
+        status = _session_status_from_wire(data)
+        agent = self._agent_frames.get(session_id)
+        if not status.thinking_effort:
+            thinking = agent.get("thinking") if agent is not None else None
+            if isinstance(thinking, str) and thinking:
+                status = replace(status, thinking_effort=thinking)
+        return status
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
-        status = await self.get_session_status(session_id)
-        totals = self._usage_totals.get(session_id)
+        """Return usage from per-step transcript records and usage frames."""
+
+        totals = self._transcripts.get(session_id)
+        summed = totals.usage_totals() if totals is not None else None
+        usage = self._usage_frames.get(session_id)
+        context = usage if usage is not None else {}
+        context_tokens = context.get("context_tokens")
+        context_limit = context.get("max_context_tokens")
         return SessionUsage(
-            input_tokens=(totals.input_tokens if totals is not None else None),
-            output_tokens=(totals.output_tokens if totals is not None else None),
+            input_tokens=(
+                int(summed["inputOther"]) if summed is not None else None
+            ),
+            output_tokens=(int(summed["output"]) if summed is not None else None),
             cache_read_tokens=(
-                totals.cache_read_tokens if totals is not None else None
+                int(summed["inputCacheRead"]) if summed is not None else None
             ),
             cache_creation_tokens=(
-                totals.cache_creation_tokens if totals is not None else None
+                int(summed["inputCacheCreation"]) if summed is not None else None
             ),
-            context_tokens=status.context_tokens,
-            context_limit=status.context_limit,
+            context_tokens=(
+                int(context_tokens) if context_tokens is not None else None
+            ),
+            context_limit=(
+                int(context_limit) if context_limit is not None else None
+            ),
         )
 
     async def compact_session(
@@ -634,13 +666,29 @@ class KimiServerClient:
     async def list_tasks(
         self, session_id: str, *, status: TaskStatus | None = None
     ) -> list[TaskInfo]:
-        params = {"status": status} if status is not None else None
-        data = await self._request_operation(
-            "list_tasks",
-            path_parameters={"session_id": session_id},
-            params=params,
+        """List the tasks the subscribed agents are running right now.
+
+        Kimi 2.5 moved task discovery onto the WebSocket: subscribing to a
+        session pushes a ``task.list`` frame with every task an agent is
+        currently running, so the bridge deliberately sees no ended tasks.
+        """
+
+        frames = await self._task_socket_frames(session_id)
+        task_list = next(
+            (frame for frame in frames if frame.get("type") == "task.list"),
+            None,
         )
-        return [_task_info_from_wire(item) for item in data["items"]]
+        if task_list is None:
+            raise KimiServerProtocolError(
+                "task listing subscription delivered no task.list frame"
+            )
+        tasks = [
+            _task_info_from_wire(task, session_id=session_id)
+            for task in task_list["tasks"]
+        ]
+        if status is not None:
+            tasks = [task for task in tasks if task.status == status]
+        return tasks
 
     async def get_task(
         self,
@@ -649,21 +697,72 @@ class KimiServerClient:
         *,
         output_bytes: int = 8192,
     ) -> TaskInfo:
+        """Watch one task and return its state plus any streamed output."""
+
         if output_bytes < 0:
             raise ValueError("output_bytes must be non-negative")
-        data = await self._request_operation(
-            "get_task",
-            path_parameters={"session_id": session_id, "task_id": task_id},
-            params={"with_output": True, "output_bytes": output_bytes},
+        frames = await self._task_socket_frames(
+            session_id,
+            request={
+                "type": "task.watch",
+                "session_id": session_id,
+                "agent_id": _MAIN_AGENT_ID,
+                "task_id": task_id,
+                "since_offset": 0,
+                "tail_bytes": output_bytes,
+            },
         )
-        return _task_info_from_wire(data)
+        response = next(
+            (frame for frame in frames if frame.get("type") == "response"), None
+        )
+        if response is None:
+            raise KimiServerProtocolError(
+                f"task watch for {task_id!r} was not acknowledged"
+            )
+        if response.get("code") != 0:
+            raise KimiServerAPIError(
+                response.get("code", -1),
+                str(response.get("msg") or "task watch failed"),
+            )
+        task = response.get("task")
+        if not isinstance(task, dict):
+            raise KimiServerProtocolError("task watch response has no task")
+        info = _task_info_from_wire(task, session_id=session_id)
+        output = "".join(
+            str(frame.get("text") or "")
+            for frame in frames
+            if frame.get("type") == "task_output" and frame.get("task_id") == task_id
+        )
+        if output:
+            preview = output[-output_bytes:] if output_bytes else ""
+            return replace(info, output_preview=preview, output_bytes=len(output))
+        return info
 
     async def cancel_task(self, session_id: str, task_id: str) -> bool:
-        data = await self._request_operation(
-            "cancel_task",
-            path_parameters={"session_id": session_id, "task_id": task_id},
+        """Stop one running task through the WebSocket task command."""
+
+        frames = await self._task_socket_frames(
+            session_id,
+            request={
+                "type": "task.stop",
+                "session_id": session_id,
+                "agent_id": _MAIN_AGENT_ID,
+                "task_id": task_id,
+            },
         )
-        return bool(data["cancelled"])
+        response = next(
+            (frame for frame in frames if frame.get("type") == "response"), None
+        )
+        if response is None:
+            raise KimiServerProtocolError(
+                f"task stop for {task_id!r} was not acknowledged"
+            )
+        if response.get("code") != 0:
+            raise KimiServerAPIError(
+                response.get("code", -1),
+                str(response.get("msg") or "task stop failed"),
+            )
+        return True
 
     async def list_skills(self, session_id: str) -> list[SkillInfo]:
         data = await self._request_operation(
@@ -840,18 +939,42 @@ class KimiServerClient:
         return bool(data["aborted"])
 
     async def get_snapshot(self, session_id: str) -> dict[str, Any]:
-        """Read history without racing Kimi's append-log bookkeeping.
+        """Read history through the agent transcript's own sequence watermark.
 
-        The legacy snapshot endpoint reads the active wire log through its
-        writer's store. A concurrent append can then be mistaken for an external
-        modification, blocking cron submission. Transcript uses a separate read
-        cache. Bracket its read with session-event watermarks from a separate
-        subscription and retry if a durable event crossed the read. Volatile
-        deltas reuse that watermark and are reconciled by their text offsets.
+        The transcript REST surface reads each agent's live in-memory store
+        and reports the sequence number its journal has reached, so the
+        snapshot is consistent without a second subscription.
+        """
+
+        transcript = await self._request_operation(
+            "transcript",
+            path_parameters={"session_id": session_id},
+            params={"agent_id": _MAIN_AGENT_ID, "page_size": 100},
+        )
+        return snapshot_from_transcript(transcript)
+
+    async def wait_until_subscribed(
+        self, session_id: str, *, timeout: float = 15.0
+    ) -> None:
+        """Wait until ``subscribe_events`` has received its subscribe ack."""
+
+        ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
+        await asyncio.wait_for(ready.wait(), timeout)
+
+    async def probe_subscription(
+        self, session_id: str, *, since: int | None = None
+    ) -> int:
+        """Subscribe once without submitting a prompt and verify the burst.
+
+        Kimi 2.5 resumes a stored session inside ``subscribe_v2`` and pushes
+        the agent state frames (task.list, agent, usage, goal, todo) and a
+        transcript reset before the acknowledgement, so a credential-free
+        subscription proves the whole materialization path. Resuming with
+        ``since`` must replay operations instead of resetting the stream.
+        Returns the transcript sequence the subscription reached.
         """
 
         connection = await self._connection_info()
-        await self._materialize_session(session_id, connection)
         try:
             async with asyncio.timeout(self._timeout):
                 async with self._ws_connect(
@@ -864,87 +987,74 @@ class KimiServerClient:
                 ) as ws:
                     await self._expect_server_hello(ws)
                     await self._send_client_hello(ws)
-                    cursor = await self._snapshot_watermark(ws, session_id)
-                    while True:
-                        transcript = await self._request_operation(
-                            "transcript",
-                            path_parameters={"session_id": session_id},
-                            params={"agent_id": _MAIN_AGENT_ID, "page_size": 100},
-                            connection=connection,
+                    _subscribe_ack, pending_frames = await self._send_subscribe_v2(
+                        ws, session_id, since
+                    )
+                    frame_types = {frame.get("type") for frame in pending_frames}
+                    burst = {"task.list", "agent", "usage", "goal", "todo"}
+                    if not burst.issubset(frame_types):
+                        raise KimiServerProtocolError(
+                            "subscription acknowledgement was not preceded by "
+                            "the agent state burst"
                         )
-                        after = await self._snapshot_watermark(ws, session_id)
-                        if after == cursor:
-                            return snapshot_from_transcript(transcript, cursor)
-                        cursor = after
+                    seq = since
+                    if since is None:
+                        if "transcript.reset" not in frame_types:
+                            raise KimiServerProtocolError(
+                                "a fresh subscription was not preceded by a "
+                                "transcript reset"
+                            )
+                        reset = next(
+                            frame
+                            for frame in pending_frames
+                            if frame.get("type") == "transcript.reset"
+                        )
+                        reset_seq = reset.get("payload", {}).get("seq")
+                        if not isinstance(reset_seq, int) or isinstance(
+                            reset_seq, bool
+                        ):
+                            raise KimiServerProtocolError(
+                                "transcript reset carries no sequence number"
+                            )
+                        seq = reset_seq
+                    elif "transcript.reset" in frame_types:
+                        raise KimiServerProtocolError(
+                            "a resumed subscription reset the transcript stream"
+                        )
+                    else:
+                        for frame in pending_frames:
+                            if frame.get("type") != "transcript.ops":
+                                continue
+                            ops_seq = frame.get("payload", {}).get("seq")
+                            if isinstance(ops_seq, int) and not isinstance(
+                                ops_seq, bool
+                            ):
+                                seq = max(seq or 0, ops_seq)
+                    await self._get_pending_interaction_ids(session_id, connection)
+                    return seq if seq is not None else 0
         except (OSError, TimeoutError, ConnectionClosed, InvalidStatus) as exc:
             raise KimiServerTransportError(
-                f"kimi server snapshot recovery failed: {type(exc).__name__}"
+                f"kimi server probe subscription failed: {type(exc).__name__}"
             ) from exc
-
-    async def _snapshot_watermark(self, ws: Any, session_id: str) -> _EventCursor:
-        ack, _pending = await self._send_subscribe(ws, session_id, None)
-        payload = ack["payload"]
-        if session_id not in payload.get("accepted", []):
-            raise KimiServerProtocolError(
-                f"snapshot subscription was not accepted for {session_id!r}"
-            )
-        cursor = _cursor_from_mapping(
-            payload.get("cursors", {}).get(session_id)
-        )
-        if not isinstance(cursor.epoch, str) or not cursor.epoch:
-            raise KimiServerProtocolError("snapshot subscription cursor has no epoch")
-        return cursor
-
-    async def wait_until_subscribed(
-        self, session_id: str, *, timeout: float = 15.0
-    ) -> None:
-        """Wait until ``subscribe_events`` has received its subscribe ack."""
-
-        ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
-        await asyncio.wait_for(ready.wait(), timeout)
-
-    async def probe_subscription(self, session_id: str) -> None:
-        """Materialize and subscribe once without submitting a prompt."""
-
-        connection = await self._connection_info()
-        await self._materialize_session(session_id, connection)
-        async with self._ws_connect(
-            _websocket_url(connection.base_url),
-            additional_headers={
-                "Authorization": f"Bearer {connection.token}"
-            },
-            ping_interval=None,
-            max_size=None,
-        ) as ws:
-            await self._expect_server_hello(ws)
-            await self._send_client_hello(ws)
-            subscribe_ack, _pending_frames = await self._send_subscribe(
-                ws, session_id, None
-            )
-            payload = subscribe_ack.get("payload")
-            accepted = payload.get("accepted") if isinstance(payload, dict) else None
-            if not isinstance(accepted, list) or session_id not in accepted:
-                raise KimiServerProtocolError(
-                    "credential-free probe session was not accepted by WebSocket"
-                )
-            await self._get_pending_interaction_ids(session_id, connection)
 
     async def subscribe_events(
         self, session_id: str
     ) -> AsyncIterator[dict[str, Any] | InteractionUpdate | InteractionSnapshot]:
-        """Yield session events and reconnect from their cursor.
+        """Yield semantic session events and reconnect from the transcript seq.
 
-        Only one subscription generator may own the socket at a time. On a
-        reconnect the last ``seq``/``epoch`` is sent as the subscription cursor.
-        If the daemon reports an unusable cursor, or a gap/epoch change is seen,
-        a REST snapshot establishes a fresh cursor before reconnecting. The
-        snapshot is yielded in a ``resync_required`` notification so consumers
-        can rebuild any derived presentation state that volatile deltas had
-        updated.
+        Only one subscription generator may own the socket at a time. The
+        subscription asks for delta-grade transcript frames, folds their
+        operations into the bridge's semantic event vocabulary, and on a
+        reconnect resumes from the last applied sequence. When the journal
+        no longer reaches back, the server resets the stream; the reset
+        snapshot is then yielded in a ``resync_required`` notification so
+        consumers can rebuild any derived presentation state.
         """
 
         ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
-        cursor: _EventCursor | None = None
+        projection = self._transcripts.setdefault(
+            session_id, TranscriptProjection(session_id)
+        )
         reconnect_delay = self._reconnect_initial_backoff
         subscribed_once = False
         consecutive_ack_mismatches = 0
@@ -952,69 +1062,39 @@ class KimiServerClient:
         async with self._subscription_lock:
             while not self._closed:
                 ready.clear()
-                # Usage totals are live-only WebSocket state. A reconnect may
-                # have missed updates, so do not present the previous value as
-                # current until the server publishes another total.
-                self._usage_totals.pop(session_id, None)
                 connection = await self._connection_info()
                 ws_url = _websocket_url(connection.base_url)
                 try:
-                    await self._materialize_session(session_id, connection)
-                    # Confirmed against kimi 0.28.1: WebSocket auth uses the
-                    # same Bearer header as REST; no query token or hello field
-                    # is required.
+                    # Confirmed against kimi 2.5: WebSocket auth uses the
+                    # same Bearer header as REST; no query token or hello
+                    # field is required.
                     async with self._ws_connect(
                         ws_url,
                         additional_headers={
                             "Authorization": f"Bearer {connection.token}"
                         },
                         ping_interval=None,
-                        # Kimi re-emits uploaded prompt media as data URLs in
-                        # session events, so valid frames can exceed the
-                        # websockets library's 1 MiB default.
                         max_size=None,
                     ) as ws:
                         self._active_ws = ws
                         await self._expect_server_hello(ws)
                         await self._send_client_hello(ws)
-                        subscribe_ack, pending_frames = await self._send_subscribe(
-                            ws, session_id, cursor
+                        _subscribe_ack, pending_frames = await self._send_subscribe_v2(
+                            ws, session_id, projection.seq
                         )
-                        ack_payload = subscribe_ack["payload"]
 
-                        if session_id in ack_payload.get("not_found", []):
-                            raise KimiServerProtocolError(
-                                "session was not accepted after public-v1 "
-                                f"materialization: {session_id!r}"
-                            )
-                        if session_id in ack_payload.get("resync_required", []):
-                            cursor, resync_event = await self._snapshot_resync(
-                                session_id, "subscription_cursor_rejected"
-                            )
-                            yield resync_event
-                            continue
-                        if session_id not in ack_payload.get("accepted", []):
-                            raise KimiServerProtocolError(
-                                f"server did not accept subscription for {session_id!r}"
-                            )
-
-                        if cursor is None:
-                            acknowledged = ack_payload.get("cursors", {}).get(
-                                session_id
-                            )
-                            if acknowledged is not None:
-                                cursor = _cursor_from_mapping(acknowledged)
-
-                        # Pending interactions are replayed without sequence numbers.
-                        # Reconcile cards whose completion was missed while offline.
+                        # Pending interactions are replayed without sequence
+                        # numbers. Reconcile cards whose completion was
+                        # missed while offline.
                         interaction_snapshot = InteractionSnapshot(
                             session_id,
                             await self._get_pending_interaction_ids(
                                 session_id, connection
                             ),
                         )
-                        # Frames read before the ack precede this REST snapshot.
-                        # Do not resurrect requests already resolved in that gap.
+                        # Frames read before the ack precede this REST
+                        # snapshot. Do not resurrect requests already
+                        # resolved in that gap.
                         pending_frames = [
                             frame
                             for frame in pending_frames
@@ -1031,117 +1111,79 @@ class KimiServerClient:
                         consecutive_ack_mismatches = 0
                         reconnect_delay = self._reconnect_initial_backoff
                         yield interaction_snapshot
-                        must_reconnect = False
+                        frame_queue: list[dict[str, Any]] = list(pending_frames)
                         while not self._closed:
-                            if pending_frames:
-                                frame = pending_frames.pop(0)
+                            if frame_queue:
+                                frame = frame_queue.pop(0)
                             else:
                                 frame = await self._receive_json(ws)
                             frame_type = frame.get("type")
                             if frame_type == "ping":
                                 await self._send_pong(ws, frame)
                                 continue
-                            if frame_type == "resync_required":
-                                payload = frame.get("payload", {})
-                                if payload.get("session_id") == session_id:
-                                    reason = payload.get("reason")
-                                    cursor, resync_event = await self._snapshot_resync(
-                                        session_id,
-                                        reason
-                                        if isinstance(reason, str)
-                                        else "server_requested",
-                                    )
-                                    yield resync_event
-                                    must_reconnect = True
-                                    break
-                                continue
+                            if frame_type == "error":
+                                self._raise_ws_error(frame)
                             if frame_type == "interaction":
-                                if frame["session_id"] == session_id:
-                                    if (
-                                        frame["status"] == "pending"
-                                        and frame["interaction_id"]
-                                        not in interaction_snapshot.pending_ids
-                                    ):
-                                        # A pending frame buffered in the socket
-                                        # can predate the snapshot, or be new live
-                                        # work. Verify its agent before presenting.
-                                        pending_ids = (
-                                            await self._get_pending_interaction_ids(
-                                                session_id,
-                                                connection,
-                                                agent_id=frame["agent_id"],
-                                            )
+                                if frame.get("session_id") != session_id:
+                                    continue
+                                if (
+                                    frame.get("status") == "pending"
+                                    and frame.get("interaction_id")
+                                    not in interaction_snapshot.pending_ids
+                                ):
+                                    # A pending frame buffered in the socket
+                                    # can predate the snapshot, or be new live
+                                    # work. Verify its agent before presenting.
+                                    pending_ids = (
+                                        await self._get_pending_interaction_ids(
+                                            session_id,
+                                            connection,
+                                            agent_id=frame["agent_id"],
                                         )
-                                        if frame["interaction_id"] not in pending_ids:
-                                            continue
-                                    yield _interaction_update_from_wire(frame)
+                                    )
+                                    if frame["interaction_id"] not in pending_ids:
+                                        continue
+                                yield _interaction_update_from_wire(frame)
                                 continue
-                            if not _is_session_event_frame(frame):
-                                if frame_type == "error":
-                                    self._raise_ws_error(frame)
+                            if frame_type == "transcript.reset":
+                                payload = frame.get("payload")
+                                if not isinstance(payload, dict):
+                                    raise KimiServerProtocolError(
+                                        "transcript.reset frame must carry a payload"
+                                    )
+                                for event in projection.apply_reset(payload):
+                                    yield event
+                                continue
+                            if frame_type == "transcript.ops":
+                                payload = frame.get("payload")
+                                if not isinstance(payload, dict):
+                                    raise KimiServerProtocolError(
+                                        "transcript.ops frame must carry a payload"
+                                    )
+                                for event in projection.apply_ops(payload):
+                                    yield event
+                                continue
+                            if frame_type == "agent":
+                                if frame.get("session_id") == session_id and (
+                                    frame.get("agent_id") == _MAIN_AGENT_ID
+                                ):
+                                    self._agent_frames[session_id] = dict(frame)
+                                continue
+                            if frame_type == "usage":
+                                if frame.get("session_id") == session_id and (
+                                    frame.get("agent_id") == _MAIN_AGENT_ID
+                                ):
+                                    self._usage_frames[session_id] = dict(frame)
+                                continue
+                            if isinstance(frame_type, str):
                                 LOGGER.debug(
                                     "ignoring unexpected WebSocket frame type %r",
                                     frame_type,
                                 )
                                 continue
-                            if frame.get("session_id") not in (None, session_id):
-                                continue
-
-                            # Streaming deltas are volatile and reuse the
-                            # surrounding persisted event's seq. They must be
-                            # delivered, but must not advance the replay cursor.
-                            if frame.get("volatile") is True:
-                                event_epoch = frame.get("epoch")
-                                if (
-                                    cursor is not None
-                                    and cursor.epoch is not None
-                                    and event_epoch is not None
-                                    and event_epoch != cursor.epoch
-                                ):
-                                    cursor, resync_event = await self._snapshot_resync(
-                                        session_id, "epoch_changed"
-                                    )
-                                    yield resync_event
-                                    must_reconnect = True
-                                    break
-                                self._record_session_usage(session_id, frame)
-                                yield frame
-                                continue
-
-                            # This subscription intentionally receives only
-                            # main-agent events. Sequence numbers are global to
-                            # the session, so events from filtered subagents
-                            # leave legitimate gaps in the delivered stream.
-                            disposition = _advance_cursor(
-                                cursor, frame, allow_sequence_gaps=True
+                            raise KimiServerProtocolError(
+                                f"WebSocket frame has no type: {frame!r}"
                             )
-                            if disposition == "duplicate":
-                                continue
-                            if disposition == "resync":
-                                reason = (
-                                    "epoch_changed"
-                                    if cursor is not None
-                                    and cursor.epoch is not None
-                                    and frame.get("epoch") is not None
-                                    and frame.get("epoch") != cursor.epoch
-                                    else "sequence_gap"
-                                )
-                                cursor, resync_event = await self._snapshot_resync(
-                                    session_id, reason
-                                )
-                                yield resync_event
-                                must_reconnect = True
-                                break
-                            cursor = _EventCursor(
-                                seq=int(frame["seq"]),
-                                epoch=frame.get("epoch")
-                                or (cursor.epoch if cursor is not None else None),
-                            )
-                            self._record_session_usage(session_id, frame)
-                            yield frame
-
-                        if must_reconnect:
-                            continue
                 except InvalidStatus as exc:
                     raise KimiServerProtocolError(
                         "kimi server rejected the WebSocket upgrade; check the "
@@ -1181,6 +1223,109 @@ class KimiServerClient:
                 finally:
                     ready.clear()
                     self._active_ws = None
+
+    async def _task_socket_frames(
+        self,
+        session_id: str,
+        *,
+        request: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Open a one-shot task socket and collect its relevant frames.
+
+        Task discovery rides the subscription stream: subscribing pushes the
+        agent's current ``task.list``, and task commands are answered by
+        ``response`` frames matched on their ``request_id``.
+        """
+
+        connection = await self._connection_info()
+        try:
+            async with asyncio.timeout(self._timeout):
+                async with self._ws_connect(
+                    _websocket_url(connection.base_url),
+                    additional_headers={
+                        "Authorization": f"Bearer {connection.token}"
+                    },
+                    ping_interval=None,
+                    max_size=None,
+                ) as ws:
+                    await self._expect_server_hello(ws)
+                    await self._send_client_hello(ws)
+                    _, pending_frames = await self._send_task_subscribe(
+                        ws, session_id
+                    )
+                    frames = [
+                        frame
+                        for frame in pending_frames
+                        if frame.get("type")
+                        in ("task.list", "task", "task_output", "response")
+                    ]
+                    if request is not None:
+                        request_id = uuid.uuid4().hex
+                        await self._send_json(
+                            ws,
+                            {
+                                "request_id": request_id,
+                                **{
+                                    key: value
+                                    for key, value in request.items()
+                                    if key != "request_id"
+                                },
+                            },
+                        )
+                        while True:
+                            frame = await self._receive_json(ws)
+                            frame_type = frame.get("type")
+                            if frame_type == "ping":
+                                await self._send_pong(ws, frame)
+                                continue
+                            if frame_type == "error":
+                                self._raise_ws_error(frame)
+                            if (
+                                frame.get("type") == "response"
+                                and frame.get("request_id") == request_id
+                            ):
+                                frames.append(frame)
+                                break
+                            if frame_type in ("task", "task_output"):
+                                frames.append(frame)
+                        await self._drain_task_output(ws, frames)
+                    return frames
+        except (OSError, TimeoutError, ConnectionClosed, InvalidStatus) as exc:
+            raise KimiServerTransportError(
+                f"kimi server task exchange failed: {type(exc).__name__}"
+            ) from exc
+
+    async def _drain_task_output(
+        self, ws: Any, frames: list[dict[str, Any]]
+    ) -> None:
+        """Collect output frames that follow a task watch acknowledgement."""
+
+        deadline = asyncio.get_running_loop().time() + _TASK_OUTPUT_GRACE_SECONDS
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                raw = await asyncio.wait_for(ws.recv(), remaining)
+            except (asyncio.TimeoutError, ConnectionClosed):
+                return
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            frame = json.loads(raw)
+            if not isinstance(frame, dict):
+                raise KimiServerProtocolError("WebSocket frame must be a JSON object")
+            frame_type = frame.get("type")
+            if frame_type == "ping":
+                await self._send_pong(ws, frame)
+                continue
+            if frame_type in ("task_output", "task"):
+                frames.append(frame)
+                deadline = (
+                    asyncio.get_running_loop().time()
+                    + _TASK_OUTPUT_GRACE_SECONDS
+                )
+                continue
+            return
 
     async def _request_operation(
         self,
@@ -1295,17 +1440,6 @@ class KimiServerClient:
             ) from exc
         return response
 
-    async def _materialize_session(
-        self, session_id: str, connection: ServerConnection
-    ) -> None:
-        """Load a stored session into the current WebSocket registry."""
-
-        await self._request_operation(
-            "session_status",
-            path_parameters={"session_id": session_id},
-            connection=connection,
-        )
-
     async def _connection_info(self) -> ServerConnection:
         if self._supervisor is not None:
             return await self._supervisor.wait_until_ready()
@@ -1333,33 +1467,57 @@ class KimiServerClient:
             {
                 "type": "client_hello",
                 "id": request_id,
-                "payload": {
-                    "client_id": "kimi-bridge",
-                    "subscriptions": [],
-                },
+                "payload": {"client_id": "kimi-bridge"},
             },
         )
         await self._wait_for_ack(ws, request_id)
 
-    async def _send_subscribe(
-        self, ws: Any, session_id: str, cursor: _EventCursor | None
+    async def _send_subscribe_v2(
+        self, ws: Any, session_id: str, seq: int | None
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "transcript": {_MAIN_AGENT_ID: "delta"},
+        }
+        if seq is not None:
+            payload["transcript_since"] = {_MAIN_AGENT_ID: seq}
+        return await self._subscribe(ws, session_id, payload)
+
+    async def _send_task_subscribe(
+        self, ws: Any, session_id: str
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        payload: dict[str, Any] = {
+            "session_id": session_id,
+            "transcript": {_MAIN_AGENT_ID: "turn"},
+        }
+        return await self._subscribe(ws, session_id, payload)
+
+    async def _subscribe(
+        self,
+        ws: Any,
+        session_id: str,
+        payload: dict[str, Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         request_id = uuid.uuid4().hex
-        payload: dict[str, Any] = {
-            "session_ids": [session_id],
-            "agent_filter": {session_id: [_MAIN_AGENT_ID]},
-        }
-        if cursor is not None:
-            cursor_payload: dict[str, Any] = {"seq": cursor.seq}
-            if cursor.epoch is not None:
-                cursor_payload["epoch"] = cursor.epoch
-            payload["cursors"] = {session_id: cursor_payload}
         await self._send_json(
             ws,
-            {"type": "subscribe", "id": request_id, "payload": payload},
+            {"type": "subscribe_v2", "id": request_id, "payload": payload},
         )
         pending_frames: list[dict[str, Any]] = []
         ack = await self._wait_for_ack(ws, request_id, pending_frames=pending_frames)
+        ack_payload = ack.get("payload")
+        if session_id not in (
+            ack_payload.get("accepted", [])
+            if isinstance(ack_payload, dict)
+            else []
+        ) or session_id in (
+            ack_payload.get("not_found", [])
+            if isinstance(ack_payload, dict)
+            else []
+        ):
+            raise KimiServerProtocolError(
+                f"server did not accept subscription for {session_id!r}"
+            )
         return ack, pending_frames
 
     async def _wait_for_ack(
@@ -1371,73 +1529,33 @@ class KimiServerClient:
     ) -> dict[str, Any]:
         while True:
             frame = await self._receive_json(ws)
-            if frame.get("type") == "ping":
+            frame_type = frame.get("type")
+            if frame_type == "ping":
                 await self._send_pong(ws, frame)
                 continue
-            if pending_frames is not None and (
-                _is_session_event_frame(frame) or frame.get("type") == "interaction"
-            ):
+            if frame_type == "error":
+                self._raise_ws_error(frame)
+            if frame_type == "ack":
+                if frame.get("id") != request_id:
+                    raise _WebSocketAckMismatch(
+                        f"expected ack for request {request_id!r}, got "
+                        f"type={frame_type!r} id={frame.get('id')!r}"
+                    )
+                if frame.get("code") != 0:
+                    raise KimiServerProtocolError(
+                        f"WebSocket request failed: {frame.get('code')} "
+                        f"{frame.get('msg', '')}".rstrip()
+                    )
+                return frame
+            if pending_frames is not None:
+                # Frames streamed before the acknowledgement, such as the
+                # agent state burst, are replayed after it in order.
                 pending_frames.append(frame)
                 continue
-            if frame.get("type") == "error":
-                self._raise_ws_error(frame)
-            if frame.get("type") != "ack" or frame.get("id") != request_id:
-                raise _WebSocketAckMismatch(
-                    f"expected ack for request {request_id!r}, got "
-                    f"type={frame.get('type')!r} id={frame.get('id')!r}"
-                )
-            if frame.get("code") != 0:
-                raise KimiServerProtocolError(
-                    f"WebSocket request failed: {frame.get('code')} "
-                    f"{frame.get('msg', '')}".rstrip()
-                )
-            return frame
-
-    async def _snapshot_resync(
-        self, session_id: str, reason: str
-    ) -> tuple[_EventCursor, dict[str, Any]]:
-        snapshot = await self.get_snapshot(session_id)
-        cursor = _EventCursor(
-            seq=int(snapshot["as_of_seq"]), epoch=str(snapshot["epoch"])
-        )
-        LOGGER.warning(
-            "resynced session %s from snapshot at seq %s",
-            session_id,
-            cursor.seq,
-        )
-        return cursor, {
-            "type": "resync_required",
-            "session_id": session_id,
-            "payload": {
-                "type": "resync_required",
-                "session_id": session_id,
-                "reason": reason,
-            },
-            "snapshot": snapshot,
-        }
-
-    def _record_session_usage(
-        self, session_id: str, frame: dict[str, Any]
-    ) -> None:
-        payload = frame["payload"]
-        if payload.get("type") != "agent.status.updated":
-            return
-        usage = payload.get("usage")
-        if not isinstance(usage, dict) or "total" not in usage:
-            return
-        total = usage["total"]
-        if not isinstance(total, dict):
-            raise KimiServerProtocolError(
-                "agent.status.updated usage total must be an object"
+            raise _WebSocketAckMismatch(
+                f"expected ack for request {request_id!r}, got "
+                f"type={frame_type!r} id={frame.get('id')!r}"
             )
-        self._usage_totals[session_id] = SessionUsage(
-            input_tokens=int(total["inputOther"]),
-            output_tokens=int(total["output"]),
-            cache_read_tokens=int(total["inputCacheRead"]),
-            cache_creation_tokens=int(total["inputCacheCreation"]),
-            context_tokens=None,
-            context_limit=None,
-        )
 
     @staticmethod
     async def _receive_json(ws: Any) -> dict[str, Any]:
@@ -1471,7 +1589,3 @@ def _websocket_url(base_url: str) -> str:
     parsed = urlsplit(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return urlunsplit((scheme, parsed.netloc, KIMI_WEBSOCKET_PATH, "", ""))
-
-
-def _is_session_event_frame(frame: dict[str, Any]) -> bool:
-    return "seq" in frame and "payload" in frame

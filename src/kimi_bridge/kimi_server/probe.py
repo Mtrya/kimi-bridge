@@ -19,10 +19,10 @@ PROBED_LIFECYCLE_INVARIANTS = frozenset(
         "startup.bearer_token",
         "rest.bearer_auth",
         "session.create",
-        "session.materialize_before_subscribe",
         "websocket.bearer_auth",
-        "websocket.subscribe_ack",
-        "websocket.reconnect_materializes",
+        "websocket.subscribe_v2_resumes",
+        "websocket.agent_burst_before_ack",
+        "websocket.transcript_seq_resume",
     }
 )
 
@@ -31,7 +31,7 @@ async def probe_kimi_compatibility(
     supervisor: KimiServerSupervisor,
     workspace: Path,
 ) -> KimiCompatibilityProbe:
-    """Check specs plus create/materialize/subscribe/reconnect without inference."""
+    """Check specs plus create/subscribe/resume without inference."""
 
     runtime_checks: list[KimiContractCheck] = []
     connection = supervisor.connection
@@ -109,54 +109,38 @@ async def probe_kimi_compatibility(
                 "KimiServerClient.create_session",
             )
         )
-        status = await client.get_session_status(session_id)
-        runtime_checks.append(
-            _pass(
-                "runtime.lifecycle.session.materialize_before_subscribe",
-                "runtime",
-                "the empty session can be materialized through public v1",
-                "KimiServerClient.get_session_status",
-            )
-        )
-        model_persisted = status.model == default_model
-        runtime_checks.append(
-            KimiContractCheck(
-                "runtime.behavior.session.create_model_persistence",
-                "runtime",
-                "fail" if model_persisted else "pass",
-                (
-                    "create-time model now persists through session status; "
-                    "review the bridge fallback"
-                    if model_persisted
-                    else "create-time model is absent from session status; "
-                    "the bridge fallback remains required"
+        transcript_seq = await client.probe_subscription(session_id)
+        runtime_checks.extend(
+            (
+                _pass(
+                    "runtime.lifecycle.websocket.subscribe_v2_resumes",
+                    "runtime",
+                    "subscribe_v2 resumes the session and pushes agent state "
+                    "frames before its acknowledgement",
+                    "KimiServerClient.probe_subscription",
                 ),
-                "KimiServerClient.create_session/get_session_status",
+                _pass(
+                    "runtime.lifecycle.websocket.agent_burst_before_ack",
+                    "runtime",
+                    "task.list, agent, usage, goal, todo, and a transcript "
+                    "reset arrive before the subscription acknowledgement",
+                    "KimiServerClient.probe_subscription",
+                ),
+                _pass(
+                    "runtime.lifecycle.websocket.bearer_auth",
+                    "runtime",
+                    "the WebSocket accepts the managed bearer header",
+                    "KimiServerClient.probe_subscription",
+                ),
             )
         )
-        await client.probe_subscription(session_id)
+        await client.probe_subscription(session_id, since=transcript_seq)
         runtime_checks.append(
             _pass(
-                "runtime.lifecycle.websocket.subscribe_ack",
+                "runtime.lifecycle.websocket.transcript_seq_resume",
                 "runtime",
-                "the materialized session accepts a WebSocket subscription",
-                "KimiServerClient.probe_subscription",
-            )
-        )
-        runtime_checks.append(
-            _pass(
-                "runtime.lifecycle.websocket.bearer_auth",
-                "runtime",
-                "the WebSocket accepts the managed bearer header",
-                "KimiServerClient.probe_subscription",
-            )
-        )
-        await client.probe_subscription(session_id)
-        runtime_checks.append(
-            _pass(
-                "runtime.lifecycle.websocket.reconnect_materializes",
-                "runtime",
-                "a fresh subscription rematerializes before reconnecting",
+                "a fresh subscription resumes from the transcript sequence "
+                "without resetting the stream",
                 "KimiServerClient.probe_subscription",
             )
         )
@@ -167,7 +151,8 @@ async def probe_kimi_compatibility(
             _pass(
                 "runtime.behavior.transcript_snapshot",
                 "runtime",
-                "transcript history and a session-event watermark form an empty snapshot",
+                "the transcript page and its own sequence watermark form an "
+                "empty snapshot",
                 "KimiServerClient.get_snapshot",
             )
         )
