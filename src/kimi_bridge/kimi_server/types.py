@@ -226,7 +226,7 @@ class SessionStatus:
     busy: bool
     model: str | None
     thinking_effort: str
-    permission_mode: PermissionMode
+    permission_mode: PermissionMode | None
     plan_mode: bool
     swarm_mode: bool
     context_tokens: int

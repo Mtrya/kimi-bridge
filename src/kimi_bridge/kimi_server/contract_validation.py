@@ -25,6 +25,7 @@ def evaluate_kimi_semantic_contract(
     checks: list[KimiContractCheck] = []
     checks.extend(_evaluate_openapi_contract(openapi))
     checks.extend(_evaluate_asyncapi_contract(asyncapi))
+    checks.extend(_evaluate_transcript_ops_contract(openapi))
     if expected_version is not None:
         checks.append(
             _document_version_check(
@@ -350,40 +351,111 @@ def _evaluate_asyncapi_contract(
         if isinstance(session_message, dict)
         else None
     )
-    event_payload = None
-    if isinstance(session_schema, dict):
-        properties = session_schema.get("properties")
-        if isinstance(properties, dict):
-            event_payload = properties.get("payload")
-    for event_contract in semantic_contract.KIMI_SESSION_EVENTS:
-        variants = _find_discriminator_variants(
-            event_payload, event_contract.event_type
-        )
+    if any(
+        message.name == "session_event"
+        for message in semantic_contract.KIMI_WEBSOCKET_MESSAGES
+    ):
         checks.append(
             _contract_check(
-                f"websocket.event.{event_contract.event_type}",
+                "websocket.event.envelope",
                 "websocket",
-                bool(variants),
-                f"event {event_contract.event_type} remains available",
-                event_contract.source,
+                isinstance(session_schema, dict),
+                "the global session_event push envelope remains available",
+                "KimiServerClient.subscribe_events",
             )
         )
-        for requirement in event_contract.fields:
+    return checks
+
+
+def _evaluate_transcript_ops_contract(
+    openapi: Mapping[str, Any],
+) -> list[KimiContractCheck]:
+    """Validate the transcript journal vocabulary the projection folds.
+
+    The WebSocket transcript frames are not documented in the AsyncAPI
+    document, but the REST ``/transcript/ops`` journal shares their op
+    shapes, so the projection's consumed vocabulary is validated there.
+    """
+
+    checks: list[KimiContractCheck] = []
+    if not semantic_contract.KIMI_TRANSCRIPT_OPS:
+        return checks
+    ops_schema = _transcript_ops_schema(openapi)
+    if ops_schema is None:
+        return [
+            _contract_check(
+                "transcript.ops.journal",
+                "transcript",
+                False,
+                "the transcript ops journal schema is unavailable",
+                "evaluate_kimi_semantic_contract",
+            )
+        ]
+    variants = _schema_alternatives(ops_schema)
+    actual_ops: set[str] = set()
+    for variant in variants:
+        for schema, _required in _field_states(variant, ("op",)):
+            actual_ops.update(
+                schema.get("enum", [schema["const"]] if "const" in schema else [])
+            )
+    declared_ops = {contract.op for contract in semantic_contract.KIMI_TRANSCRIPT_OPS}
+    checks.append(
+        _contract_check(
+            "transcript.ops.vocabulary",
+            "transcript",
+            actual_ops == declared_ops,
+            "every journal operation is explicitly handled by the decoder; "
+            f"unhandled={sorted(actual_ops - declared_ops)}, missing={sorted(declared_ops - actual_ops)}",
+            "TranscriptProjection._apply_op",
+        )
+    )
+    for contract in semantic_contract.KIMI_TRANSCRIPT_OPS:
+        matches = [
+            variant
+            for variant in variants
+            if _field_matches(
+                variant,
+                SchemaFieldContract(("op",), ("string",), values=(contract.op,)),
+            )
+        ]
+        checks.append(
+            _contract_check(
+                f"transcript.op.{contract.op}",
+                "transcript",
+                bool(matches),
+                f"op {contract.op} remains journaled",
+                contract.source,
+            )
+        )
+        for requirement in contract.fields if matches else ():
             checks.append(
                 _contract_check(
-                    "websocket.event."
-                    f"{event_contract.event_type}.{'.'.join(requirement.path)}",
-                    "websocket",
-                    any(
-                        _field_matches(variant, requirement)
-                        for variant in variants
-                    ),
-                    "event field "
-                    f"{'.'.join(requirement.path)} keeps a compatible shape",
-                    event_contract.source,
+                    f"transcript.op.{contract.op}.{'.'.join(requirement.path)}",
+                    "transcript",
+                    any(_field_matches(variant, requirement) for variant in matches),
+                    f"op field {'.'.join(requirement.path)} keeps a compatible shape",
+                    contract.source,
                 )
             )
     return checks
+
+
+def _transcript_ops_schema(openapi: Mapping[str, Any]) -> dict[str, Any] | None:
+    paths = openapi.get("paths")
+    operation = (
+        paths.get("/api/v1/sessions/{session_id}/transcript/ops")
+        if isinstance(paths, dict)
+        else None
+    )
+    method_spec = operation.get("get") if isinstance(operation, dict) else None
+    ops_schema = None
+    if isinstance(method_spec, dict):
+        for data_schema in _success_data_schemas(method_spec):
+            batches = _field_states(data_schema, ("batches", "[]", "ops", "[]"))
+            if batches:
+                ops_schema = batches[0][0]
+                break
+    return ops_schema
 
 
 def _contract_check(
@@ -679,29 +751,3 @@ def _instance_has_json_type(value: Any, expected: str) -> bool:
     if expected == "null":
         return value is None
     return True
-
-
-def _find_discriminator_variants(
-    schema: Any, discriminator: str
-) -> list[dict[str, Any]]:
-    if not isinstance(schema, dict):
-        return []
-    matches: list[dict[str, Any]] = []
-    properties = schema.get("properties")
-    type_schema = properties.get("type") if isinstance(properties, dict) else None
-    if isinstance(type_schema, dict):
-        values: list[Any] = []
-        if "const" in type_schema:
-            values.append(type_schema["const"])
-        enum = type_schema.get("enum")
-        if isinstance(enum, list):
-            values.extend(enum)
-        if discriminator in values:
-            matches.append(dict(schema))
-    for value in schema.values():
-        if isinstance(value, dict):
-            matches.extend(_find_discriminator_variants(value, discriminator))
-        elif isinstance(value, list):
-            for item in value:
-                matches.extend(_find_discriminator_variants(item, discriminator))
-    return matches

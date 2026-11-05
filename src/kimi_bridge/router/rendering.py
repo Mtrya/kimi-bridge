@@ -680,14 +680,32 @@ class _RenderingMixin:
         self, active: _ActiveStream, snapshot: dict[str, Any]
     ) -> None:
         in_flight = snapshot.get("in_flight_turn")
+        turn_ids = snapshot.get("turn_ids")
+        if (
+            isinstance(turn_ids, list)
+            and active.render.turn_id is not None
+            and active.render.turn_id not in turn_ids
+        ):
+            await self._cancel_delayed_flush(active.render)
+            await self._cancel_delayed_flush(active.thinking)
+            active.render = _RenderState()
+            active.thinking = _RenderState(prefix=THINKING_LABEL)
+            active.step = None
+            active.pending_finalization = None
+            active.pending_terminal_notice = None
+            if not isinstance(in_flight, dict):
+                return
         if isinstance(in_flight, dict):
             turn_id = _optional_int(in_flight.get("turn_id"))
             answer_text = _in_flight_assistant_text(snapshot, turn_id=turn_id)
             thinking_text = _in_flight_thinking_text(snapshot, turn_id=turn_id)
             if not isinstance(answer_text, str):
                 return
-            if not active.render.turn_active:
+            if not active.render.turn_active or (
+                turn_id is not None and active.render.turn_id != turn_id
+            ):
                 await self._reset_render(active, turn_id=turn_id)
+            active.step = _optional_int(in_flight.get("step"))
             active.render.text = answer_text
             if active.adapter.supports_edits:
                 await self._flush(active, active.render)
@@ -701,15 +719,11 @@ class _RenderingMixin:
         pending = active.pending_finalization
         if pending is not None:
             prompt_id = pending.answer.prompt_id
-            answer_text = _persisted_assistant_text(
-                snapshot, prompt_id=prompt_id
-            )
+            answer_text = _persisted_assistant_text(snapshot, prompt_id=prompt_id)
             if answer_text is not None:
                 pending.answer.text = answer_text
             if self._thinking_enabled(active):
-                thinking_text = _persisted_thinking_text(
-                    snapshot, prompt_id=prompt_id
-                )
+                thinking_text = _persisted_thinking_text(snapshot, prompt_id=prompt_id)
                 if thinking_text is not None:
                     pending.thinking.text = thinking_text
             await self._flush_pending_finalization(active, pending)
@@ -720,9 +734,7 @@ class _RenderingMixin:
             return
         answer_text = _persisted_assistant_text(snapshot)
         thinking_enabled = self._thinking_enabled(active)
-        thinking_text = (
-            _persisted_thinking_text(snapshot) if thinking_enabled else None
-        )
+        thinking_text = _persisted_thinking_text(snapshot) if thinking_enabled else None
         if answer_text is not None:
             active.render.text = answer_text
         active.render.turn_active = False

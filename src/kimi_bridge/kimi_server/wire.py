@@ -104,7 +104,13 @@ def _secondary_model_config_from_wire(value: object) -> SecondaryModelConfig:
     )
 
 
-def _session_usage_from_wire(value: dict[str, Any]) -> SessionUsage:
+def _session_usage_from_wire(
+    value: dict[str, Any], *, live: dict[str, Any] | None = None
+) -> SessionUsage:
+    if live is not None:
+        value = {**value, "context_tokens": live["context_tokens"]}
+        if "max_context_tokens" in live:
+            value["context_limit"] = live["max_context_tokens"]
     return SessionUsage(
         input_tokens=_optional_int(value.get("input_tokens")),
         output_tokens=_optional_int(value.get("output_tokens")),
@@ -150,22 +156,54 @@ def _session_profile_from_wire(value: dict[str, Any]) -> SessionProfile:
     )
 
 
-def _session_status_from_wire(value: dict[str, Any]) -> SessionStatus:
-    permission_mode = value["permission"]
-    if permission_mode not in {"manual", "auto", "yolo"}:
+def _session_status_from_wire(
+    value: dict[str, Any],
+    *,
+    agent: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+) -> SessionStatus:
+    agent_config = value.get("agent_config")
+    if not isinstance(agent_config, dict):
+        raise KimiServerProtocolError("session object has no agent_config")
+    if agent is not None:
+        agent_config = {
+            **agent_config,
+            **{
+                name: agent[name]
+                for name in (
+                    "model",
+                    "thinking",
+                    "permission_mode",
+                    "plan_mode",
+                    "swarm_mode",
+                )
+                if name in agent
+            },
+        }
+    permission_mode = agent_config.get("permission_mode")
+    if permission_mode is not None and permission_mode not in {
+        "manual",
+        "auto",
+        "yolo",
+    }:
         raise KimiServerProtocolError(
             f"unknown session permission mode: {permission_mode!r}"
         )
-    model = value.get("model")
+    model = agent_config.get("model")
+    thinking = agent_config.get("thinking")
+    context = _session_usage_from_wire(value.get("usage") or {}, live=usage)
+    context_tokens = context.context_tokens
+    if context_tokens is None:
+        context_tokens = 0
     return SessionStatus(
         busy=bool(value["busy"]),
         model=str(model) if model else None,
-        thinking_effort=str(value["thinking_level"]),
+        thinking_effort=str(thinking) if thinking else "",
         permission_mode=cast(PermissionMode, permission_mode),
-        plan_mode=bool(value["plan_mode"]),
-        swarm_mode=bool(value["swarm_mode"]),
-        context_tokens=int(value["context_tokens"]),
-        context_limit=_optional_int(value.get("max_context_tokens")),
+        plan_mode=bool(agent_config.get("plan_mode", False)),
+        swarm_mode=bool(agent_config.get("swarm_mode", False)),
+        context_tokens=int(context_tokens),
+        context_limit=context.context_limit,
     )
 
 
@@ -212,29 +250,51 @@ def _goal_info_from_wire(value: dict[str, Any]) -> GoalInfo:
     )
 
 
-def _task_info_from_wire(value: dict[str, Any]) -> TaskInfo:
-    kind = value["kind"]
-    status = value["status"]
-    if kind not in {"subagent", "bash", "tool"}:
+_TASK_KINDS = {"shell": "bash", "subagent": "subagent", "other": "tool"}
+_TASK_OUTCOMES = {
+    "completed": "completed",
+    "failed": "failed",
+    "timed_out": "failed",
+    "lost": "failed",
+    "killed": "cancelled",
+}
+
+
+def _task_info_from_wire(
+    value: dict[str, Any], *, session_id: str
+) -> TaskInfo:
+    kind = value.get("kind")
+    status = value.get("status")
+    if kind not in _TASK_KINDS:
         raise KimiServerProtocolError(f"unknown task kind: {kind!r}")
-    if status not in {"running", "completed", "failed", "cancelled"}:
+    if status not in {"running", "ended"}:
         raise KimiServerProtocolError(f"unknown task status: {status!r}")
+    mapped_status: str = "running"
+    if status == "ended":
+        outcome = value.get("outcome")
+        if outcome not in _TASK_OUTCOMES:
+            raise KimiServerProtocolError(f"unknown task outcome: {outcome!r}")
+        mapped_status = _TASK_OUTCOMES[outcome]
     command = value.get("command")
-    output_preview = value.get("output_preview")
+    result_summary = value.get("result_summary")
+    error = value.get("error")
+    preview = (
+        str(result_summary)
+        if result_summary
+        else (str(error) if error else None)
+    )
     return TaskInfo(
-        id=str(value["id"]),
-        session_id=str(value["session_id"]),
-        kind=cast(TaskKind, kind),
-        description=str(value["description"]),
-        status=cast(TaskStatus, status),
+        id=str(value["task_id"]),
+        session_id=session_id,
+        kind=cast(TaskKind, _TASK_KINDS[kind]),
+        description=str(value.get("description") or ""),
+        status=cast(TaskStatus, mapped_status),
         command=str(command) if command is not None else None,
-        created_at=value["created_at"],
+        created_at=value.get("started_at"),
         started_at=value.get("started_at"),
-        completed_at=value.get("completed_at"),
-        output_preview=(
-            str(output_preview) if output_preview is not None else None
-        ),
-        output_bytes=_optional_int(value.get("output_bytes")),
+        completed_at=value.get("ended_at"),
+        output_preview=preview,
+        output_bytes=None,
     )
 
 
