@@ -22,7 +22,7 @@ COMMAND_HELP: dict[str, CommandHelp] = {
         syntax="/new [workspace] [--env <id> [--cwd <environment-path>]]",
         summary="create and bind a session",
         section="Sessions",
-        details="""**/new [cwd]**
+        details="""**/new [workspace] [--env <id> [--cwd <environment-path>]]**
 
 Create a new Kimi session and bind this conversation to it. An optional --env selects a configured native target; --cwd supplies its working directory without host path expansion. Quote paths containing spaces when combining them with flags. /environments inspects native targets; define targets and credentials in Kimi.
 
@@ -239,7 +239,7 @@ Arguments:
 
 Defaults: without `alias`, only lists the catalog.
 
-Changing the model is allowed while busy; the running turn retains its selection and later turns use the new one. The current thinking effort is preserved when supported, otherwise the model's advertised default (or `off`) is selected.
+Changing the model is allowed while busy. Later native requests use the new selection; an already sent request keeps its settings. The current thinking effort is preserved when supported, otherwise the model's advertised default (or `off`) is selected.
 
 Example:
 - `/model`
@@ -279,7 +279,7 @@ Arguments:
 
 Defaults: without `effort`, only shows the current value and choices.
 
-Setting an effort is allowed while busy; it applies from the next turn according to Kimi's native lifecycle.
+Setting an effort is allowed while busy. Later native requests use the new selection; an already sent request keeps its settings.
 
 Example:
 - `/effort`

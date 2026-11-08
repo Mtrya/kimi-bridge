@@ -4,20 +4,20 @@ kimi-bridge is a single-operator bridge between one instant-messaging adapter an
 
 ```text
 ┌──────────────────────────────────────────────┐
-│ One selected Feishu, QQ, WeChat, or Telegram  │
-│ adapter: native messages and platform auth    │
+│ One selected Feishu, QQ, WeChat, or Telegram │
+│ adapter: native messages and platform auth   │
 └──────────────────────┬───────────────────────┘
                        │ semantic platform values
 ┌──────────────────────▼───────────────────────┐
-│ ChatRouter                                    │
+│ ChatRouter                                   │
 │ bindings, commands, interactions, streams,   │
-│ native workspace file access    │
+│ native workspace file access                 │
 └──────────────────────┬───────────────────────┘
                        │ typed Kimi operations/events
 ┌──────────────────────▼───────────────────────┐
-│ KimiServerClient + KimiServerSupervisor       │
-│ REST, WebSocket, contract/version checks,     │
-│ foreground `kimi web` lifecycle               │
+│ KimiServerClient + KimiServerSupervisor      │
+│ REST, WebSocket, contract/version checks,    │
+│ foreground `kimi web` lifecycle              │
 └──────────────────────┬───────────────────────┘
                        │ loopback + bearer token
                  local Kimi Code

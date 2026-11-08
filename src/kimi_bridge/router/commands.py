@@ -459,7 +459,7 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _Int
         if next_effort != current_effort:
             lines.append(f"Thinking effort adjusted: {current_effort} -> {next_effort}")
         if status.busy:
-            lines.append("The selection applies from the next turn.")
+            lines.append("Later requests use this selection; an already sent request keeps its settings.")
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_effort(
@@ -511,7 +511,7 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _Int
         await self._client.update_profile(binding.session_id, thinking=argument)
         text = f"Thinking effort: {argument}"
         if status.busy:
-            text += "\nThe selection applies from the next turn."
+            text += "\nLater requests use this selection; an already sent request keeps its settings."
         await self._send_chunked(adapter, conversation, text)
 
     async def _handle_secondary_model(
