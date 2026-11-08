@@ -44,6 +44,7 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
+from .session_controls import _SessionControlsMixin
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,10 +60,10 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "yolo": "Regular tools are auto-approved; questions and plan review remain interactive.",
 }
 _BOUND_INSPECTION_COMMANDS = frozenset(
-    {"/status", "/tasks", "/history", "/title", "/usage"}
+    {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm"}
 )
 
-class _CommandMixin:
+class _CommandMixin(_SessionControlsMixin):
     async def _handle_command(
         self,
         conversation_key: str,
@@ -141,8 +142,13 @@ class _CommandMixin:
                     )
                     return
                 sessions = await self._search_sessions(keyword)
-            else:
+            elif argument == "archived":
+                sessions = await self._list_recent_sessions(archived_only=True)
+            elif not argument:
                 sessions = await self._list_recent_sessions()
+            else:
+                await self._send_chunked(adapter, conversation, "Usage: /sessions [archived] | /sessions search <keyword>")
+                return
             self._session_choices[conversation_key] = sessions
             await self._send_chunked(adapter, conversation, _format_sessions(sessions))
             return
@@ -172,38 +178,37 @@ class _CommandMixin:
                     adapter, conversation, f"Session not found: {argument}"
                 )
                 return
-            current = self._state.bindings.get(conversation_key)
-            binding = self._binding_from_session(
-                session,
-                adapter=adapter,
-                render_thinking=(
-                    current.render_thinking if current is not None else False
-                ),
-                conversation=conversation,
-                actor=actor,
-            )
+            if session.get("archived"):
+                await self._send_chunked(adapter, conversation, "Use /restore to restore an archived session.")
+                return
             try:
-                await self._ensure_active_stream(
-                    conversation_key,
-                    binding.session_id,
-                    adapter,
-                    conversation,
-                    actor,
-                    permission_mode=binding.permission_mode,
+                binding = await self._bind_selected_session(
+                    conversation_key, session, adapter, conversation, actor
                 )
             except KimiServerOperationError as exc:
                 await self._send_chunked(
                     adapter,
                     conversation,
-                    f"Could not switch to {binding.session_id}: {exc}",
+                    f"Could not switch to {session['id']}: {exc}",
                 )
                 return
-            self._set_binding(conversation_key, binding)
             recap = await self._history_recap(binding.session_id)
             confirmation = f"Switched to {binding.session_id}"
             if recap is not None:
                 confirmation += f"\n\n{recap}"
             await self._send_chunked(adapter, conversation, confirmation)
+            return
+        if command == "/fork":
+            await self._handle_fork(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/restore":
+            await self._handle_restore(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/queue":
+            await self._handle_queue(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/swarm":
+            await self._handle_swarm(conversation_key, adapter, conversation, argument)
             return
         if command == "/model":
             await self._handle_model(conversation_key, adapter, conversation, argument)
@@ -392,11 +397,7 @@ class _CommandMixin:
             )
             return
 
-        status = await self._require_idle(
-            binding, adapter, conversation, "Model changes"
-        )
-        if status is None:
-            return
+        status = await self._client.get_session_status(binding.session_id)
         models = await self._client.list_models()
         selected = next((model for model in models if model.alias == argument), None)
         if selected is None:
@@ -428,6 +429,8 @@ class _CommandMixin:
         lines = [f"Model: {selected.alias}"]
         if next_effort != current_effort:
             lines.append(f"Thinking effort adjusted: {current_effort} -> {next_effort}")
+        if status.busy:
+            lines.append("The selection applies from the next turn.")
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_effort(
@@ -455,11 +458,7 @@ class _CommandMixin:
             )
             return
 
-        status = await self._require_idle(
-            binding, adapter, conversation, "Thinking-effort changes"
-        )
-        if status is None:
-            return
+        status = await self._client.get_session_status(binding.session_id)
         profile, models = await asyncio.gather(
             self._client.get_session_profile(binding.session_id),
             self._client.list_models(),
@@ -481,7 +480,10 @@ class _CommandMixin:
             )
             return
         await self._client.update_profile(binding.session_id, thinking=argument)
-        await self._send_chunked(adapter, conversation, f"Thinking effort: {argument}")
+        text = f"Thinking effort: {argument}"
+        if status.busy:
+            text += "\nThe selection applies from the next turn."
+        await self._send_chunked(adapter, conversation, text)
 
     async def _handle_secondary_model(
         self,
@@ -1028,6 +1030,17 @@ class _CommandMixin:
             return
 
         first, separator, remainder = argument.partition(" ")
+        if first == "edit":
+            if not remainder.strip():
+                await self._send_chunked(adapter, conversation, "Usage: /goal edit <objective>")
+                return
+            status = await self._client.get_session_status(binding.session_id)
+            goal = await self._client.edit_goal(binding.session_id, remainder.strip())
+            text = _format_goal(goal)
+            if status.busy:
+                text += "\nThe running turn continues; the objective applies from the next turn."
+            await self._send_chunked(adapter, conversation, text)
+            return
         if first in {"status", "pause", "resume", "cancel"} and separator:
             await self._send_chunked(
                 adapter,
@@ -1092,7 +1105,7 @@ class _CommandMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                "A goal already exists. Pause, resume, or cancel it explicitly.",
+                "A goal already exists. Use /goal edit to revise its objective, or pause, resume, or cancel it.",
             )
             return
         status = await self._require_idle(

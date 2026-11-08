@@ -47,6 +47,9 @@ class _SessionMixin:
             for key in tuple(self._task_choices):
                 if key[0] == conversation_key:
                     del self._task_choices[key]
+            for key in tuple(self._queue_choices):
+                if key[0] == conversation_key:
+                    del self._queue_choices[key]
         self._state.bindings[conversation_key] = binding
         self._state_store.save(self._state)
 
@@ -189,12 +192,19 @@ class _SessionMixin:
         self._fail_compaction_waiter(
             session_id, KimiServerError("Session was archived")
         )
+        for key, (bound_session, _choices) in tuple(self._queue_choices.items()):
+            if bound_session == session_id:
+                del self._queue_choices[key]
         if self._active is not None and self._active.session_id == session_id:
             await self._stop_active_stream()
         await self._finish_archived_interactions(session_id)
         self._state_store.save(self._state)
 
-    async def _list_recent_sessions(self) -> list[dict[str, Any]]:
+    async def _list_recent_sessions(self, *, archived_only: bool = False) -> list[dict[str, Any]]:
+        if archived_only:
+            return await self._client.list_sessions(
+                busy=False, archived_only=True, page_size=self._session_list_limit
+            )
         idle, busy = await asyncio.gather(
             self._client.list_sessions(busy=False, page_size=self._session_list_limit),
             self._client.list_sessions(busy=True, page_size=self._session_list_limit),
@@ -273,6 +283,7 @@ class _SessionMixin:
             title=title,
             model=model,
             permission_mode=permission_mode,
+            swarm_mode=False,
         )
         await self._verify_session_profile(
             session_id,
@@ -308,10 +319,14 @@ class _SessionMixin:
         *,
         replace_existing: bool,
         expected_model: str | None = None,
+        status: SessionStatus | None = None,
     ) -> None:
         if session_id in self._verified_session_profiles:
             return
-        status = await self._client.get_session_status(session_id)
+        if status is None:
+            status = await self._client.get_session_status(session_id)
+        if status.model is None:
+            status = await self._client.inspect_session(session_id)
         model = expected_model or self._model
         update_model = status.model is None or (
             replace_existing and status.model != model
@@ -339,6 +354,29 @@ class _SessionMixin:
                     f"{permission_mode!r}"
                 )
         self._verified_session_profiles.add(session_id)
+
+    async def _bind_selected_session(
+        self, conversation_key: str, session: dict[str, Any],
+        adapter: PlatformAdapter, conversation: ConversationRef, actor: ActorRef,
+    ) -> ConversationBinding:
+        current = self._state.bindings.get(conversation_key)
+        binding = self._binding_from_session(
+            session, adapter=adapter,
+            render_thinking=current.render_thinking if current is not None else False,
+            conversation=conversation, actor=actor,
+        )
+        status = await self._client.inspect_session(binding.session_id)
+        if adapter.supports_interactions and status.permission_mode is not None:
+            binding = replace(binding, permission_mode=status.permission_mode)
+        await self._verify_session_profile(
+            binding.session_id, binding.permission_mode, replace_existing=False, status=status
+        )
+        await self._ensure_active_stream(
+            conversation_key, binding.session_id, adapter, conversation, actor,
+            permission_mode=binding.permission_mode,
+        )
+        self._set_binding(conversation_key, binding)
+        return binding
 
     def _binding_from_session(
         self,

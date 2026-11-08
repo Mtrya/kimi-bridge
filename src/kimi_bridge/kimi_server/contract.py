@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 8
+KIMI_SEMANTIC_CONTRACT_VERSION = 9
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -214,6 +214,33 @@ _TASK_RESPONSE_FIELDS = tuple(
 )
 
 
+_GOAL_FIELDS = (
+    _field("goalId", "string"),
+    _field("objective", "string"),
+    _field("completionCriterion", "string", required=False),
+    _field(
+        "status",
+        "string",
+        values=("active", "paused", "blocked", "complete"),
+    ),
+    _field("turnsUsed", "number", "integer"),
+    _field("tokensUsed", "number", "integer"),
+    _field("wallClockMs", "number", "integer"),
+    _field("budget", "object"),
+    _field("budget.tokenBudget", "number", "integer"),
+    _field("budget.turnBudget", "number", "integer"),
+    _field("budget.wallClockBudgetMs", "number", "integer"),
+    _field("budget.remainingTokens", "number", "integer"),
+    _field("budget.remainingTurns", "number", "integer"),
+    _field("budget.remainingWallClockMs", "number", "integer"),
+    _field("budget.tokenBudgetReached", "boolean"),
+    _field("budget.turnBudgetReached", "boolean"),
+    _field("budget.wallClockBudgetReached", "boolean"),
+    _field("budget.overBudget", "boolean"),
+    _field("terminalReason", "string", required=False),
+)
+
+
 KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
     item.name: item
     for item in (
@@ -356,6 +383,24 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             request_examples=({},),
         ),
         RestOperationContract(
+            "fork_session",
+            "KimiServerClient.fork_session",
+            "POST",
+            "/sessions/{session_id}:fork",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the fork session response; the lifecycle probe checks that response",
+        ),
+        RestOperationContract(
+            "restore_session",
+            "KimiServerClient.restore_session",
+            "POST",
+            "/sessions/{session_id}:restore",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the restore session response; the lifecycle probe checks that response",
+        ),
+        RestOperationContract(
             "get_profile",
             "KimiServerClient.get_session_profile",
             "GET",
@@ -377,6 +422,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                         "thinking": "high",
                         "permission_mode": "yolo",
                         "plan_mode": True,
+                        "swarm_mode": False,
                         "goal_objective": "Finish the task",
                         "goal_control": "pause",
                     },
@@ -427,31 +473,16 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "GET",
             "/sessions/{session_id}/goal",
             "/api/v1/sessions/{session_id}/goal",
-            response_fields=(
-                _field("goalId", "string"),
-                _field("objective", "string"),
-                _field("completionCriterion", "string", required=False),
-                _field(
-                    "status",
-                    "string",
-                    values=("active", "paused", "blocked", "complete"),
-                ),
-                _field("turnsUsed", "number", "integer"),
-                _field("tokensUsed", "number", "integer"),
-                _field("wallClockMs", "number", "integer"),
-                _field("budget", "object"),
-                _field("budget.tokenBudget", "number", "integer"),
-                _field("budget.turnBudget", "number", "integer"),
-                _field("budget.wallClockBudgetMs", "number", "integer"),
-                _field("budget.remainingTokens", "number", "integer"),
-                _field("budget.remainingTurns", "number", "integer"),
-                _field("budget.remainingWallClockMs", "number", "integer"),
-                _field("budget.tokenBudgetReached", "boolean"),
-                _field("budget.turnBudgetReached", "boolean"),
-                _field("budget.wallClockBudgetReached", "boolean"),
-                _field("budget.overBudget", "boolean"),
-                _field("terminalReason", "string", required=False),
-            ),
+            response_fields=_GOAL_FIELDS,
+        ),
+        RestOperationContract(
+            "edit_goal",
+            "KimiServerClient.edit_goal",
+            "PATCH",
+            "/sessions/{session_id}/goal",
+            "/api/v1/sessions/{session_id}/goal",
+            request_examples=({"objective": "Revise the objective"},),
+            response_fields=_GOAL_FIELDS,
         ),
         RestOperationContract(
             "submit_prompt",
@@ -617,15 +648,19 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "list_prompts",
-            "KimiServerClient.abort_prompt/abort_session",
+            "KimiServerClient.get_prompt_queue/abort_prompt/abort_session",
             "GET",
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
             response_fields=(
                 _field("active", "object", required=False),
                 _field("active.prompt_id", "string", required=False),
+                _field("active.status", "string", required=False, values=("running", "queued", "blocked")),
+                _field("active.content", "array", required=False),
                 _field("queued", "array"),
                 _field("queued.[].prompt_id", "string"),
+                _field("queued.[].status", "string", values=("running", "queued", "blocked")),
+                _field("queued.[].content", "array"),
             ),
         ),
         RestOperationContract(

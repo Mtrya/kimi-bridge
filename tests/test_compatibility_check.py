@@ -297,6 +297,18 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
             self.created_profiles.append(profile)
             return "session-1"
 
+        async def fork_session(self, session_id: str) -> str:
+            return "forked-session"
+
+        async def archive_session(self, session_id: str) -> None:
+            pass
+
+        async def restore_session(self, session_id: str) -> str:
+            return session_id
+
+        async def is_session_archived(self, session_id: str) -> bool:
+            return False
+
         async def probe_subscription(
             self, _session_id: str, *, since: int | None = None
         ) -> int:
@@ -338,6 +350,7 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         "runtime.lifecycle.websocket.transcript_seq_resume",
         "runtime.behavior.task.direct_commands",
         "runtime.behavior.session.profile_binding",
+        "runtime.behavior.session.fork_restore",
     ):
         assert any(
             item.id == identifier and item.status == "pass" for item in result.checks

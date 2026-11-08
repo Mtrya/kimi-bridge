@@ -9,6 +9,7 @@ from ..kimi_server import (
     GoalInfo,
     KimiServerProtocolError,
     ModelInfo,
+    PromptQueue,
     SecondaryModelConfig,
     SessionNotice,
     SessionProfile,
@@ -35,6 +36,23 @@ _TASK_STATUS_DISPLAY: dict[TaskStatus, tuple[int, str, str]] = {
     "cancelled": (2, "⏹️", "Cancelled"),
     "completed": (3, "✅", "Completed"),
 }
+
+
+def _format_prompt_queue(queue: PromptQueue) -> str:
+    def preview(text: str) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= 180 else text[:180] + "…"
+
+    active = queue.active
+    lines = [
+        f"Active: {active.id} [{active.status}] {preview(active.text)}"
+        if active is not None else "Active: none"
+    ]
+    if not queue.waiting:
+        lines.append("No waiting prompts.")
+    for index, prompt in enumerate(queue.waiting, 1):
+        lines.append(f"{index}. {prompt.id} [{prompt.status}] {preview(prompt.text)}")
+    return "\n".join(lines)
 
 
 def _format_session_notice(notice: SessionNotice) -> str:

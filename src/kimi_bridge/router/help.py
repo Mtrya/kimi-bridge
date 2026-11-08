@@ -51,12 +51,12 @@ Example:
 - `/archive`""",
     ),
     "/sessions": CommandHelp(
-        syntax="/sessions",
+        syntax="/sessions [archived]",
         summary="list recent sessions",
         section="Sessions",
         details="""**/sessions**
 
-List recent Kimi sessions with one-based indices and idle/busy state. The list size is the configured `session_list_limit` (default 5).
+List recent Kimi sessions with one-based indices and idle/busy state. Use `/sessions archived` for archived sessions and `/restore` to return to one. The list size is the configured `session_list_limit` (default 5).
 
 Side effects: remembers the displayed indices so `/switch <n>` can reference them.
 
@@ -101,6 +101,18 @@ Example:
 - `/switch 2`
 - `/switch 01932f4a-...`
 - `/switch Login refactor`""",
+    ),
+    '/fork': CommandHelp(
+        syntax='/fork',
+        summary='fork and switch to a conversation branch',
+        section='Sessions',
+        details="**/fork**\n\nCreate a native conversation fork and switch this chat to it. Takes no arguments. The source can continue working in the same workspace; its in-progress answer is excluded according to Kimi's fork boundary.",
+    ),
+    '/restore': CommandHelp(
+        syntax='/restore <n|id>',
+        summary='restore and switch to an archived session',
+        section='Sessions',
+        details='**/restore <n|id>**\n\nRestore an archived session and bind this chat to it. Numbers refer to the latest /sessions archived list. An explicit ID needs no listing; use /restore id <id> for a numeric native ID. A failed restore preserves the old binding.',
     ),
     "/status": CommandHelp(
         syntax="/status",
@@ -227,7 +239,7 @@ Arguments:
 
 Defaults: without `alias`, only lists the catalog.
 
-Side effects: changing the model is rejected while the session is busy. The current thinking effort is preserved when supported, otherwise the model's advertised default (or `off`) is selected.
+Changing the model is allowed while busy; the running turn retains its selection and later turns use the new one. The current thinking effort is preserved when supported, otherwise the model's advertised default (or `off`) is selected.
 
 Example:
 - `/model`
@@ -267,7 +279,7 @@ Arguments:
 
 Defaults: without `effort`, only shows the current value and choices.
 
-Side effects: setting an effort is rejected while the session is busy.
+Setting an effort is allowed while busy; it applies from the next turn according to Kimi's native lifecycle.
 
 Example:
 - `/effort`
@@ -292,25 +304,55 @@ Example:
 - `/plan`
 - `/plan on`""",
     ),
-    "/goal": CommandHelp(
-        syntax="/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
+    '/queue': CommandHelp(
+        syntax='/queue [message]',
+        summary='inspect prompts or enqueue a subsequent turn',
+        section='Control',
+        details='**/queue [message]**\n\nWithout an argument, show the active prompt and numbered waiting prompts. /queue <message> submits separate work without steering. Use /queue -- <message> for text beginning with cancel or steer. The server owns ordering and execution.',
+    ),
+    '/queue cancel': CommandHelp(
+        syntax='/queue cancel <n|id>',
+        summary='cancel one selected prompt',
+        section='Control',
+        details='**/queue cancel <n|id>**\n\nCancel a selected waiting prompt using its native ID. Numbers refer to the latest queue list in this chat/session; use id <id> for a numeric native ID. Cancellation follows native behavior if the selected prompt has already started. /stop addresses active work and the whole waiting queue.',
+    ),
+    '/queue steer': CommandHelp(
+        syntax='/queue steer <n|id>',
+        summary='steer one waiting prompt into active work',
+        section='Control',
+        details='**/queue steer <n|id>**\n\nSteer one waiting prompt by its latest displayed number or explicit ID. Use id <id> for a numeric native ID. Kimi decides whether the prompt is still waiting; a failed request is not resubmitted.',
+    ),
+    '/swarm': CommandHelp(
+        syntax='/swarm [on|off]',
+        summary='inspect or set native swarm mode',
+        section='Control',
+        details='**/swarm [on|off]**\n\nShow the current native setting, or explicitly enable/disable swarm mode. Fresh /new sessions start with swarm mode off. Forking, restoring, and switching preserve native settings. Enabling swarm does not submit an objective.',
+    ),
+    '/goal edit': CommandHelp(
+        syntax='/goal edit <objective>',
+        summary='revise the current goal objective',
+        section='Control',
+        details='**/goal edit <objective>**\n\nEdit the current goal in place, preserving its identity, progress, budget, and status. Allowed while busy: the running turn continues and the revised objective applies from the next turn. Kimi reports missing or completed goals. Use /goal -- edit ... to create a literal objective beginning with edit.',
+    ),    "/goal": CommandHelp(
+        syntax="/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
         summary="inspect or control a goal",
         section="Control",
-        details="""**/goal [status|pause|resume|cancel|-- <objective>|<objective>]**
+        details="""**/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]**
 
 Inspect or control the session goal.
 
 Forms:
 - `/goal` or `/goal status` — show the goal state and remaining budgets.
 - `/goal <objective>` — create a goal and submit the objective as a normal turn.
-- `/goal -- <objective>` — required when the objective begins with `status`, `pause`, `resume`, or `cancel`.
+- `/goal edit <objective>` — revise the current goal without resetting identity, progress, status, or budget.
+- `/goal -- <objective>` — required when the objective begins with `status`, `edit`, `pause`, `resume`, or `cancel`.
 - `/goal pause` — pause the goal and cancel its active prompt.
 - `/goal resume` — reactivate a paused or blocked goal.
 - `/goal cancel` — cancel the goal and its active prompt.
 
 Defaults: bare `/goal` is equivalent to `/goal status`.
 
-Side effects: goal creation and `/goal resume` are rejected while the session is busy. Only one goal exists at a time; replace it by cancelling first. Details: `/goal status ?`, `/goal pause ?`, `/goal resume ?`, `/goal cancel ?`.
+Side effects: goal creation and `/goal resume` are rejected while the session is busy. `/goal edit` is available during work and applies to the next turn. Only one goal exists at a time. Details: `/goal status ?`, `/goal edit ?`, `/goal pause ?`, `/goal resume ?`, `/goal cancel ?`.
 
 Example:
 - `/goal Stabilize the flaky login tests`

@@ -26,6 +26,7 @@ from .types import (
     ModelInfo,
     PendingInteractionKind,
     PermissionMode,
+    QueuedPrompt,
     SecondaryModelConfig,
     SessionProfile,
     SessionStatus,
@@ -38,6 +39,19 @@ from .types import (
     ToolInfo,
     ToolSource,
 )
+
+
+def _queued_prompt_from_wire(value: dict[str, Any]) -> QueuedPrompt:
+    status = value["status"]
+    if status not in {"running", "queued", "blocked"}:
+        raise KimiServerProtocolError(f"unknown prompt status: {status!r}")
+    parts = []
+    for part in value["content"]:
+        if part["type"] == "text":
+            parts.append(part["text"])
+        else:
+            parts.append(f"[attachment: {part.get('name') or part['type']}]")
+    return QueuedPrompt(str(value["prompt_id"]), status, "\n".join(parts))
 
 
 def _model_info_from_wire(value: dict[str, Any]) -> ModelInfo:

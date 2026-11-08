@@ -43,6 +43,7 @@ from kimi_bridge.kimi_server import (
     PromptContent,
     PromptDelivery,
     PromptOutcome,
+    PromptQueue,
     PromptSteeringError,
     PromptSubmission,
     PromptSubmissionUncertain,
@@ -146,6 +147,13 @@ class FakeKimiClient:
         self.model_updates_persist = True
         self.status_models: dict[str, str | None] = {}
         self.status_permission_modes: dict[str, str | None] = {}
+        self.prompt_queues: dict[str, PromptQueue] = {}
+        self.cancelled_prompts: list[tuple[str, str]] = []
+        self.steered_prompts: list[tuple[str, str]] = []
+        self.goal_edits: list[tuple[str, str]] = []
+        self.restored: list[str] = []
+        self.forks: list[str] = []
+        self.restore_error: KimiServerError | None = None
         self.list_calls: list[dict[str, Any]] = []
         self.list_page_size = 50
         self.subscriptions: list[str] = []
@@ -295,13 +303,48 @@ class FakeKimiClient:
                 else (profile.permission_mode or "manual")
             ),
             plan_mode=bool(profile.plan_mode),
-            swarm_mode=False,
+            swarm_mode=bool((await self.get_session(session_id)).get("agent_config", {}).get("swarm_mode", False)),
             context_tokens=context_tokens,
             context_limit=context_limit,
         )
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
+
+    async def inspect_session(self, session_id: str) -> SessionStatus:
+        return await self.get_session_status(session_id)
+
+    async def get_prompt_queue(self, session_id: str) -> PromptQueue:
+        return self.prompt_queues.get(session_id, PromptQueue(None, ()))
+
+    async def cancel_prompt(self, session_id: str, prompt_id: str) -> bool:
+        self.cancelled_prompts.append((session_id, prompt_id))
+        return True
+
+    async def steer_prompt(self, session_id: str, prompt_id: str) -> None:
+        self.steered_prompts.append((session_id, prompt_id))
+
+    async def edit_goal(self, session_id: str, objective: str) -> GoalInfo:
+        self.goal_edits.append((session_id, objective))
+        self.goals[session_id] = replace(self.goals[session_id], objective=objective)
+        return self.goals[session_id]
+
+    async def fork_session(self, session_id: str) -> str:
+        from copy import deepcopy
+        self.forks.append(session_id)
+        session = deepcopy(await self.get_session(session_id))
+        session["id"] = "forked-session"
+        session["busy"] = False
+        self.sessions.append(session)
+        return session["id"]
+
+    async def restore_session(self, session_id: str) -> str:
+        self.restored.append(session_id)
+        if self.restore_error is not None:
+            raise self.restore_error
+        session = await self.get_session(session_id)
+        session["archived"] = False
+        return session_id
 
     async def compact_session(
         self, session_id: str, *, instruction: str | None = None,
@@ -327,6 +370,7 @@ class FakeKimiClient:
         thinking: str | None = None,
         permission_mode: str | None = None,
         plan_mode: bool | None = None,
+        swarm_mode: bool | None = None,
         goal_objective: str | None = None,
         goal_control: str | None = None,
     ) -> SessionProfile:
@@ -338,6 +382,7 @@ class FakeKimiClient:
                 "thinking": thinking,
                 "permission_mode": permission_mode,
                 "plan_mode": plan_mode,
+                "swarm_mode": swarm_mode,
                 "goal_objective": goal_objective,
                 "goal_control": goal_control,
             }.items()
@@ -423,6 +468,10 @@ class FakeKimiClient:
             for session in self.sessions
             if bool(session.get("busy")) is params["busy"]
         ]
+        if params.get("archived_only"):
+            sessions = [session for session in sessions if session.get("archived")]
+        elif not params.get("include_archive"):
+            sessions = [session for session in sessions if not session.get("archived")]
         ids = [str(session["id"]) for session in sessions]
         # The list is newest-first: after_id selects newer records,
         # before_id selects older ones.
@@ -854,7 +903,7 @@ async def test_first_message_creates_manual_session_and_persists_binding(
         (
             str(workspace.resolve()),
             "hello from Feishu",
-            {"model": "kimi-code/k3", "permission_mode": "manual"},
+                {"model": "kimi-code/k3", "permission_mode": "manual", "swarm_mode": False},
         )
     ]
     assert client.prompts == [
@@ -1542,7 +1591,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/mcp",
         "/compact [instruction]",
         "/undo [count]",
-        "/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
+        "/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
         "/send <path>",
         "/render-thinking [on|off]",
         "/reload",
@@ -2529,7 +2578,7 @@ async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(
     assert "orphan" not in mcp_text
 
 
-async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
+async def test_busy_state_matrix_allows_native_settings_and_task_controls(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -2587,10 +2636,10 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
         "/title Busy Rename",
         "/secondary-model kimi-code/fast",
         "/secondary-model set kimi-code/fast Low latency tasks",
-    )
-    rejected_mutations = (
         "/model kimi-code/fast",
         "/effort off",
+    )
+    rejected_mutations = (
         "/plan on",
         "/skills run harmless",
         "/reload",
@@ -2604,7 +2653,8 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
         await router.close()
 
     assert client.profile_updates == [
-        ("session-control", {"title": "Busy Rename"})
+        ("session-control", {"title": "Busy Rename"}),
+        ("session-control", {"model": "kimi-code/fast", "thinking": "off"}),
     ]
     assert client.cancelled_tasks == [("session-control", "task-1")]
     assert client.activated_skills == []
@@ -3718,6 +3768,7 @@ async def test_new_command_uses_requested_workspace_without_forwarding(
     assert client.created[0][2] == {
         "model": "kimi-code/k3",
         "permission_mode": "manual",
+        "swarm_mode": False,
     }
     assert client.prompts == []
 
@@ -6969,6 +7020,7 @@ async def test_new_session_forces_auto_mode_for_interaction_less_adapter(
     assert client.created[0][2] == {
         "model": "kimi-code/k3",
         "permission_mode": "auto",
+        "swarm_mode": False,
     }
     binding = router._state.bindings["feishu:cli_bot:ou_user"]
     assert binding.permission_mode == "auto"

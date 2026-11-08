@@ -76,6 +76,21 @@ class PromptSubmission:
     outcome: PromptOutcome
 
 
+@dataclass(frozen=True, slots=True)
+class QueuedPrompt:
+    """One native input shown by queue inspection."""
+
+    id: str
+    status: Literal["running", "queued", "blocked"]
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromptQueue:
+    active: QueuedPrompt | None
+    waiting: tuple[QueuedPrompt, ...]
+
+
 class PromptSubmissionUncertain(KimiServerOperationError):
     """The submission response was lost; retrying could duplicate the prompt."""
 

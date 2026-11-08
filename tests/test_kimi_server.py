@@ -921,6 +921,7 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"id": "session-1"}),
+            _envelope(_profile_payload()),
             _envelope(
                 {
                     "id": "session-1",
@@ -985,6 +986,7 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
         ("GET", "http://127.0.0.1:43123/api/v1/config"),
         ("GET", "http://127.0.0.1:43123/api/v1/config"),
         ("POST", "http://127.0.0.1:43123/api/v1/sessions"),
+        ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1"),
         ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts"),
@@ -997,9 +999,9 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
     assert http.requests[3][2]["json"] == {
         "metadata": {"cwd": str(tmp_path.resolve())},
         "title": "Test session",
-        "agent_config": {"permission_mode": "auto"},
     }
-    assert http.requests[5][2]["json"] == {
+    assert http.requests[4][2]["json"] == {"agent_config": {"permission_mode": "auto"}}
+    assert http.requests[6][2]["json"] == {
         "content": [{"type": "text", "text": "hello"}],
         "model": "kimi-code/k3",
         "permission_mode": "auto",

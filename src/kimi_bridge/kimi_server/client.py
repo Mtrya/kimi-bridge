@@ -53,6 +53,7 @@ from .types import (
     PromptContent,
     PromptDelivery,
     PromptMedia,
+    PromptQueue,
     PromptSubmission,
     SecondaryModelConfig,
     ServerConnection,
@@ -71,6 +72,7 @@ from .wire import (
     _interaction_update_from_wire,
     _model_info_from_wire,
     _question_answer_to_wire,
+    _queued_prompt_from_wire,
     _secondary_model_config_from_wire,
     _session_profile_from_wire,
     _session_status_from_wire,
@@ -349,10 +351,24 @@ class KimiServerClient:
         }
         if title is not None:
             payload["title"] = title
-        if profile:
-            payload["agent_config"] = profile
         data = await self._request_operation(
             "create_session", json_body=payload
+        )
+        session_id = str(data["id"])
+        # Native creation accepts agent_config but does not apply it.
+        if profile:
+            await self.update_profile(session_id, **profile)
+        return session_id
+
+    async def fork_session(self, session_id: str) -> str:
+        data = await self._request_operation(
+            "fork_session", path_parameters={"session_id": session_id}, json_body={}
+        )
+        return str(data["id"])
+
+    async def restore_session(self, session_id: str) -> str:
+        data = await self._request_operation(
+            "restore_session", path_parameters={"session_id": session_id}, json_body={}
         )
         return str(data["id"])
 
@@ -429,6 +445,26 @@ class KimiServerClient:
             data["usage"], live=self._usage_frames.get(session_id)
         )
 
+    async def inspect_session(self, session_id: str) -> SessionStatus:
+        """Read effective settings before a long-lived subscription exists."""
+
+        data = await self.get_session(session_id)
+        async with self._task_socket() as ws:
+            _, frames = await self._subscribe(
+                ws, session_id,
+                {"session_id": session_id, "transcript": {_MAIN_AGENT_ID: "turn"}},
+            )
+        agent = next(
+            (frame for frame in frames
+             if frame.get("type") == "agent"
+             and frame.get("session_id") == session_id
+             and frame.get("agent_id") == _MAIN_AGENT_ID),
+            None,
+        )
+        if agent is None:
+            raise KimiServerProtocolError("session inspection delivered no main-agent state")
+        return _session_status_from_wire(data, agent=agent)
+
     async def compact_session(
         self,
         session_id: str,
@@ -467,6 +503,34 @@ class KimiServerClient:
         if data is None:
             return None
         return _goal_info_from_wire(data)
+
+    async def edit_goal(self, session_id: str, objective: str) -> GoalInfo:
+        data = await self._request_operation(
+            "edit_goal", path_parameters={"session_id": session_id},
+            json_body={"objective": objective},
+        )
+        return _goal_info_from_wire(data)
+
+    async def get_prompt_queue(self, session_id: str) -> PromptQueue:
+        data = await self._request_operation(
+            "list_prompts", path_parameters={"session_id": session_id}
+        )
+        return PromptQueue(
+            active=(
+                _queued_prompt_from_wire(data["active"])
+                if data["active"] is not None else None
+            ),
+            waiting=tuple(_queued_prompt_from_wire(item) for item in data["queued"]),
+        )
+
+    async def cancel_prompt(self, session_id: str, prompt_id: str) -> bool:
+        return await self._abort_prompt_by_id(session_id, prompt_id)
+
+    async def steer_prompt(self, session_id: str, prompt_id: str) -> None:
+        await self._request_operation(
+            "steer_prompts", path_parameters={"session_id": session_id},
+            json_body={"prompt_ids": [prompt_id]},
+        )
 
     async def list_sessions(
         self,
@@ -608,6 +672,7 @@ class KimiServerClient:
         thinking: str | None = None,
         permission_mode: PermissionMode | None = None,
         plan_mode: bool | None = None,
+        swarm_mode: bool | None = None,
         goal_objective: str | None = None,
         goal_control: GoalControl | None = None,
     ) -> SessionProfile:
@@ -623,6 +688,8 @@ class KimiServerClient:
             agent_config["permission_mode"] = permission_mode
         if plan_mode is not None:
             agent_config["plan_mode"] = plan_mode
+        if swarm_mode is not None:
+            agent_config["swarm_mode"] = swarm_mode
         if goal_objective is not None:
             agent_config["goal_objective"] = goal_objective
         if goal_control is not None:
