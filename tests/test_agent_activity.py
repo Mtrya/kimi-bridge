@@ -255,3 +255,70 @@ async def test_agent_commands_scope_choices_and_todos_without_submitting(
         await router.close()
     assert client.background_calls == [("session-control", "child")]
     assert not client.prompts
+
+
+def test_terminal_activity_is_visible_once_then_retired():
+    projection = ActivityProjection("session-1")
+    projection.apply(_agent("main"))
+    projection.apply(
+        _tasks(
+            "main",
+            {
+                **_task_payload("child-task"),
+                "kind": "subagent",
+                "child_agent_id": "child",
+            },
+        )
+    )
+    projection.apply(_agent("child"))
+    projection.apply(
+        {
+            "type": "task",
+            "session_id": "session-1",
+            "agent_id": "main",
+            **_task_payload("child-task", status="ended", outcome="completed"),
+            "kind": "subagent",
+            "child_agent_id": "child",
+        }
+    )
+    terminal = projection.snapshot()
+    assert terminal.tasks[0].status == "completed"
+    assert (
+        next(agent for agent in terminal.agents if agent.id == "child").status
+        == "completed"
+    )
+    projection.apply(_agent("main", status="idle"))
+    assert projection.snapshot().tasks == ()
+    assert all(agent.id != "child" for agent in projection.snapshot().agents)
+
+
+async def test_task_stop_refreshes_unknown_child_owner_after_native_not_found():
+    missing = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        task_responses=[{"type": "response", "code": 40406, "msg": "missing"}],
+    )
+    listing = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=_nested_frames(),
+        events_before_ack=True,
+    )
+    stopped = FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect([missing, listing, stopped]),
+    ) as client:
+        assert await client.cancel_task("session-1", "shell-task")
+    assert (
+        next(frame for frame in missing.sent if frame["type"] == "task.stop")[
+            "agent_id"
+        ]
+        == "main"
+    )
+    assert (
+        next(frame for frame in stopped.sent if frame["type"] == "task.stop")[
+            "agent_id"
+        ]
+        == "grandchild"
+    )

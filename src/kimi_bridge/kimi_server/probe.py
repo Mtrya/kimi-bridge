@@ -172,6 +172,8 @@ async def probe_kimi_compatibility(
         if fork_id == session_id:
             raise RuntimeError("session fork did not create a distinct session")
         await client.archive_session(fork_id)
+        if not await client.is_session_archived(fork_id):
+            raise RuntimeError("session fork was not archived")
         restored_id = await client.restore_session(fork_id)
         if restored_id != fork_id or await client.is_session_archived(fork_id):
             raise RuntimeError("archived fork did not restore its native identity")

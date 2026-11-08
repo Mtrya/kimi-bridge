@@ -15,6 +15,7 @@ from kimi_bridge.kimi_server import (
     InteractionUpdate,
     InteractionSnapshot,
     KimiServerClient,
+    KimiServerOperationError,
     SessionActivity,
 )
 from kimi_bridge.router import ChatRouter
@@ -356,7 +357,15 @@ async def test_native_side_question_subscribes_and_submits_only_to_created_agent
             _envelope({"agent_id": "side-agent"}),
             _envelope({"prompt_id": "side-prompt", "status": "running"}),
             _envelope(None, code=40903, msg="already ended"),
-        ]
+        ],
+        transcript_snapshots=[
+            {"agents": [], "pending_interactions": []},
+            {"attachments": [], "seq": 2, "has_more": False, "items": [
+                {"kind": "turn", "ordinal": 1, "state": "completed", "steps": [
+                    {"frames": [{"kind": "text", "role": "assistant", "text": "Native side answer"}]}
+                ]}
+            ]},
+        ],
     )
     async with KimiServerClient(
         "http://127.0.0.1:43123",
@@ -369,7 +378,9 @@ async def test_native_side_question_subscribes_and_submits_only_to_created_agent
             async for event in client.side_question("session-1", "Inspect fixture")
         ]
     assert events[-1]["payload"]["type"] == "turn.ended"
-    assert "snapshot" in events[-1]
+    assert events[-1]["snapshot"]["messages"]["items"][-1]["content"] == [
+        {"type": "text", "text": "Native side answer"}
+    ]
     assert http.requests[0][1].endswith("/sessions/session-1:btw")
     prompt = next(
         request for request in http.requests if request[1].endswith("/prompts")
@@ -488,5 +499,204 @@ async def test_fork_keeps_source_observation_and_its_notice_route(tmp_path: Path
         assert adapter.notice_texts[0][1] == _message("").conversation
         assert "Source" in adapter.notice_texts[0][2]
         assert client.stopped == [] and client.aborted == []
+    finally:
+        await router.close()
+
+
+async def test_foreground_observer_survives_idle_baseline_in_another_chat(tmp_path: Path):
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    router, _ = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        source = router._active
+        await router.handle_inbound(
+            adapter,
+            _message("Other work", user_id="ou_other", conversation_id="oc_other"),
+        )
+        client.emit("session-control", _activity(status="idle", baseline=True))
+        client.emit("session-control", _event("turn.started", turnId=1))
+        client.emit(
+            "session-control",
+            _event("assistant.delta", delta="Original chat answer", offset=0),
+        )
+        client.emit(
+            "session-control", _event("turn.ended", turnId=1, reason="completed")
+        )
+        await _wait_for(
+            lambda: any("Original chat answer" in text for _, _, text in adapter.sent)
+        )
+        assert router._observers["session-control"] is source and source.foreground
+        assert all(
+            conversation == source.conversation
+            for _, conversation, text in adapter.sent
+            if "Original chat answer" in text
+        )
+    finally:
+        await router.close()
+
+
+async def test_failed_switch_work_lookup_keeps_source_controls_and_binding(
+    tmp_path: Path,
+):
+    class Client(FakeKimiClient):
+        fail_lookup = False
+
+        async def get_session_status(self, session_id):
+            if self.fail_lookup and session_id == "session-control":
+                raise KimiServerOperationError("Work lookup unavailable")
+            return await super().get_session_status(session_id)
+
+    client = Client()
+    client.sessions = [
+        _control_session(busy=True),
+        {**_control_session(), "id": "other"},
+    ]
+    client.approvals["session-control"] = [
+        replace(_approval(), session_id="session-control")
+    ]
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        source = router._active
+        pending = router._pending[source.conversation_key]
+        client.fail_lookup = True
+        await router.handle_inbound(adapter, _message("/switch other"))
+        assert (
+            store.load().bindings[source.conversation_key].session_id
+            == "session-control"
+        )
+        assert source.foreground and router._pending[source.conversation_key] is pending
+        assert adapter.notice_texts == [] and not pending.timeout_task.cancelled()
+    finally:
+        await router.close()
+
+
+async def test_same_session_in_other_chat_keeps_original_render_and_controls(
+    tmp_path: Path,
+):
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    client.approvals["session-control"] = [
+        replace(_approval(), session_id="session-control")
+    ]
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        source = router._active
+        pending = router._pending[source.conversation_key]
+        await router.handle_inbound(
+            adapter,
+            _message(
+                "/switch session-control",
+                user_id="ou_other",
+                conversation_id="oc_other",
+            ),
+        )
+        assert router._active is source
+        assert source.conversation == _message("").conversation
+        assert "feishu:cli_bot:ou_other" not in store.load().bindings
+        assert router._pending[source.conversation_key] is pending
+        assert len(adapter.interactions) == 1
+    finally:
+        await router.close()
+
+
+async def test_switch_back_renders_thinking_with_destination_binding(tmp_path: Path):
+    client = FakeKimiClient()
+    client.sessions = [
+        _control_session(busy=True),
+        {**_control_session(busy=True), "id": "other"},
+    ]
+    router, _ = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/render-thinking on"))
+        await router.handle_inbound(adapter, _message("/switch other"))
+        client.snapshots["session-control"] = {
+            "in_flight_turn": {
+                "turn_id": 1,
+                "step": 1,
+                "assistant_text": "Answer fixture",
+                "thinking_text": "Thinking fixture",
+            },
+            "messages": {"items": []},
+        }
+        await router.handle_inbound(adapter, _message("/switch session-control"))
+        assert any("Thinking fixture" in text for _, _, text in adapter.sent)
+    finally:
+        await router.close()
+
+
+async def test_active_goal_retained_before_activity_baseline(tmp_path: Path):
+    from test_router import _goal
+
+    client = FakeKimiClient()
+    client.sessions = [_control_session(), {**_control_session(), "id": "other"}]
+    client.goals["session-control"] = _goal(status="active")
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        source = router._active
+        assert source.activity is None
+        await router.handle_inbound(adapter, _message("/switch other"))
+        assert router._observers["session-control"] is source
+        assert "session-control" in store.load().observations
+    finally:
+        await router.close()
+
+
+async def test_same_operator_chat_handoff_rebuilds_messages_and_controls(
+    tmp_path: Path,
+):
+    client = FakeKimiClient()
+    client.sessions = [_control_session(busy=True)]
+    request = replace(_approval(), session_id="session-control")
+    client.approvals["session-control"] = [request]
+    router, _ = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        await _wait_for(lambda: len(adapter.interactions) == 1)
+        source = router._active
+        client.emit("session-control", _event("turn.started", turnId=1))
+        client.emit(
+            "session-control",
+            _event("assistant.delta", delta="Original answer prefix " * 3, offset=0),
+        )
+        await _wait_for(lambda: bool(source.render.messages))
+        old_messages = tuple(source.render.messages)
+        moved = _message("/status", conversation_id="oc_destination")
+        await router.handle_inbound(adapter, moved)
+        await _wait_for(lambda: len(adapter.interactions) == 2)
+        assert router._active is not source and source.task is None
+        assert adapter.interactions[-1][1] == moved.conversation
+        client.emit("session-control", _event("turn.started", turnId=1))
+        client.emit(
+            "session-control",
+            _event("assistant.delta", delta="Destination answer", offset=0),
+        )
+        client.emit(
+            "session-control", _event("turn.ended", turnId=1, reason="completed")
+        )
+        await _wait_for(
+            lambda: any("Destination answer" in text for _, _, text in adapter.sent)
+        )
+        assert all(
+            message not in old_messages
+            for message, text in adapter.edits
+            if "Destination answer" in text
+        )
+        assert all(
+            conversation == moved.conversation
+            for _, conversation, text in adapter.sent
+            if "Destination answer" in text
+        )
     finally:
         await router.close()

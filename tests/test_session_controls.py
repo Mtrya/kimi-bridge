@@ -357,3 +357,45 @@ async def test_effective_inspection_reads_live_agent_without_caching_closed_subs
             True,
         )
         assert (await client.get_session_status("session-1")).model is None
+
+
+async def test_effective_inspection_times_out_when_subscription_ack_stalls():
+    import asyncio
+    import json
+    from kimi_bridge.kimi_server import KimiServerTransportError
+
+    class StalledSocket(FakeWebSocket):
+        async def send(self, raw_frame):
+            if json.loads(raw_frame)["type"] == "subscribe_v2":
+                self.sent.append(json.loads(raw_frame))
+            else:
+                await super().send(raw_frame)
+
+    socket = StalledSocket(subscribe_payload={"accepted": ["session-1"]})
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=FakeHttpClient([_envelope(_profile_payload())]),
+        ws_connect=FakeWebSocketConnect([socket]),
+        timeout=0.02,
+    ) as client:
+        with pytest.raises(KimiServerTransportError):
+            await asyncio.wait_for(client.inspect_session("session-1"), timeout=1)
+
+
+async def test_creation_failure_reports_native_session_identity(tmp_path: Path):
+    from kimi_bridge.kimi_server import KimiServerOperationError
+
+    http = FakeHttpClient(
+        [
+            _envelope({"id": "created-session"}),
+            _envelope(None, code=50000, msg="settings unavailable"),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        with pytest.raises(KimiServerOperationError) as error:
+            await client.create_session(str(tmp_path), model="kimi-code/k3")
+    assert "created-session" in str(error.value)
+    assert len(http.requests) == 2

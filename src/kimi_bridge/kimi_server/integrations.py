@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from .wire import _tool_info_from_wire
 from .types import (
     AccountQuota,
     KimiServerAPIError,
@@ -19,6 +20,7 @@ from .types import (
     PluginInfo,
     PluginServer,
     QuotaWindow,
+    ToolInfo,
 )
 
 
@@ -63,6 +65,10 @@ class IntegrationOperations:
                 "Native integration request could not be read."
             ) from None
 
+    async def _integration_tools(self, session_id: str) -> tuple[ToolInfo, ...]:
+        data = await self._integration_request("list_tools", params={"session_id": session_id})
+        return tuple(_tool_info_from_wire(item) for item in data["tools"])
+
     async def list_plugins(self) -> tuple[PluginInfo, ...]:
         data = await self._integration_request("list_plugins")
         return tuple(_plugin(value) for value in data["plugins"])
@@ -73,7 +79,7 @@ class IntegrationOperations:
             self._integration_request(
                 "plugin_details", path_parameters={"plugin_id": selected.id}
             ),
-            self.list_tools(session_id),
+            self._integration_tools(session_id),
         )
         servers = tuple(
             PluginServer(
@@ -119,7 +125,7 @@ class IntegrationOperations:
                 "mcp_auth_statuses",
                 params={"cwd": session["metadata"]["cwd"], "verify": "false"},
             ),
-            self.list_tools(session_id),
+            self._integration_tools(session_id),
         )
         return McpInspection(
             servers,

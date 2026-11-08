@@ -119,7 +119,8 @@ class _IntegrationMixin:
             )
         )
         auth = dict(inspection.auth_statuses)
-        if verb == "show" and not servers and name not in auth:
+        matching_tools = tuple(tool for tool in inspection.tools if tool.mcp_server_id == name)
+        if verb == "show" and not servers and name not in auth and not matching_tools:
             await self._send_chunked(
                 adapter,
                 conversation,

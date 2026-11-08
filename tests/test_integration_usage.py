@@ -320,3 +320,48 @@ async def test_plugin_and_mcp_commands_remain_on_demand_and_restart_acknowledged
         and "connected" not in adapter.sent[-1][2]
     )
     assert client.restarted == ["server"] and not client.prompts
+
+
+@pytest.mark.parametrize("operation", ["plugin", "mcp"])
+async def test_integration_tool_errors_never_expose_native_diagnostics(operation):
+    secret = "PRIVATE_TOOL_DIAGNOSTIC"
+    responses = (
+        [
+            _envelope({"plugins": [_plugin()]}),
+            _envelope({**_plugin(), "skills": [], "mcpServers": [], "diagnostics": []}),
+        ]
+        if operation == "plugin"
+        else [
+            _envelope({"metadata": {"cwd": "/bound"}}),
+            _envelope({"servers": []}),
+            _envelope([]),
+        ]
+    )
+    http = FakeHttpClient([*responses, _envelope(None, code=50000, msg=secret)])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        with pytest.raises(KimiServerOperationError) as error:
+            if operation == "plugin":
+                await client.get_plugin_details("session-1", "weather")
+            else:
+                await client.inspect_mcp("session-1")
+    import traceback
+
+    assert secret not in "".join(traceback.format_exception(error.value))
+
+
+async def test_mcp_show_retains_bound_tools_without_runtime_or_auth_entry(tmp_path):
+    class Client(IntegrationClient):
+        async def inspect_mcp(self, session_id):
+            return McpInspection(
+                (), (), (ToolInfo("fixture_tool", "", "mcp", "tool-only"),)
+            )
+
+    router, _ = _router(tmp_path, Client())
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/mcp show tool-only"))
+        assert any("fixture_tool" in text for _, _, text in adapter.sent)
+    finally:
+        await router.close()

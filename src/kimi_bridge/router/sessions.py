@@ -390,11 +390,19 @@ class _SessionMixin(_ObservationMixin):
         await self._verify_session_profile(
             binding.session_id, binding.permission_mode, replace_existing=False, status=status
         )
-        await self._ensure_active_stream(
-            conversation_key, binding.session_id, adapter, conversation, actor,
-            permission_mode=binding.permission_mode,
-        )
         self._set_binding(conversation_key, binding)
+        try:
+            await self._ensure_active_stream(
+                conversation_key, binding.session_id, adapter, conversation, actor,
+                permission_mode=binding.permission_mode,
+            )
+        except BaseException:
+            if current is None:
+                self._state.bindings.pop(conversation_key, None)
+                self._state_store.save(self._state)
+            else:
+                self._set_binding(conversation_key, current)
+            raise
         return binding
 
     def _binding_from_session(
@@ -453,6 +461,20 @@ class _SessionMixin(_ObservationMixin):
         actor: ActorRef,
         permission_mode: str | None = None,
     ) -> None:
+        destination = self._observers.get(session_id)
+        if (
+            destination is not None
+            and destination.task is not None
+            and not destination.task.done()
+            and destination.conversation_key != conversation_key
+        ):
+            raise KimiServerOperationError(
+                "This session is receiving output in another conversation. Use that conversation to control it."
+            )
+        if destination is not None and destination.conversation != conversation:
+            await self._detach_controls(destination)
+            await self._cancel_side_question(conversation_key)
+            await self._stop_observer(destination, preserve_compaction_waiter=True)
         side = self._side_questions.get(conversation_key)
         if side is not None and side[0] != session_id:
             await self._cancel_side_question(conversation_key)
@@ -471,13 +493,17 @@ class _SessionMixin(_ObservationMixin):
         for previous in tuple(self._observers.values()):
             if previous.session_id == session_id or not previous.foreground:
                 continue
+            has_work = (
+                await self._session_has_work(previous)
+                if previous.conversation_key == conversation_key else True
+            )
             if previous.conversation_key == conversation_key:
                 previous.foreground = False
                 await self._cancel_side_question(conversation_key)
                 await self._detach_controls(previous)
                 await self._cancel_delayed_flush(previous.render)
                 await self._cancel_delayed_flush(previous.thinking)
-            if await self._session_has_work(previous):
+            if has_work:
                 self._state.observations[previous.session_id] = ObservationRoute(previous.conversation_key, DeliveryRoute(
                     previous.conversation.platform, previous.conversation.bot_id, previous.conversation.conversation_id,
                     previous.actor.id, previous.actor.aliases,

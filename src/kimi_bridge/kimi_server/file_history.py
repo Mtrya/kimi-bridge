@@ -9,6 +9,7 @@ import posixpath
 from pathlib import PureWindowsPath
 
 from .types import FileChange, FileChanges, FileDiff, RecordedTurn
+from .workspace import _local_input
 
 
 class FileHistoryOperations:
@@ -56,6 +57,7 @@ class FileHistoryOperations:
         if not view.recorded or view.turn is None:
             return FileDiff(None, "unrecorded")
         context = await self.get_file_context(session_id)
+        path = _local_input(context, path)
         paths = ntpath if PureWindowsPath(context.cwd).is_absolute() else posixpath
 
         def key(value: str) -> str:
@@ -88,17 +90,27 @@ class FileHistoryOperations:
             return FileDiff(None, "missing")
         if before.get("binary") or after.get("binary"):
             return FileDiff(None, "binary")
-        chunks = []
-        size = 0
-        for line in difflib.unified_diff(
-            before.get("content", "").splitlines(),
-            after.get("content", "").splitlines(),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-            lineterm="",
-        ):
-            chunks.append(line + "\n")
-            size += len(line) + 1
-            if size > 8192:
-                return FileDiff("".join(chunks)[:8192], truncated=True)
-        return FileDiff("".join(chunks))
+        return await asyncio.to_thread(
+            _text_diff, before.get("content", ""), after.get("content", ""), path
+        )
+
+
+def _text_diff(before: str, after: str, path: str) -> FileDiff:
+    # Bound matching work as well as output; repetitive text can be quadratic.
+    if max(len(before), len(after)) > 131072:
+        return FileDiff(None, "oversize")
+    old_lines, new_lines = before.splitlines(keepends=True), after.splitlines(keepends=True)
+    if max(len(old_lines), len(new_lines)) > 2000:
+        return FileDiff(None, "oversize")
+    chunks = []
+    size = 0
+    for line in difflib.unified_diff(
+        old_lines, new_lines, fromfile=f"a/{path}", tofile=f"b/{path}"
+    ):
+        if not line.endswith(("\n", "\r")):
+            line += "\n\\ No newline at end of file\n"
+        chunks.append(line)
+        size += len(line)
+        if size > 8192:
+            return FileDiff("".join(chunks)[:8192], truncated=True)
+    return FileDiff("".join(chunks))

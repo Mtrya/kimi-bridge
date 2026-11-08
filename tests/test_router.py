@@ -30,6 +30,9 @@ from kimi_bridge.interactions import (
 from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
+    GoalActivity,
+    SessionActivity,
+    AgentActivity,
     GoalStatus,
     InteractionResolution,
     InteractionUpdate,
@@ -312,6 +315,15 @@ class FakeKimiClient:
             swarm_mode=bool((await self.get_session(session_id)).get("agent_config", {}).get("swarm_mode", False)),
             context_tokens=context_tokens,
             context_limit=context_limit,
+        )
+
+    async def inspect_activity(self, session_id: str) -> SessionActivity:
+        goal = await self.get_goal(session_id)
+        return SessionActivity(
+            session_id,
+            (AgentActivity("main", "idle"),),
+            tuple(self.tasks.get(session_id, ())),
+            GoalActivity(goal.objective, goal.status) if goal is not None else None,
         )
 
     async def get_file_context(self, session_id: str) -> FileContext:
@@ -2648,6 +2660,7 @@ async def test_busy_state_matrix_allows_native_settings_and_task_controls(
         "/title Busy Rename",
         "/secondary-model kimi-code/fast",
         "/secondary-model set kimi-code/fast Low latency tasks",
+        "/effort max",
         "/model kimi-code/fast",
         "/effort off",
     )
@@ -2666,6 +2679,7 @@ async def test_busy_state_matrix_allows_native_settings_and_task_controls(
 
     assert client.profile_updates == [
         ("session-control", {"title": "Busy Rename"}),
+        ("session-control", {"thinking": "max"}),
         ("session-control", {"model": "kimi-code/fast", "thinking": "off"}),
     ]
     assert client.cancelled_tasks == [("session-control", "task-1")]
@@ -7259,6 +7273,10 @@ def test_help_resolver_preserves_free_form_arguments() -> None:
     assert command_help_details("/goal", "-- status ?") is None
     assert command_help_details("/mode", "yolo ?") is None
     assert command_help_details("/new", "/tmp/dir ?") is None
+    for action in ("show", "send", "search", "changes", "diff"):
+        assert command_help_details("/files", action + " ?") == COMMAND_HELP["/files"].details
+    assert command_help_details("/files", "folder name ?") is None
+    assert command_help_details("/files", "show file name ?") is None
     assert (
         command_help_details("/sessions", "search help") is None
     )

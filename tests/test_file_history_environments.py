@@ -492,3 +492,124 @@ async def test_changes_selection_keeps_turn_then_is_replaced_by_file_list(
         assert "missing" in adapter.sent[-1][2]
     finally:
         await router.close()
+
+
+@pytest.mark.parametrize(
+    "before,after",
+    [("value", "value\n"), ("value\n", "value"), ("value\r\n", "value\n")],
+)
+async def test_recorded_diff_preserves_line_terminator_changes(before, after):
+    http = FakeHttpClient(
+        [
+            _envelope({"recorded": True, "changes": [_change()]}),
+            *_context_responses(),
+            _envelope({"content": {"version": 1, "content": before}}),
+            _envelope({"content": {"version": 2, "content": after}}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        diff = await client.get_file_diff(
+            "session-1", "fixture.txt", turn=RecordedTurn(1)
+        )
+    assert "-value" in diff.text and "+value" in diff.text
+    if not before.endswith("\n") or not after.endswith("\n"):
+        assert "\\ No newline at end of file" in diff.text
+    if before.endswith("\r\n"):
+        assert "-value\r\n" in diff.text
+
+
+async def test_large_repetitive_diff_is_rejected_before_expensive_matching():
+    from kimi_bridge.kimi_server.file_history import _text_diff
+
+    repetitive = "\n".join(f"label {number % 100}" for number in range(100000))
+    diff = _text_diff(repetitive, "new\n" + repetitive, "fixture.txt")
+    assert diff.unavailable == "oversize" and diff.text is None
+
+
+@pytest.mark.parametrize("prefix", ["~", "～"])
+async def test_local_recorded_diff_expands_home_paths(tmp_path, monkeypatch, prefix):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from test_workspace_files import FileServer
+
+    # The native fake uses real local paths for containment; history stays recorded data.
+    server = FileServer(tmp_path)
+    http = FakeHttpClient(
+        [
+            _envelope(
+                {
+                    "recorded": True,
+                    "changes": [_change(path=str(tmp_path / "fixture.txt"))],
+                }
+            ),
+            _envelope({"metadata": {"cwd": str(tmp_path)}}),
+            _envelope({"workspace_id": "workspace-fixture", "environment_id": "local"}),
+            _envelope({"items": [server.workspace]}),
+            _envelope({"content": {"content": "before\n"}}),
+            _envelope({"content": {"content": "after\n"}}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        diff = await client.get_file_diff(
+            "session-1", prefix + "/fixture.txt", turn=RecordedTurn(1)
+        )
+    assert diff.unavailable is None and "+after" in diff.text
+
+
+async def test_decoded_plan_approval_uses_native_projection_in_chat(tmp_path):
+    from kimi_bridge.kimi_server.wire import _interaction_update_from_wire
+    from test_kimi_server import _interaction_frame
+
+    frame = {
+        **_interaction_frame("approval"),
+        "session_id": "session-control",
+        "agent_id": "child",
+        "tool_call_id": "plan-tool",
+    }
+    frame["request"]["tool_name"] = "ExitPlanMode"
+    request = _interaction_update_from_wire(frame).request
+    http = FakeHttpClient(
+        [
+            _envelope(
+                {
+                    "plans": [
+                        {
+                            "tool_call_id": "plan-tool",
+                            "plan": "Projected plan fixture",
+                            "path": "/target/plan.md",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as native:
+
+        class Client(FakeKimiClient):
+            async def get_plan_document(self, value):
+                return await native.get_plan_document(value)
+
+        client = Client()
+        client.sessions = [_control_session(busy=True)]
+        client.approvals["session-control"] = [request]
+        router, _ = _router(tmp_path, client)
+        adapter = FakeAdapter()
+        try:
+            from test_router import _wait_for
+
+            await router.handle_inbound(adapter, _message("/status"))
+            await _wait_for(lambda: bool(adapter.interactions))
+            assert adapter.interactions[0][2].plan_preview == "Projected plan fixture"
+            assert http.requests[0][2]["params"] == {
+                "agent_id": "child",
+                "tool_call_id": "plan-tool",
+            }
+        finally:
+            await router.close()

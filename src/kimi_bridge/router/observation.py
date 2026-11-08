@@ -22,9 +22,7 @@ class _ObservationMixin:
             return True
         activity = active.activity
         if activity is None:
-            return bool(
-                await self._client.list_tasks(active.session_id, status="running")
-            )
+            activity = await self._client.inspect_activity(active.session_id)
         return any(task.status == "running" for task in activity.tasks) or (
             activity.goal is not None and activity.goal.status == "active"
         )
@@ -72,7 +70,7 @@ class _ObservationMixin:
                     )
         # Empty snapshots never imply a missed task outcome.
         if (
-            self._active is not active
+            not active.foreground
             and not active.interactions
             and not any(agent.status == "running" for agent in current.agents)
             and not any(task.status == "running" for task in current.tasks)

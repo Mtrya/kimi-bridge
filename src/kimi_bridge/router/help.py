@@ -626,7 +626,10 @@ def command_help_details(command: str, argument: str) -> str | None:
             path = ""
             break
         suffix = f" {token}"
-        if argument.endswith(suffix) and _has_sub_forms(command):
+        if argument.endswith(suffix) and (
+            _has_sub_forms(command)
+            or (command == "/files" and argument[: -len(suffix)] in {"show", "send", "diff", "search", "changes"})
+        ):
             path = argument[: -len(suffix)]
             break
     if path is None or path.startswith("--"):

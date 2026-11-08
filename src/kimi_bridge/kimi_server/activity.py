@@ -29,6 +29,11 @@ class ActivityProjection:
         kind = frame.get("type")
         if kind not in {"agent", "todo", "task", "task.list", "goal"}:
             return False
+        for key, task in tuple(self.tasks.items()):
+            if task.status != "running":
+                self.tasks.pop(key)
+                if task.child_agent_id is not None:
+                    self.agents.pop(task.child_agent_id, None)
         owner = frame["agent_id"]
         agent = self.agents.setdefault(owner, AgentActivity(owner, "unknown"))
         if kind == "goal":
@@ -72,6 +77,7 @@ class ActivityProjection:
             )
             agents[child.id] = replace(
                 child,
+                status=child.status if task.status == "running" else task.status,
                 parent_id=task.owner_agent_id,
                 assignment=task.description or None,
                 task=task,

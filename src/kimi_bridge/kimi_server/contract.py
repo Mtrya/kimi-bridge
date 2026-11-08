@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 14
+KIMI_SEMANTIC_CONTRACT_VERSION = 15
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -684,10 +684,10 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
             response_fields=(
-                _field("active", "object", required=False),
-                _field("active.prompt_id", "string", required=False),
-                _field("active.status", "string", required=False, values=("running", "queued", "blocked")),
-                _field("active.content", "array", required=False),
+                _field("active", "object"),
+                _field("active.prompt_id", "string", required=False, required_if_parent_present=True),
+                _field("active.status", "string", required=False, required_if_parent_present=True, values=("running", "queued", "blocked")),
+                _field("active.content", "array", required=False, required_if_parent_present=True),
                 _field("queued", "array"),
                 _field("queued.[].prompt_id", "string"),
                 _field("queued.[].status", "string", values=("running", "queued", "blocked")),

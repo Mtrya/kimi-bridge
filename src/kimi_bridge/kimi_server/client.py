@@ -372,7 +372,12 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         session_id = str(data["id"])
         # Native creation accepts agent_config but does not apply it.
         if profile:
-            await self.update_profile(session_id, **profile)
+            try:
+                await self.update_profile(session_id, **profile)
+            except KimiServerOperationError as exc:
+                raise KimiServerOperationError(
+                    f"Session {session_id} was created, but its settings could not be applied: {exc}"
+                ) from exc
         return session_id
 
     async def fork_session(self, session_id: str) -> str:
@@ -465,10 +470,11 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
 
         data = await self.get_session(session_id)
         async with self._task_socket() as ws:
-            _, frames = await self._subscribe(
-                ws, session_id,
-                {"session_id": session_id, "transcript": {_MAIN_AGENT_ID: "turn"}},
-            )
+            async with asyncio.timeout(self._timeout):
+                _, frames = await self._subscribe(
+                    ws, session_id,
+                    {"session_id": session_id, "transcript": {_MAIN_AGENT_ID: "turn"}},
+                )
         agent = next(
             (frame for frame in frames
              if frame.get("type") == "agent"
@@ -1373,6 +1379,14 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                         and frame.get("request_id") == request_id
                     ):
                         if frame.get("code") != 0:
+                            if frame.get("code") == 40406 and request["agent_id"] == _MAIN_AGENT_ID:
+                                if (session_id, task_id) not in self._task_owners:
+                                    await self.inspect_activity(session_id)
+                                owner = self._task_owners.get((session_id, task_id))
+                                if owner is not None and owner != _MAIN_AGENT_ID:
+                                    return await self._task_command(
+                                        session_id, task_id, command, output_bytes=output_bytes
+                                    )
                             raise KimiServerAPIError(
                                 frame.get("code", -1),
                                 str(frame.get("msg") or "task command failed"),
