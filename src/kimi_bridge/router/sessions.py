@@ -328,7 +328,12 @@ class _SessionMixin:
                 raise KimiServerProtocolError(
                     f"kimi session {session_id} did not bind model {model!r}"
                 )
-            if status.permission_mode != permission_mode:
+            # Status may omit the mode until the event stream starts; each
+            # prompt still carries the binding's requested permission mode.
+            if (
+                status.permission_mode is not None
+                and status.permission_mode != permission_mode
+            ):
                 raise KimiServerProtocolError(
                     f"kimi session {session_id} did not bind permission mode "
                     f"{permission_mode!r}"
