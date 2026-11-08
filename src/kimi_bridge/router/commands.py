@@ -42,6 +42,7 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
+from .integrations import _IntegrationMixin
 from .workspace import _WorkspaceMixin, _parse_new_options
 from .activity import _ActivityMixin
 from .session_controls import _SessionControlsMixin
@@ -63,7 +64,7 @@ _BOUND_INSPECTION_COMMANDS = frozenset(
     {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm", "/agents", "/todos"}
 )
 
-class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
+class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _IntegrationMixin):
     async def _handle_command(
         self,
         conversation_key: str,
@@ -262,11 +263,14 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
                 argument,
             )
             return
+        if command == "/plugins":
+            await self._handle_plugins(conversation_key, adapter, conversation, argument)
+            return
         if command == "/mcp":
             if argument:
-                await self._send_chunked(adapter, conversation, "Usage: /mcp")
-                return
-            await self._handle_mcp(conversation_key, adapter, conversation)
+                await self._handle_mcp_inspection(conversation_key, adapter, conversation, argument)
+            else:
+                await self._handle_mcp(conversation_key, adapter, conversation)
             return
         if command == "/compact":
             return await self._handle_compact(
@@ -651,7 +655,8 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
         if binding is None:
             return
         usage = await self._client.get_session_usage(binding.session_id)
-        await self._send_chunked(adapter, conversation, _format_usage(usage))
+        account = await self._account_quota_text()
+        await self._send_chunked(adapter, conversation, _format_usage(usage) + "\n\n" + account)
 
     async def _handle_render_thinking(
         self,

@@ -35,6 +35,7 @@ from .contract import (
 )
 from .workspace import WorkspaceOperations
 from .file_history import FileHistoryOperations
+from .integrations import IntegrationOperations
 from .activity import ActivityProjection
 from .events import TranscriptProjection
 from .prompts import deliver_prompt
@@ -100,7 +101,7 @@ class _WebSocketAckMismatch(KimiServerProtocolError):
     """A reconnect handshake received a frame for a different request."""
 
 
-class KimiServerClient(WorkspaceOperations, FileHistoryOperations):
+class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOperations):
     """Thin async REST and WebSocket client for a local kimi server."""
 
     def __init__(
@@ -1451,6 +1452,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations):
             connection=connection,
             accepted_codes=accepted_codes,
             raw_response=raw_response,
+            api_version=operation.api_version,
         )
 
     async def _request_document(
@@ -1484,6 +1486,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations):
         connection: ServerConnection | None = None,
         accepted_codes: frozenset[int] = frozenset(),
         raw_response: bool = False,
+        api_version: str = "v1",
     ) -> Any:
         if connection is None:
             connection = await self._connection_info()
@@ -1500,7 +1503,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations):
             kwargs["params"] = params
         response = await self._send_http_request(
             method,
-            f"{connection.base_url}/api/v1{path}",
+            f"{connection.base_url}/api/{api_version}{path}",
             operation=path,
             **kwargs,
         )

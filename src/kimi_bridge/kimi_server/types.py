@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime
 from typing import Any, Literal
 
 from ..interactions import ApprovalRequest, QuestionRequest
@@ -362,6 +363,7 @@ class ToolInfo:
     description: str
     source: ToolSource
     mcp_server_id: str | None = None
+    active: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,3 +450,60 @@ class EnvironmentInfo:
 class PlanDocument:
     name: str
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginInfo:
+    id: str
+    name: str
+    enabled: bool
+    state: str
+    version: str | None = None
+    skill_count: int = 0
+    server_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PluginServer:
+    name: str
+    runtime_name: str
+    enabled: bool
+    transport: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginDetails:
+    plugin: PluginInfo
+    skills: tuple[str, ...]
+    servers: tuple[PluginServer, ...]
+    diagnostics: tuple[tuple[str, int], ...]
+    tools: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class McpServer:
+    id: str
+    name: str
+    transport: str
+    status: str
+    tool_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class McpInspection:
+    servers: tuple[McpServer, ...]
+    auth_statuses: tuple[tuple[str, str], ...]
+    tools: tuple[ToolInfo, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaWindow:
+    name: str
+    used_ratio: float
+    reset_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountQuota:
+    available: bool
+    windows: tuple[QuotaWindow, ...] = ()

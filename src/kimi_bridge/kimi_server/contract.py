@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 13
+KIMI_SEMANTIC_CONTRACT_VERSION = 14
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -44,6 +44,7 @@ class RestOperationContract:
     response_fields: tuple[SchemaFieldContract, ...] = ()
     response_media_type: str = "application/json"
     schema_alias_note: str | None = None
+    api_version: Literal["v1", "v2"] = "v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,6 +395,12 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         RestOperationContract("session_plan", "WorkspaceOperations.get_plan_document", "GET", "/sessions/{session_id}/transcript/plan", "/api/v1/sessions/{session_id}/transcript/plan", query_examples=({"agent_id": "main", "tool_call_id": "plan-review"},), response_fields=(_field("plans", "array"), _field("plans.[].tool_call_id", "string"), _field("plans.[].plan", "string"), _field("plans.[].path", "string", required=False))),
         RestOperationContract("file_changes", "FileHistoryOperations.get_file_changes", "GET", "/sessions/{session_id}/file-history/changes", "/api/v1/sessions/{session_id}/file-history/changes", query_examples=({"turn_id": 0},), response_fields=(_field("recorded", "boolean"), _field("changes", "array"), _field("changes.[].path", "string"), _field("changes.[].status", "string", values=("added", "modified", "deleted")), _field("changes.[].additions", "integer", "number"), _field("changes.[].deletions", "integer", "number"), _field("changes.[].binary", "boolean", required=False), _field("changes.[].oversize", "boolean", required=False))),
         RestOperationContract("file_change_content", "FileHistoryOperations.get_file_diff", "GET", "/sessions/{session_id}/file-history/content", "/api/v1/sessions/{session_id}/file-history/content", query_examples=({"turn_id": 0, "path": "fixture.txt", "phase": "start"}, {"turn_id": 0, "path": "fixture.txt", "phase": "end"}), response_fields=(_field("content", "object", required=False), _field("content.content", "string", required=False), _field("content.binary", "boolean", required=False))),
+        RestOperationContract("list_plugins", "IntegrationOperations.list_plugins", "GET", "/plugins", "/api/v1/plugins", response_fields=(_field("plugins", "array"), _field("plugins.[].id", "string"), _field("plugins.[].displayName", "string"), _field("plugins.[].enabled", "boolean"), _field("plugins.[].state", "string", values=("ok", "error")), _field("plugins.[].version", "string", required=False), _field("plugins.[].skillCount", "number", "integer"), _field("plugins.[].mcpServerCount", "number", "integer"))),
+        RestOperationContract("plugin_details", "IntegrationOperations.get_plugin_details", "GET", "/plugins/{plugin_id}", "/api/v1/plugins/{tail}", response_fields=(_field("id", "string"), _field("displayName", "string"), _field("enabled", "boolean"), _field("state", "string"), _field("skillCount", "number", "integer"), _field("mcpServerCount", "number", "integer"), _field("skills", "array"), _field("skills.[].name", "string"), _field("mcpServers", "array"), _field("mcpServers.[].name", "string"), _field("mcpServers.[].runtimeName", "string"), _field("mcpServers.[].enabled", "boolean"), _field("mcpServers.[].transport", "string"), _field("diagnostics", "array"), _field("diagnostics.[].severity", "string", values=("error", "warn", "info")))),
+        RestOperationContract("mcp_servers", "IntegrationOperations.list_mcp_servers", "GET", "/mcp/servers", "/api/v1/mcp/servers", response_fields=(_field("servers", "array"), _field("servers.[].id", "string"), _field("servers.[].name", "string"), _field("servers.[].transport", "string", values=("stdio", "http", "sse")), _field("servers.[].status", "string", values=("connected", "connecting", "disconnected", "error")), _field("servers.[].tool_count", "integer"))),
+        RestOperationContract("restart_mcp", "IntegrationOperations.restart_mcp_server", "POST", "/mcp/servers/{server_id}:restart", "/api/v1/mcp/servers/{tail}", response_fields=(_field("restarting", "boolean", values=(True,)),)),
+        RestOperationContract("mcp_auth_statuses", "IntegrationOperations.inspect_mcp", "GET", "/mcp/auth-statuses", "/api/v2/mcp/auth-statuses", query_examples=({"cwd": "/workspace", "verify": "false"},), response_fields=(_field("[]", "object"), _field("[].name", "string"), _field("[].authStatus", "string", values=("not-applicable", "bearer-token", "oauth-required", "oauth-authorized", "oauth-expired", "unavailable"))), api_version="v2"),
+        RestOperationContract("account_quota", "IntegrationOperations.get_account_quota", "GET", "/oauth/usage", "/api/v1/oauth/usage", response_fields=(_field("kind", "string", values=("ok", "error")), _field("quota", "object", required=False), _field("quota.usages", "object", required=False), *tuple(field for window in ("limit5h", "limit7d", "monthTotal", "monthCode") for field in (_field(f"quota.usages.{window}", "object", required=False), _field(f"quota.usages.{window}.usedRatio", "number", required=False), _field(f"quota.usages.{window}.resetAt", "string", required=False))))),
         RestOperationContract(
             "side_question",
             "KimiServerClient.side_question",
@@ -612,6 +619,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     values=("builtin", "skill", "mcp"),
                 ),
                 _field("tools.[].mcp_server_id", "string", required=False),
+                _field("tools.[].active", "boolean", required=False),
             ),
         ),
         RestOperationContract(
@@ -1357,6 +1365,7 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "spec_path": item.spec_path,
                 "request_media_type": item.request_media_type,
                 "response_media_type": item.response_media_type,
+                "api_version": item.api_version,
                 "request_examples": list(item.request_examples),
                 "request_fields": [
                     field_payload(field) for field in item.request_fields

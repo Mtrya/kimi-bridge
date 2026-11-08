@@ -438,7 +438,7 @@ def _format_skills(skills: list[SkillInfo]) -> str:
 def _format_mcp_tools(tools: list[ToolInfo]) -> str:
     grouped: dict[str, list[ToolInfo]] = {}
     for tool in tools:
-        if tool.source != "mcp" or not tool.mcp_server_id:
+        if tool.source != "mcp" or not tool.mcp_server_id or not tool.active:
             continue
         grouped.setdefault(tool.mcp_server_id, []).append(tool)
     if not grouped:

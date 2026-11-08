@@ -1,0 +1,163 @@
+"""Public native integration metadata and managed-account quota."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import Counter
+from datetime import datetime
+from typing import Any
+
+from .types import (
+    AccountQuota,
+    KimiServerAPIError,
+    KimiServerOperationError,
+    KimiServerProtocolError,
+    KimiServerTransportError,
+    McpInspection,
+    McpServer,
+    PluginDetails,
+    PluginInfo,
+    PluginServer,
+    QuotaWindow,
+)
+
+
+def _plugin(value: dict[str, Any]) -> PluginInfo:
+    return PluginInfo(
+        value["id"],
+        value["displayName"],
+        value["enabled"],
+        value["state"],
+        value.get("version"),
+        int(value["skillCount"]),
+        int(value["mcpServerCount"]),
+    )
+
+
+def _select(
+    items: tuple[PluginInfo, ...] | tuple[McpServer, ...], selector: str
+) -> PluginInfo | McpServer:
+    matches = [item for item in items if item.id == selector]
+    if not matches:
+        matches = [
+            item for item in items if item.name.casefold() == selector.casefold()
+        ]
+    if len(matches) != 1:
+        raise KimiServerOperationError(
+            "Integration name is unknown or ambiguous; use its native ID"
+        )
+    return matches[0]
+
+
+class IntegrationOperations:
+    async def _integration_request(self, operation: str, **kwargs: Any):
+        try:
+            return await self._request_operation(operation, **kwargs)
+        except KimiServerAPIError as exc:
+            # Native integration errors can include token-bearing configuration.
+            raise KimiServerOperationError(
+                f"Native integration request failed (code {exc.code}). Inspect diagnostics in Kimi."
+            ) from None
+        except KimiServerTransportError:
+            raise KimiServerOperationError(
+                "Native integration request could not be read."
+            ) from None
+
+    async def list_plugins(self) -> tuple[PluginInfo, ...]:
+        data = await self._integration_request("list_plugins")
+        return tuple(_plugin(value) for value in data["plugins"])
+
+    async def get_plugin_details(self, session_id: str, selector: str) -> PluginDetails:
+        selected = _select(await self.list_plugins(), selector)
+        value, tools = await asyncio.gather(
+            self._integration_request(
+                "plugin_details", path_parameters={"plugin_id": selected.id}
+            ),
+            self.list_tools(session_id),
+        )
+        servers = tuple(
+            PluginServer(
+                item["name"], item["runtimeName"], item["enabled"], item["transport"]
+            )
+            for item in value["mcpServers"]
+        )
+        runtime_names = {item.runtime_name for item in servers}
+        return PluginDetails(
+            _plugin(value),
+            tuple(item["name"] for item in value["skills"]),
+            servers,
+            tuple(
+                sorted(
+                    Counter(item["severity"] for item in value["diagnostics"]).items()
+                )
+            ),
+            tuple(
+                tool.name
+                for tool in tools
+                if tool.active and tool.mcp_server_id in runtime_names
+            ),
+        )
+
+    async def list_mcp_servers(self) -> tuple[McpServer, ...]:
+        data = await self._integration_request("mcp_servers")
+        return tuple(
+            McpServer(
+                item["id"],
+                item["name"],
+                item["transport"],
+                item["status"],
+                item["tool_count"],
+            )
+            for item in data["servers"]
+        )
+
+    async def inspect_mcp(self, session_id: str) -> McpInspection:
+        session = await self.get_session(session_id)
+        servers, auth, tools = await asyncio.gather(
+            self.list_mcp_servers(),
+            self._integration_request(
+                "mcp_auth_statuses",
+                params={"cwd": session["metadata"]["cwd"], "verify": "false"},
+            ),
+            self.list_tools(session_id),
+        )
+        return McpInspection(
+            servers,
+            tuple((item["name"], item["authStatus"]) for item in auth),
+            tuple(tool for tool in tools if tool.active and tool.source == "mcp"),
+        )
+
+    async def restart_mcp_server(self, selector: str) -> McpServer:
+        selected = _select(await self.list_mcp_servers(), selector)
+        result = await self._integration_request(
+            "restart_mcp", path_parameters={"server_id": selected.id}
+        )
+        if result.get("restarting") is not True:
+            raise KimiServerProtocolError("MCP restart returned no acknowledgement")
+        return selected
+
+    async def get_account_quota(self) -> AccountQuota:
+        data = await self._integration_request("account_quota")
+        if data["kind"] == "error":
+            return AccountQuota(False)
+        if data["kind"] != "ok":
+            raise KimiServerProtocolError("unknown account quota result")
+        usages = data["quota"]["usages"]
+        windows = []
+        for key, name in (
+            ("limit5h", "5 hours"),
+            ("limit7d", "7 days"),
+            ("monthTotal", "Month total"),
+            ("monthCode", "Month code"),
+        ):
+            value = usages.get(key)
+            if value is None:
+                continue
+            reset_at = value.get("resetAt")
+            if reset_at is not None:
+                try:
+                    reset_at = datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+                except ValueError:
+                    reset_at = None
+            windows.append(QuotaWindow(name, float(value["usedRatio"]), reset_at))
+        return AccountQuota(True, tuple(windows))

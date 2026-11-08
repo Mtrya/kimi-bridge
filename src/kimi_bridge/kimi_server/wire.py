@@ -351,6 +351,7 @@ def _tool_info_from_wire(value: dict[str, Any]) -> ToolInfo:
         mcp_server_id=(
             str(mcp_server_id) if mcp_server_id is not None else None
         ),
+        active=bool(value.get("active", True)),
     )
 
 

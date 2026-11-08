@@ -35,6 +35,7 @@ from kimi_bridge.kimi_server import (
     InteractionUpdate,
     InteractionSnapshot,
     KimiServerAPIError,
+    AccountQuota,
     FileContext,
     WorkspaceInfo,
     PlanDocument,
@@ -321,6 +322,9 @@ class FakeKimiClient:
 
     async def get_plan_document(self, request: ApprovalRequest) -> PlanDocument | None:
         return self.plan_documents.get(request.id)
+
+    async def get_account_quota(self) -> AccountQuota:
+        return AccountQuota(False)
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
@@ -1596,7 +1600,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/usage",
         "/tasks [all|completed|failed|cancelled]",
         "/skills run <name> [args]",
-        "/mcp",
+        "/mcp [servers|show <server>|restart <server>]",
         "/compact [instruction]",
         "/undo [count]",
         "/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
@@ -3641,7 +3645,7 @@ async def test_control_command_grammars_reject_extra_or_incomplete_arguments(
     texts = [text for _ref, _conversation, text in adapter.sent]
     assert any(text == "Usage: /status" for text in texts)
     assert any(text == "Usage: /usage" for text in texts)
-    assert any(text == "Usage: /mcp" for text in texts)
+    assert any(text == "Usage: /mcp [servers|show <server>|restart <server>]" for text in texts)
     assert sum("Usage: /skills run" in text for text in texts) == 2
     assert sum("Usage: /tasks" in text for text in texts) == 2
     assert any("Usage: /plan" in text for text in texts)

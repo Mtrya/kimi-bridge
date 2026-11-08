@@ -19,6 +19,13 @@ from .supervisor import KimiServerSupervisor, parse_server_startup_line
 from .events import session_notice_from_event
 from .probe import probe_kimi_compatibility
 from .types import (
+    AccountQuota,
+    QuotaWindow,
+    McpInspection,
+    McpServer,
+    PluginDetails,
+    PluginServer,
+    PluginInfo,
     PlanDocument,
     EnvironmentInfo,
     FileDiff,
@@ -82,6 +89,13 @@ from .types import (
 )
 
 __all__ = [
+    "AccountQuota",
+    "QuotaWindow",
+    "McpInspection",
+    "McpServer",
+    "PluginDetails",
+    "PluginServer",
+    "PluginInfo",
     "PlanDocument",
     "EnvironmentInfo",
     "FileDiff",

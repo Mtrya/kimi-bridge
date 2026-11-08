@@ -144,11 +144,11 @@ Example:
     ),
     "/usage": CommandHelp(
         syntax="/usage",
-        summary="show live session token totals and context usage",
+        summary="show session tokens/context and managed account quota",
         section="Sessions",
         details="""**/usage**
 
-Show live input, output, cache-read, cache-creation, and context-window token values when exposed by Kimi. Takes no arguments.
+Show cumulative session input/output/cache counters, live context usage, and a separate managed-account quota section with available window percentages and UTC reset times. Account-only failures keep valid session statistics. Takes no arguments; read-only.
 
 Example:
 - `/usage`""",
@@ -543,16 +543,17 @@ Example:
 - `/skills run commit`
 - `/skills run pdf report.pdf`""",
     ),
-    "/mcp": CommandHelp(
-        syntax="/mcp",
-        summary="list session-derived MCP tools",
+    "/plugins": CommandHelp(
+        syntax="/plugins [show <name>]",
+        summary="inspect installed native plugins and contributions",
         section="Tasks and tools",
-        details="""**/mcp**
-
-List the MCP tools resolved for the bound session. Read-only; takes no arguments.
-
-Example:
-- `/mcp`""",
+        details="List installed plugins with enabled/error state, or inspect a plugin ID/name to see declared skills/MCP contributions, diagnostic severity counts and tools currently available in the bound session. Raw configuration and diagnostic messages stay in Kimi. Installation, enable/disable, removal and credentials are managed there.",
+    ),
+    "/mcp": CommandHelp(
+        syntax="/mcp [servers|show <server>|restart <server>]",
+        summary="inspect tools, native connections or restart a server",
+        section="Tasks and tools",
+        details="Bare /mcp lists available bound-session MCP tools. servers lists native runtime connection states and bound-session configuration authentication states; show adds available bound-session tools for one server. The native runtime list/restart addresses the most recently created session only if that session is live, which can differ from the bound session. restart acknowledges a reconnect request; use show to inspect later health. Configuration/authentication remain managed in Kimi.",
     ),
     "/environments": CommandHelp(
         syntax="/environments",

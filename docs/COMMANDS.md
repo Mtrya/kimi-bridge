@@ -20,7 +20,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/restore <n\|id>` | Restore and bind an archived session by its displayed number or explicit ID. |
 | `/status` | Show session, workspace, busy state, pending interaction, model, effort, plan mode, permission mode, and Kimi Code version. |
 | `/title [text]` | Show the current title or rename the session. |
-| `/usage` | Show live token and context-window values when exposed by Kimi. |
+| `/usage` | Show cumulative session tokens/live context alongside available managed-account quota windows and reset times. |
 | `/compact [instruction]` | Start context compaction; optional instructions tell Kimi what to preserve in the summary. |
 | `/history [count] [full]` | Show the newest visible session messages (default `10`, max `50`); thinking and tool traffic are omitted, attachments become placeholders, and `full` removes the default 500-character per-message limit. `full` may precede or follow the count. |
 | `/undo [count]` | Undo a positive number of history steps; default `1`; the confirmation recaps the newest 2 messages. |
@@ -54,7 +54,11 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/todos [all]` | Show main-agent todos, or group available checklists by agent; counts show completed/total with ✓ done, → in progress, and ○ pending. |
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |
-| `/mcp` | List MCP tools resolved for the session. This is read-only. |
+| `/plugins [show <name>]` | Inspect installed plugin state, declared contributions, diagnostic counts, and available bound-session tools. |
+| `/mcp` | List MCP tools currently available in the bound session. |
+| `/mcp servers` | Inspect native runtime connection states and bound-session configuration authentication states. |
+| `/mcp show <server>` | Inspect one server and its available bound-session tools. |
+| `/mcp restart <server>` | Request a native connection restart; acknowledgement does not establish connection health. |
 | `/workspace [add\|remove\|primary <path>]` | Inspect or change shared native workspace folders; existing sessions retain their working directories. |
 | `/files [directory]` | List files and folders in the session working directory or a specified approved directory. |
 | `/files search <query>` | Search filenames in the native workspace roots. |
@@ -76,9 +80,15 @@ Model and effort changes are accepted while busy and affect later native request
 
 `/files` lists up to 100 entries; `/files search` returns up to 50 matches under native ignore rules. A successful list or search installs one current numbered selection for that chat and session. A changes view uses the same list; its entries retain their recorded turn. Another view replaces it; binding or folder changes invalidate it. Use explicit paths with spaces directly, `./123` for a numeric filename, and `/files -- search` for a directory named `search`. Every open/send revalidates native access. Truncated listings and previews are labelled; directories and binary previews follow native results. Recorded changes use the latest finished main turn while a new turn is running. A diff selected from a changes view keeps that turn; an explicit path uses the latest finished turn. Unrecorded, missing, binary, and oversize results are reported separately from an empty comparison.
 
-Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh. Plan usage and quota reset information are not exposed by the public local server.
+Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh.
 
 Use `/new /host/workspace --env target --cwd "/target/project with spaces"` to select an existing Kimi environment. Without flags, `/new` retains its usual workspace behavior and native default target. Target definitions and credentials stay in Kimi. `/status` shows the selected environment and target working directory; resuming a session restores its native target. File browsing, search, preview, delivery, and recorded history address that session’s target. A target failure is reported without a host-filesystem fallback.
+
+`/plugins` shows installed native state; `show` separates declared skills/MCP contributions from tools currently available to the bound session. Diagnostic severity counts are displayed; inspect detailed diagnostics and manage configuration or authentication in Kimi.
+
+MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
+
+`/usage` keeps session counters separate from managed-account limits. Available quota windows show percentage used and reset times in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves valid session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
 
 `/reload` refreshes Kimi Code's configuration, plugins, skills, and agent definitions and rebuilds the bound session with its existing history. It preserves the session ID, selected model, and bridge permission mode. Kimi rejects reload during running agent turns or compaction. Global Kimi settings are refreshed, and new sessions use the latest default model; the bridge's own configuration is loaded at bridge startup.
 
@@ -124,8 +134,8 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 
 | While a turn is busy | Commands |
 | --- | --- |
-| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`/agents show`, `/todos [all]`, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/workspace`, `/files` list/search/show/changes/diff, `/environments`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/files send`, `/workspace add`, `/workspace remove`, `/workspace primary`, `/render-thinking on\|off`, `/stop`, `/archive` |
+| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`/agents show`, `/todos [all]`, bare `/skills`, `/plugins`, `/mcp` tool/server/show inspection, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/workspace`, `/files` list/search/show/changes/diff, `/environments`, `/goal`/`/goal status`, bare `/render-thinking` |
+| Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, `/tasks background`, `/agents background`, `/btw`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/files send`, `/mcp restart`, `/workspace add`, `/workspace remove`, `/workspace primary`, `/render-thinking on\|off`, `/stop`, `/archive` |
 | Mutations reject instead of queueing | `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.
