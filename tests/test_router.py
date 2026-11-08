@@ -145,6 +145,7 @@ class FakeKimiClient:
         self.create_model_persists = True
         self.model_updates_persist = True
         self.status_models: dict[str, str | None] = {}
+        self.status_permission_modes: dict[str, str | None] = {}
         self.list_calls: list[dict[str, Any]] = []
         self.list_page_size = 50
         self.subscriptions: list[str] = []
@@ -288,7 +289,11 @@ class FakeKimiClient:
                 else profile.model
             ),
             thinking_effort=profile.thinking_effort or "off",
-            permission_mode=profile.permission_mode or "manual",
+            permission_mode=(
+                self.status_permission_modes[session_id]
+                if session_id in self.status_permission_modes
+                else (profile.permission_mode or "manual")
+            ),
             plan_mode=bool(profile.plan_mode),
             swarm_mode=False,
             context_tokens=context_tokens,
@@ -866,14 +871,85 @@ async def test_first_message_creates_manual_session_and_persists_binding(
 
 
 @pytest.mark.parametrize(
+    "supports_interactions, permission_mode", [(True, "manual"), (False, "auto")]
+)
+@pytest.mark.parametrize("new_command", [False, True])
+async def test_missing_permission_mode_readback_is_accepted(
+    tmp_path: Path,
+    supports_interactions: bool,
+    permission_mode: str,
+    new_command: bool,
+) -> None:
+    client = FakeKimiClient()
+    client.status_permission_modes["session-1"] = None
+    adapter = FakeAdapter(supports_interactions=supports_interactions)
+    store = StateStore(tmp_path / "state.json")
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        if new_command:
+            await router.handle_inbound(adapter, _message("/new"))
+            assert client.prompts == []
+        await router.handle_inbound(adapter, _message("first"))
+        await router.handle_inbound(adapter, _message("second"))
+    finally:
+        await router.close()
+
+    assert client.profile_updates == [
+        ("session-1", {"permission_mode": permission_mode}),
+    ]
+    assert [profile for _session_id, _content, profile in client.prompts] == [
+        {"permission_mode": permission_mode},
+        {"permission_mode": permission_mode},
+    ]
+    assert client.subscriptions == ["session-1"]
+    binding = store.load().bindings["feishu:cli_bot:ou_user"]
+    assert binding.session_id == "session-1"
+    assert binding.permission_mode == permission_mode
+
+
+@pytest.mark.parametrize("supports_interactions", [True, False])
+async def test_mismatched_permission_mode_readback_is_rejected(
+    tmp_path: Path,
+    supports_interactions: bool,
+) -> None:
+    client = FakeKimiClient()
+    client.status_permission_modes["session-1"] = "yolo"
+    adapter = FakeAdapter(supports_interactions=supports_interactions)
+    store = StateStore(tmp_path / "state.json")
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path / "workspace",
+        model="kimi-code/k3",
+    )
+    try:
+        with pytest.raises(
+            KimiServerProtocolError, match="did not bind permission mode"
+        ):
+            await router.handle_inbound(adapter, _message("first"))
+    finally:
+        await router.close()
+
+    assert store.load().bindings == {}
+    assert client.prompts == []
+
+
+@pytest.mark.parametrize(
     "inspection_commands",
     [(), ("/status", "/tasks", "/history")],
     ids=["no-inbound-message", "inspection-commands"],
 )
+@pytest.mark.parametrize("permission_mode_reported", [True, False])
 async def test_runtime_restart_restores_cron_delivery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     inspection_commands: tuple[str, ...],
+    permission_mode_reported: bool,
 ) -> None:
     """A saved binding must receive autonomous turns after a process restart."""
 
@@ -943,6 +1019,8 @@ async def test_runtime_restart_restores_cron_delivery(
     # the new client and adapter have no old subscriptions or routing context.
     client = RuntimeClient()
     client.sessions = seed_client.sessions
+    if not permission_mode_reported:
+        client.status_permission_modes[session_id] = None
     adapter = RuntimeAdapter()
     stop_requests: list[asyncio.Event] = []
     config_path = tmp_path / "config.toml"

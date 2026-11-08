@@ -45,6 +45,8 @@ The router does not construct Feishu cards, QQ message payloads, WeChat item pay
 
 Inbound messages and interaction responses have operation-level error boundaries. Recoverable server failures are logged with their causes and reported to the originating conversation; failed interaction responses retain their pending controls. Session creation is covered by the message boundary. Protocol violations and programming errors propagate instead of being treated as successful delivery or expired interactions.
 
+Session setup accepts a successful permission-mode update when status omits the mode, while an explicit mismatch remains a protocol error. Every prompt carries the binding's permission mode.
+
 ## Platform boundaries
 
 `src/kimi_bridge/platforms/base.py` defines the semantic adapter protocol. Platform-native authentication, identity handling, events, uploads, callbacks, and rendering stay within the selected adapter package.
