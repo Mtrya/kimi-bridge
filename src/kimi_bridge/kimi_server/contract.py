@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 12
+KIMI_SEMANTIC_CONTRACT_VERSION = 13
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -324,15 +324,10 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions",
             "/api/v1/sessions",
             request_examples=(
+                {"metadata": {"cwd": "/workspace"}, "environment_id": "remote-fixture", "environment_cwd": "/target/workspace"},
                 {
                     "metadata": {"cwd": "/tmp/workspace"},
                     "title": "Compatibility probe",
-                    "agent_config": {
-                        "model": "kimi-code/k3",
-                        "thinking": "high",
-                        "permission_mode": "manual",
-                        "plan_mode": False,
-                    },
                 },
             ),
             response_fields=(_field("id", "string"),),
@@ -395,6 +390,10 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         RestOperationContract("search_files", "WorkspaceOperations.list_workspace_files", "POST", "/sessions/{session_id}/fs:search", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"query": "fixture", "limit": 50},), response_fields=(_field("items", "array"), _field("items.[].path", "string"), _field("items.[].name", "string"), _field("items.[].kind", "string"), _field("truncated", "boolean"))),
         RestOperationContract("read_file", "WorkspaceOperations.preview_workspace_file", "POST", "/sessions/{session_id}/fs:read", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": "fixture.txt", "length": 8192, "encoding": "auto", "allow_external_symlinks": False},), response_fields=(_field("path", "string"), _field("content", "string"), _field("encoding", "string", values=("utf-8", "base64")), _field("size", "integer"), _field("is_binary", "boolean"), _field("truncated", "boolean"))),
         RestOperationContract("download_file", "WorkspaceOperations.download_workspace_file", "GET", "/sessions/{session_id}/fs/{path}:download", "/api/v1/sessions/{session_id}/fs/{*}", response_media_type="application/octet-stream"),
+        RestOperationContract("session_environments", "WorkspaceOperations.list_environments", "GET", "/sessions/{session_id}/environments", "/api/v1/sessions/{session_id}/environments", response_fields=(_field("environments", "array"), _field("environments.[].environment_id", "string"), _field("environments.[].type", "string", values=("local", "ssh", "docker", "command")), _field("environments.[].status", "string", values=("pending", "connecting", "ready", "disconnected", "disposed")))),
+        RestOperationContract("session_plan", "WorkspaceOperations.get_plan_document", "GET", "/sessions/{session_id}/transcript/plan", "/api/v1/sessions/{session_id}/transcript/plan", query_examples=({"agent_id": "main", "tool_call_id": "plan-review"},), response_fields=(_field("plans", "array"), _field("plans.[].tool_call_id", "string"), _field("plans.[].plan", "string"), _field("plans.[].path", "string", required=False))),
+        RestOperationContract("file_changes", "FileHistoryOperations.get_file_changes", "GET", "/sessions/{session_id}/file-history/changes", "/api/v1/sessions/{session_id}/file-history/changes", query_examples=({"turn_id": 0},), response_fields=(_field("recorded", "boolean"), _field("changes", "array"), _field("changes.[].path", "string"), _field("changes.[].status", "string", values=("added", "modified", "deleted")), _field("changes.[].additions", "integer", "number"), _field("changes.[].deletions", "integer", "number"), _field("changes.[].binary", "boolean", required=False), _field("changes.[].oversize", "boolean", required=False))),
+        RestOperationContract("file_change_content", "FileHistoryOperations.get_file_diff", "GET", "/sessions/{session_id}/file-history/content", "/api/v1/sessions/{session_id}/file-history/content", query_examples=({"turn_id": 0, "path": "fixture.txt", "phase": "start"}, {"turn_id": 0, "path": "fixture.txt", "phase": "end"}), response_fields=(_field("content", "object", required=False), _field("content.content", "string", required=False), _field("content.binary", "boolean", required=False))),
         RestOperationContract(
             "side_question",
             "KimiServerClient.side_question",
@@ -514,6 +513,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/api/v1/sessions/{session_id}/prompts",
             request_examples=(
                 {"agent_id": "side-agent", "content": [{"type": "text", "text": "Side question"}]},
+                {"content": [{"type": "file", "file_id": "uploaded-fixture", "name": "fixture.txt", "media_type": "text/plain", "size": 7}]},
                 {
                     "content": [{"type": "text", "text": "hello"}],
                     "model": "kimi-code/k3",
@@ -754,6 +754,7 @@ _INTERACTION_FIELDS = (
     _field("session_id", "string"),
     _field("agent_id", "string"),
     _field("interaction_id", "string"),
+    _field("tool_call_id", "string", required=False),
     _field("status", "string", values=("pending", "ended")),
     _field("request", "object"),
 )

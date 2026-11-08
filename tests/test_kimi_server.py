@@ -499,6 +499,7 @@ async def _session_events(client: KimiServerClient, session_id: str):
 class FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
+        self.headers = {"content-type": "application/json"}
 
     def raise_for_status(self) -> None:
         pass

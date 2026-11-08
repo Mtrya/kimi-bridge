@@ -1,6 +1,7 @@
 """Kimi wire-shape serialization and typed response parsing."""
 
 from __future__ import annotations
+from dataclasses import replace
 
 from typing import Any, cast
 
@@ -384,10 +385,13 @@ def _interaction_update_from_wire(value: dict[str, Any]) -> InteractionUpdate:
         if kind == "approval"
         else _question_request_from_wire
     )
+    request = parser(value["request"], interaction_id=interaction_id, session_id=session_id)
+    if isinstance(request, ApprovalRequest):
+        request = replace(request, agent_id=value["agent_id"], tool_call_id=value.get("tool_call_id"))
     return InteractionUpdate(
         session_id,
         interaction_id,
-        parser(value["request"], interaction_id=interaction_id, session_id=session_id),
+        request,
     )
 
 

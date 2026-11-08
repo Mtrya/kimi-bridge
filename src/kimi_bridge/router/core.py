@@ -332,12 +332,12 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         InboundFile(video.data, video.name, video.media_type)
                     )
         if inbox_files:
-            saved_paths = _save_inbound_files(
-                Path(binding.workspace),
-                self._inbox_subdir,
-                tuple(inbox_files),
-            )
-            text_parts.extend(f"Attached file saved at: {path}" for path in saved_paths)
+            context = await self._client.get_file_context(binding.session_id)
+            if context.environment_id == "local":
+                saved_paths = _save_inbound_files(Path(context.cwd), self._inbox_subdir, tuple(inbox_files))
+                text_parts.extend(f"Attached file saved at: {path}" for path in saved_paths)
+            else:
+                prompt_media.extend(PromptMedia("file", item.data, item.name, item.media_type) for item in inbox_files)
         return PromptContent(
             text="\n\n".join(text_parts) if text_parts else None,
             media=tuple(prompt_media),

@@ -19,12 +19,12 @@ HELP_TOKENS = ("?",)
 
 COMMAND_HELP: dict[str, CommandHelp] = {
     "/new": CommandHelp(
-        syntax="/new [cwd]",
+        syntax="/new [workspace] [--env <id> [--cwd <environment-path>]]",
         summary="create and bind a session",
         section="Sessions",
         details="""**/new [cwd]**
 
-Create a new Kimi session and bind this conversation to it.
+Create a new Kimi session and bind this conversation to it. An optional --env selects a configured native target; --cwd supplies its working directory without host path expansion. Quote paths containing spaces when combining them with flags. /environments inspects native targets; define targets and credentials in Kimi.
 
 Arguments:
 - `cwd` — workspace directory for the session. Must exist.
@@ -554,6 +554,12 @@ List the MCP tools resolved for the bound session. Read-only; takes no arguments
 Example:
 - `/mcp`""",
     ),
+    "/environments": CommandHelp(
+        syntax="/environments",
+        summary="inspect configured native execution targets",
+        section="Sessions",
+        details="List native local/SSH/Docker/command targets and their connection state for the bound session. Create target definitions and credentials in Kimi. Select a target with /new [workspace] --env <id> [--cwd <environment-path>]. Workspace paths belong to the bridge host; target cwd and file paths belong to the selected environment. Existing sessions restore their native target on resume; target failures do not fall back to host files.",
+    ),
     "/workspace": CommandHelp(
         syntax="/workspace [add|remove|primary <path>]",
         summary="inspect or change shared native workspace folders",
@@ -561,10 +567,10 @@ Example:
         details="Show the native workspace ID, primary/additional folders and this session’s working directory. add appends a folder; remove removes an additional folder without deleting files; primary atomically swaps primary/additional roles. Changes apply to every session using this workspace. Existing sessions retain their native working directories, including access to that directory after removal from the shared set. Paths consume the remaining text, including spaces.",
     ),
     "/files": CommandHelp(
-        syntax="/files [directory] | /files search <query> | /files show|send <n|path>",
+        syntax="/files [directory] | /files search <query> | /files show|send|diff <n|path> | /files changes",
         summary="browse, preview or send native workspace files",
         section="Output",
-        details="List up to 100 entries in the session working directory or a specified directory; search returns up to 50 filename matches. Native ignore rules apply. A successful listing/search replaces this chat/session’s numbered choices; switching sessions or changing folders invalidates them. show previews up to 8 KiB of text; binary files are identified. send delivers a file through the platform’s native file/media handling. Use ./123 for a numeric filename, paths with spaces directly, and /files -- search for a directory named search. Native workspace containment and symlink checks apply to each access.",
+        details="List up to 100 entries in the session working directory or a specified directory; search returns up to 50 filename matches. Native ignore rules apply. A successful listing/search/changes view replaces this chat/session’s numbered choices; switching sessions or changing folders invalidates them. show previews up to 8 KiB of text; binary files are identified. send delivers a file through the platform’s native file/media handling. Use ./123 for a numeric filename, paths with spaces directly, and /files -- search for a directory named search. Native workspace containment and symlink checks apply to each file access. /files changes lists the latest finished main turn’s recorded changes. /files diff compares its start/end checkpoints, including deleted files. A numbered changes selection retains that turn; explicit paths use the latest finished turn. Binary, oversize, missing, unrecorded and truncated results are identified. Recorded diffs do not read the current working tree.",
     ),
     "/render-thinking": CommandHelp(
         syntax="/render-thinking [on|off]",

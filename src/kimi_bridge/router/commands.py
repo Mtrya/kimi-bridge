@@ -42,7 +42,7 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
-from .workspace import _WorkspaceMixin
+from .workspace import _WorkspaceMixin, _parse_new_options
 from .activity import _ActivityMixin
 from .session_controls import _SessionControlsMixin
 
@@ -89,7 +89,8 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
             )
         if command == "/new":
             try:
-                workspace = await self._resolve_new_workspace(argument)
+                workspace_argument, environment_id, environment_cwd = _parse_new_options(argument)
+                workspace = await self._resolve_new_workspace(workspace_argument)
             except ValueError as exc:
                 await self._send_chunked(adapter, conversation, str(exc))
                 return
@@ -100,6 +101,8 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
                 adapter,
                 conversation,
                 actor,
+                environment_id=environment_id,
+                environment_cwd=environment_cwd,
             )
             await self._ensure_active_stream(
                 conversation_key,
@@ -109,10 +112,11 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
                 actor,
                 permission_mode=binding.permission_mode,
             )
+            target = await self._client.get_file_context(binding.session_id) if environment_id else None
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Created session {binding.session_id}\nWorkspace: {binding.workspace}",
+                f"Created session {binding.session_id}\nWorkspace: {binding.workspace}" + (f"\nEnvironment: {target.environment_id}\nTarget working directory: {target.cwd}" if target is not None else ""),
             )
             return
         if command == "/archive":
@@ -288,6 +292,15 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
                 actor,
                 argument,
             )
+            return
+        if command == "/environments":
+            if argument:
+                await self._send_chunked(adapter, conversation, "Usage: /environments")
+                return
+            binding = await self._require_binding(conversation_key, adapter, conversation)
+            if binding is not None:
+                environments = await self._client.list_environments(binding.session_id)
+                await self._send_chunked(adapter, conversation, "Native configured environments\n" + "\n".join(f"{item.id} · {item.kind} · {item.status}" for item in environments))
             return
         if command == "/workspace":
             await self._handle_workspace(conversation_key, adapter, conversation, argument)
@@ -593,10 +606,11 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
-        profile, status, server_version = await asyncio.gather(
+        profile, status, server_version, context = await asyncio.gather(
             self._client.get_session_profile(binding.session_id),
             self._client.get_session_status(binding.session_id),
             self._client.get_server_version(),
+            self._client.get_file_context(binding.session_id),
         )
         await self._send_chunked(
             adapter,
@@ -607,7 +621,7 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
                 binding.permission_mode,
                 server_version,
                 self._model,
-            ),
+            ) + f"\nEnvironment: {context.environment_id}\nTarget working directory: {context.cwd}",
         )
 
     async def _handle_title(

@@ -35,6 +35,9 @@ from kimi_bridge.kimi_server import (
     InteractionUpdate,
     InteractionSnapshot,
     KimiServerAPIError,
+    FileContext,
+    WorkspaceInfo,
+    PlanDocument,
     KimiServerError,
     KimiServerOperationError,
     KimiServerProtocolError,
@@ -109,6 +112,8 @@ class FakeKimiClient:
         self.undo_calls: list[tuple[str, int]] = []
         self.undo_error: KimiServerAPIError | None = None
         self.goals: dict[str, GoalInfo] = {}
+        self.file_contexts: dict[str, FileContext] = {}
+        self.plan_documents: dict[str, PlanDocument] = {}
         self.goal_subscription_ready: list[bool] = []
         self.models = [
             ModelInfo(
@@ -307,6 +312,15 @@ class FakeKimiClient:
             context_tokens=context_tokens,
             context_limit=context_limit,
         )
+
+    async def get_file_context(self, session_id: str) -> FileContext:
+        if session_id in self.file_contexts:
+            return self.file_contexts[session_id]
+        cwd = (await self.get_session(session_id))["metadata"]["cwd"]
+        return FileContext(WorkspaceInfo("workspace:" + cwd, cwd, ()), cwd)
+
+    async def get_plan_document(self, request: ApprovalRequest) -> PlanDocument | None:
+        return self.plan_documents.get(request.id)
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
@@ -1586,7 +1600,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/compact [instruction]",
         "/undo [count]",
         "/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
-        "/files [directory] | /files search <query> | /files show|send <n|path>",
+        "/files [directory] | /files search <query> | /files show|send|diff <n|path> | /files changes",
         "/render-thinking [on|off]",
         "/reload",
     ):
@@ -4370,6 +4384,7 @@ async def test_exit_plan_approval_includes_plan_preview(
     monkeypatch.setenv("USERPROFILE", str(home))
     plan = _write_plan(home, "# Plan\n\nDo the thing.\n")
     client = FakeKimiClient()
+    client.plan_documents["approval-1"] = PlanDocument("plan.md", "# Plan\n\nDo the thing.\n")
     client.approvals["session-1"] = [_exit_plan_approval(plan)]
     adapter = FakeAdapter()
     router = ChatRouter(
@@ -4400,6 +4415,7 @@ async def test_exit_plan_approval_truncated_preview_sends_full_file(
     content = "x" * 5000
     plan = _write_plan(home, content)
     client = FakeKimiClient()
+    client.plan_documents["approval-1"] = PlanDocument("plan.md", content)
     client.approvals["session-1"] = [_exit_plan_approval(plan)]
     adapter = FakeAdapter()
     router = ChatRouter(

@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..kimi_server import WorkspaceFile
+from ..kimi_server import RecordedTurn, WorkspaceFile
 from ..platforms.base import ConversationRef, OutboundFile, PlatformAdapter
 
 
 @dataclass(frozen=True, slots=True)
 class _FileChoice:
     path: str
+    turn: RecordedTurn | None = None
 
 
 class _WorkspaceMixin:
@@ -68,13 +69,53 @@ class _WorkspaceMixin:
         context = await self._client.get_file_context(binding.session_id)
         key = (conversation_key, conversation)
         verb, _, rest = argument.partition(" ")
-        if verb in {"show", "send"}:
+        if verb == "changes":
+            if rest.strip():
+                await self._send_chunked(adapter, conversation, "Usage: /files changes")
+                return
+            self._file_choices.pop(key, None)
+            changes = await self._client.get_file_changes(binding.session_id)
+            if changes.turn is None:
+                text = "No completed turn is available."
+            elif not changes.recorded:
+                text = "File history was not recorded for the latest completed turn."
+            else:
+                lines = [f"Recorded changes · turn {changes.turn.number}"]
+                for number, change in enumerate(changes.changes, 1):
+                    flags = (
+                        " · binary"
+                        if change.binary
+                        else " · oversize"
+                        if change.oversize
+                        else ""
+                    )
+                    lines.append(
+                        f"{number}. {change.path} · {change.status} · +{change.additions}/−{change.deletions}{flags}"
+                    )
+                text = (
+                    "\n".join(lines)
+                    if changes.changes
+                    else "No recorded file changes in the latest completed turn."
+                )
+            await self._send_chunked(adapter, conversation, text)
+            if changes.recorded:
+                self._file_choices[key] = (
+                    binding.session_id,
+                    context,
+                    tuple(
+                        _FileChoice(change.path, changes.turn)
+                        for change in changes.changes
+                    ),
+                )
+            return
+        if verb in {"show", "send", "diff"}:
             selected = rest.strip()
             if not selected:
                 await self._send_chunked(
                     adapter, conversation, f"Usage: /files {verb} <n|path>"
                 )
                 return
+            selected_turn = None
             if selected.isdecimal():
                 choices = self._file_choices.get(key)
                 if (
@@ -90,8 +131,21 @@ class _WorkspaceMixin:
                         "File number unavailable. Run /files again, or use an explicit path such as ./123.",
                     )
                     return
-                selected = choices[2][int(selected) - 1].path
-            if verb == "show":
+                choice = choices[2][int(selected) - 1]
+                selected, selected_turn = choice.path, choice.turn
+            if verb == "diff":
+                diff = await self._client.get_file_diff(
+                    binding.session_id, selected, turn=selected_turn
+                )
+                text = (
+                    f"Diff unavailable: {diff.unavailable}."
+                    if diff.unavailable
+                    else f"{selected}\n{_code_block(diff.text or 'No textual difference.')}"
+                )
+                if diff.truncated:
+                    text += "\nDiff truncated."
+                await self._send_chunked(adapter, conversation, text)
+            elif verb == "show":
                 preview = await self._client.preview_workspace_file(
                     binding.session_id, selected
                 )
@@ -99,16 +153,7 @@ class _WorkspaceMixin:
                     text = f"{selected} · binary · {preview.size} bytes\nUse /files send to download it."
                 else:
                     body = preview.text or ""
-                    fence = chr(96) * max(
-                        3,
-                        max(
-                            (len(run) + 1 for run in re.findall(chr(96) + "+", body)),
-                            default=3,
-                        ),
-                    )
-                    text = (
-                        f"{selected} · {preview.size} bytes\n{fence}\n{body}\n{fence}"
-                    )
+                    text = f"{selected} · {preview.size} bytes\n{_code_block(body)}"
                     if preview.truncated:
                         text += "\nPreview truncated."
                 await self._send_chunked(adapter, conversation, text)
@@ -159,3 +204,43 @@ def _file_listing_text(entries: tuple[WorkspaceFile, ...], truncated: bool) -> s
     if truncated:
         lines.append("Listing truncated. Choose a narrower directory or search.")
     return "\n".join(lines)
+
+
+def _code_block(text: str) -> str:
+    fence = chr(96) * max(
+        3, max((len(run) + 1 for run in re.findall(chr(96) + "+", text)), default=3)
+    )
+    return f"{fence}\n{text}\n{fence}"
+
+
+def _parse_new_options(argument: str) -> tuple[str, str | None, str | None]:
+    tokens = list(re.finditer(r'"[^"\n]*"|\'[^\'\n]*\'|\S+', argument))
+    flags = [
+        (match.start(), match.end(), match.group()[2:])
+        for match in tokens
+        if match.group() in {"--env", "--cwd"}
+    ]
+    if not flags:
+        return argument, None, None
+
+    def unquote(value: str) -> str:
+        if len(value) >= 2 and value[0] in {"'", chr(34)} and value[-1] == value[0]:
+            return value[1:-1]
+        return value
+
+    workspace = unquote(argument[: flags[0][0]].strip())
+    options = {}
+    for index, (_, end, flag) in enumerate(flags):
+        value = unquote(
+            argument[
+                end : flags[index + 1][0] if index + 1 < len(flags) else len(argument)
+            ].strip()
+        )
+        if not value or flag in options:
+            raise ValueError(
+                "Usage: /new [workspace] --env <id> [--cwd <environment-path>]"
+            )
+        options[flag] = value
+    if "cwd" in options and "env" not in options:
+        raise ValueError("--cwd requires --env")
+    return workspace, options.get("env"), options.get("cwd")

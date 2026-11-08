@@ -152,7 +152,7 @@ TaskStatus = Literal["running", "completed", "failed", "cancelled"]
 TaskKind = Literal["subagent", "bash", "tool"]
 SkillSource = Literal["project", "user", "extra", "builtin"]
 ToolSource = Literal["builtin", "skill", "mcp"]
-PromptMediaKind = Literal["image", "video"]
+PromptMediaKind = Literal["image", "video", "file"]
 SessionNoticeKind = Literal["error", "warning"]
 
 
@@ -406,3 +406,45 @@ class FileDownload:
     name: str
     data: bytes
     media_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedTurn:
+    number: int
+
+
+@dataclass(frozen=True, slots=True)
+class FileChange:
+    path: str
+    status: str
+    additions: int
+    deletions: int
+    binary: bool = False
+    oversize: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FileChanges:
+    turn: RecordedTurn | None
+    recorded: bool
+    changes: tuple[FileChange, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FileDiff:
+    text: str | None
+    unavailable: str | None = None
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentInfo:
+    id: str
+    kind: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanDocument:
+    name: str
+    text: str

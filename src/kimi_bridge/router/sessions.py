@@ -287,15 +287,22 @@ class _SessionMixin(_ObservationMixin):
         adapter: PlatformAdapter,
         conversation: ConversationRef,
         actor: ActorRef,
+        *, environment_id: str | None = None, environment_cwd: str | None = None,
     ) -> ConversationBinding:
         permission_mode = self._default_permission_mode(adapter)
         model = await self._client.get_default_model()
+        environment = {}
+        if environment_id is not None:
+            environment["environment_id"] = environment_id
+        if environment_cwd is not None:
+            environment["environment_cwd"] = environment_cwd
         session_id = await self._client.create_session(
             str(workspace),
             title=title,
             model=model,
             permission_mode=permission_mode,
             swarm_mode=False,
+            **environment,
         )
         await self._verify_session_profile(
             session_id,

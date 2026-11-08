@@ -34,6 +34,7 @@ from .contract import (
     KIMI_WEBSOCKET_PATH,
 )
 from .workspace import WorkspaceOperations
+from .file_history import FileHistoryOperations
 from .activity import ActivityProjection
 from .events import TranscriptProjection
 from .prompts import deliver_prompt
@@ -99,7 +100,7 @@ class _WebSocketAckMismatch(KimiServerProtocolError):
     """A reconnect handshake received a frame for a different request."""
 
 
-class KimiServerClient(WorkspaceOperations):
+class KimiServerClient(WorkspaceOperations, FileHistoryOperations):
     """Thin async REST and WebSocket client for a local kimi server."""
 
     def __init__(
@@ -351,6 +352,8 @@ class KimiServerClient(WorkspaceOperations):
         workspace: str,
         *,
         title: str | None = None,
+        environment_id: str | None = None,
+        environment_cwd: str | None = None,
         **profile: Any,
     ) -> str:
         payload: dict[str, Any] = {
@@ -358,6 +361,10 @@ class KimiServerClient(WorkspaceOperations):
         }
         if title is not None:
             payload["title"] = title
+        if environment_id is not None:
+            payload["environment_id"] = environment_id
+        if environment_cwd is not None:
+            payload["environment_cwd"] = environment_cwd
         data = await self._request_operation(
             "create_session", json_body=payload
         )
@@ -681,10 +688,9 @@ class KimiServerClient(WorkspaceOperations):
         for media in content.media:
             file_id = await self._upload_prompt_media(media)
             items.append(
-                {
-                    "type": media.kind,
-                    "source": {"kind": "file", "file_id": file_id},
-                }
+                {"type": "file", "file_id": file_id, "name": media.name, "media_type": media.media_type, "size": len(media.data)}
+                if media.kind == "file"
+                else {"type": media.kind, "source": {"kind": "file", "file_id": file_id}}
             )
         return items
 

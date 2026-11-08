@@ -6,7 +6,11 @@ import os
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
+from ..interactions import ApprovalRequest
+
 from .types import (
+    EnvironmentInfo,
+    PlanDocument,
     FileContext,
     FileDownload,
     FileListing,
@@ -23,6 +27,36 @@ def _workspace(value: dict[str, Any]) -> WorkspaceInfo:
 
 
 class WorkspaceOperations:
+    async def list_environments(self, session_id: str) -> tuple[EnvironmentInfo, ...]:
+        data = await self._request_operation(
+            "session_environments", path_parameters={"session_id": session_id}
+        )
+        return tuple(
+            EnvironmentInfo(value["environment_id"], value["type"], value["status"])
+            for value in data["environments"]
+        )
+
+    async def get_plan_document(self, request: ApprovalRequest) -> PlanDocument | None:
+        if request.tool_name != "ExitPlanMode" or request.tool_call_id is None:
+            return None
+        data = await self._request_operation(
+            "session_plan",
+            path_parameters={"session_id": request.session_id},
+            params={"agent_id": request.agent_id, "tool_call_id": request.tool_call_id},
+        )
+        plan = next(
+            (
+                value
+                for value in data["plans"]
+                if value["tool_call_id"] == request.tool_call_id
+            ),
+            None,
+        )
+        if plan is None:
+            return None
+        name = (plan.get("path") or "plan.md").replace("\\", "/").rsplit("/", 1)[-1]
+        return PlanDocument(name, plan["plan"])
+
     async def get_file_context(self, session_id: str) -> FileContext:
         session = await self.get_session(session_id)
         binding = await self._request_operation(
@@ -41,9 +75,12 @@ class WorkspaceOperations:
             raise KimiServerOperationError(
                 "The session workspace is no longer registered"
             )
+        cwd = binding.get("cwd")
+        if binding["environment_id"] != "local" and not cwd:
+            raise KimiServerProtocolError("remote environment binding omitted its working directory")
         return FileContext(
             info,
-            binding.get("cwd") or session["metadata"]["cwd"],
+            cwd or session["metadata"]["cwd"],
             binding["environment_id"],
         )
 
