@@ -143,6 +143,23 @@ def _minimal_documents() -> tuple[dict[str, Any], dict[str, Any]]:
     return openapi, asyncapi
 
 
+def test_binary_download_contract_checks_native_media_type_and_shape(monkeypatch):
+    operation = kimi_contract.RestOperationContract(
+        "download", "WorkspaceOperations.download_workspace_file", "GET", "/download", "/api/v1/example",
+        response_media_type="application/octet-stream",
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {"download": operation})
+    openapi, asyncapi = _minimal_documents()
+    content = openapi["paths"]["/api/v1/example"]["get"]["responses"]["200"]["content"]
+    content.clear()
+    content["application/octet-stream"] = {"schema": {"type": "string", "format": "binary"}}
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert next(check for check in checks if check.id == "rest.download.binary").status == "pass"
+    content["application/octet-stream"]["schema"]["format"] = "text"
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert next(check for check in checks if check.id == "rest.download.binary").status == "fail"
+
+
 @pytest.fixture
 def interaction_contract_documents(monkeypatch):
     contracts = tuple(

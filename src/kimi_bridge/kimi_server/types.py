@@ -362,3 +362,47 @@ class ToolInfo:
     description: str
     source: ToolSource
     mcp_server_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceInfo:
+    id: str
+    primary: str
+    additional: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FileContext:
+    workspace: WorkspaceInfo
+    cwd: str
+    environment_id: str = "local"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceFile:
+    path: str
+    name: str
+    kind: str
+    size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FileListing:
+    entries: tuple[WorkspaceFile, ...]
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FilePreview:
+    path: str
+    text: str | None
+    size: int
+    binary: bool
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FileDownload:
+    name: str
+    data: bytes
+    media_type: str

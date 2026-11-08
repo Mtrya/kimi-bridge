@@ -33,6 +33,7 @@ from .contract import (
     KIMI_REST_OPERATIONS,
     KIMI_WEBSOCKET_PATH,
 )
+from .workspace import WorkspaceOperations
 from .activity import ActivityProjection
 from .events import TranscriptProjection
 from .prompts import deliver_prompt
@@ -98,7 +99,7 @@ class _WebSocketAckMismatch(KimiServerProtocolError):
     """A reconnect handshake received a frame for a different request."""
 
 
-class KimiServerClient:
+class KimiServerClient(WorkspaceOperations):
     """Thin async REST and WebSocket client for a local kimi server."""
 
     def __init__(
@@ -1419,6 +1420,7 @@ class KimiServerClient:
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
         accepted_codes: frozenset[int] = frozenset(),
+        raw_response: bool = False,
     ) -> Any:
         """Execute one operation from the tracked semantic contract."""
 
@@ -1442,6 +1444,7 @@ class KimiServerClient:
             params=params,
             connection=connection,
             accepted_codes=accepted_codes,
+            raw_response=raw_response,
         )
 
     async def _request_document(
@@ -1474,6 +1477,7 @@ class KimiServerClient:
         params: dict[str, Any] | None = None,
         connection: ServerConnection | None = None,
         accepted_codes: frozenset[int] = frozenset(),
+        raw_response: bool = False,
     ) -> Any:
         if connection is None:
             connection = await self._connection_info()
@@ -1494,6 +1498,8 @@ class KimiServerClient:
             operation=path,
             **kwargs,
         )
+        if raw_response and "content-disposition" in response.headers:
+            return response
         envelope = response.json()
         if envelope["code"] != 0 and envelope["code"] not in accepted_codes:
             raise KimiServerAPIError(
@@ -1502,6 +1508,8 @@ class KimiServerClient:
                 request_id=envelope.get("request_id"),
                 details=envelope.get("details"),
             )
+        if raw_response:
+            raise KimiServerProtocolError("download returned an unexpected JSON response")
         return envelope["data"]
 
     async def _send_http_request(

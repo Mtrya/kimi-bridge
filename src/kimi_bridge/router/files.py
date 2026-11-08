@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import mimetypes
 import os
 from pathlib import Path
 
-from ..platforms.base import InboundFile, OutboundFile
+from ..platforms.base import InboundFile
 
 
 # Mobile IMEs often auto-convert a leading "~" into the fullwidth "～"
@@ -31,26 +30,6 @@ def _expand_fullwidth_tilde(candidate: Path, argument: str) -> Path:
     ):
         return Path("~" + argument[1:]).expanduser()
     return candidate
-
-
-def _load_outbound_file(workspace: Path, argument: str) -> OutboundFile:
-    workspace = workspace.expanduser().resolve()
-    requested = Path(argument).expanduser()
-    candidate = requested if requested.is_absolute() else workspace / requested
-    candidate = _expand_fullwidth_tilde(candidate, argument)
-    resolved = candidate.resolve()
-    if not resolved.is_relative_to(workspace):
-        raise ValueError("File must stay inside the bound workspace.")
-    if not resolved.exists():
-        raise ValueError(f"File not found: {resolved}")
-    if not resolved.is_file():
-        raise ValueError(f"Not a regular file: {resolved}")
-    media_type = mimetypes.guess_type(resolved.name)[0]
-    return OutboundFile(
-        name=resolved.name,
-        data=resolved.read_bytes(),
-        media_type=media_type or "application/octet-stream",
-    )
 
 
 def _save_inbound_files(

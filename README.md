@@ -62,7 +62,7 @@ kimi-bridge
 - 持久的 Kimi 会话管理：创建、列表、切换、重命名、查看、压缩和撤销。
 - 原地编辑的流式回复与路由侧分块；平台支持时另有独立思考流、交互式审批与提问。
 - 忙碌回合中的提示引导、取消、权限模式、模型、推理强度、计划、目标、任务、技能和 MCP 查看。
-- 接收图片、视频、文件和语音转写，以及 `/send` 文件外发。
+- 接收图片、视频、文件和语音转写，以及 `/files send` 文件外发。
 - 私聊白名单、仅监听回环地址的 Kimi 服务器监管，以及本地 `doctor` 诊断。
 
 ## 命令
@@ -72,7 +72,7 @@ kimi-bridge
 - 会话：`/new`、`/archive`、`/sessions`、`/switch`、`/status`、`/title`、`/usage`、`/compact`、`/undo`；
 - 控制：`/mode`、`/model`、`/secondary-model`、`/effort`、`/plan`、`/goal`、`/stop`、`/reload`；
 - 任务与工具：`/tasks`、`/skills`、`/mcp`；
-- 输出：`/send`、`/render-thinking`。
+- 输出：`/files send`、`/render-thinking`。
 
 在聊天中输入 `/help` 或 `/<command> ?` 查看用法；确切语法和平台限制见[命令参考](docs/COMMANDS.md)。
 

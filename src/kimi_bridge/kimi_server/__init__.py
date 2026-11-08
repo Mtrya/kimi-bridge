@@ -19,6 +19,12 @@ from .supervisor import KimiServerSupervisor, parse_server_startup_line
 from .events import session_notice_from_event
 from .probe import probe_kimi_compatibility
 from .types import (
+    FileDownload,
+    FilePreview,
+    FileListing,
+    WorkspaceFile,
+    FileContext,
+    WorkspaceInfo,
     GoalActivity,
     ActivityUpdate,
     BackgroundOutcome,
@@ -70,6 +76,12 @@ from .types import (
 )
 
 __all__ = [
+    "FileDownload",
+    "FilePreview",
+    "FileListing",
+    "WorkspaceFile",
+    "FileContext",
+    "WorkspaceInfo",
     "GoalActivity",
     "ActivityUpdate",
     "BackgroundOutcome",

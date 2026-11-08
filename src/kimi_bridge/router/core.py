@@ -11,6 +11,7 @@ from typing import Any
 
 from ..kimi_server import (
     KimiServerClient,
+    FileContext,
     KimiServerError,
     KimiServerOperationError,
     PromptContent,
@@ -31,6 +32,7 @@ from .interactions import _InteractionMixin
 from .models import _ActiveStream, _CompactionWaiter, _PendingInteraction
 from .rendering import _RenderingMixin
 from .sessions import _SessionMixin
+from .workspace import _FileChoice
 
 
 # ASR output inevitably contains recognition errors; the prefix marks the
@@ -107,6 +109,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._task_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
         ] = {}
+        self._file_choices: dict[tuple[str, ConversationRef], tuple[str, FileContext, tuple[_FileChoice, ...]]] = {}
         self._agent_choices: dict[tuple[str, ConversationRef], tuple[str, tuple[str, ...]]] = {}
         self._queue_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]

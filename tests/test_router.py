@@ -1586,7 +1586,7 @@ async def test_bridge_commands_switch_stop_and_mode(
         "/compact [instruction]",
         "/undo [count]",
         "/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
-        "/send <path>",
+        "/files [directory] | /files search <query> | /files show|send <n|path>",
         "/render-thinking [on|off]",
         "/reload",
     ):
@@ -5105,16 +5105,18 @@ async def test_prompt_upload_transport_failure_is_reported_without_escaping(
     assert "POST /files failed: ReadError" in adapter.sent[0][2]
 
 
-async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
+async def test_files_send_dispatches_one_file_with_workspace_resolution_and_mime(
     tmp_path: Path,
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     text_file = workspace / "notes.txt"
     text_file.write_bytes(b"hello")
     unknown_file = workspace / "payload.unknown-extension"
     unknown_file.write_bytes(b"opaque")
-    client = FakeKimiClient()
+    client = FileClient(workspace)
     adapter = FakeAdapter()
     store = StateStore(tmp_path / "state.json")
     store.save(
@@ -5143,9 +5145,9 @@ async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send notes.txt"))
+        await router.handle_inbound(adapter, _message("/files send notes.txt"))
         await router.handle_inbound(
-            adapter, _message(f"/send {unknown_file.resolve()}")
+            adapter, _message(f"/files send {unknown_file.resolve()}")
         )
     finally:
         await router.close()
@@ -5158,10 +5160,12 @@ async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
             "application/octet-stream",
         ),
     ]
-    assert client.call_order == []
+    assert client.prompts == []
 
 
-async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
+async def test_files_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "directory").mkdir()
@@ -5186,20 +5190,20 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
     )
     adapter = FakeAdapter()
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
         for command in (
-            "/send",
-            "/send missing.txt",
-            "/send directory",
-            f"/send {outside}",
-            "/send escape.txt",
-            "/send *.txt",
-            "/send first.txt second.txt",
+            "/files send",
+            "/files send missing.txt",
+            "/files send directory",
+            f"/files send {outside}",
+            "/files send escape.txt",
+            "/files send *.txt",
+            "/files send first.txt second.txt",
         ):
             await router.handle_inbound(adapter, _message(command))
     finally:
@@ -5207,10 +5211,10 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
 
     assert adapter.files == []
     replies = [text for _message_ref, _conversation, text in adapter.sent]
-    assert replies[0] == "Usage: /send <path>"
-    assert any("File not found" in reply for reply in replies)
-    assert any("Not a regular file" in reply for reply in replies)
-    assert sum("stay inside" in reply for reply in replies) == 2
+    assert replies[0] == "Usage: /files send <n|path>"
+    assert any("file missing" in reply for reply in replies)
+    assert any("directory" in reply for reply in replies)
+    assert sum("escapes workspace" in reply for reply in replies) == 2
 
 
 def test_expand_fullwidth_tilde_helper(
@@ -5289,9 +5293,11 @@ async def test_new_fullwidth_tilde_missing_everywhere_reports_error(
     ]
 
 
-async def test_send_expands_fullwidth_tilde_inside_home_workspace(
+async def test_files_send_expands_fullwidth_tilde_inside_home_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "home"
     workspace.mkdir()
     (workspace / "notes.txt").write_text("hello", encoding="utf-8")
@@ -5310,14 +5316,14 @@ async def test_send_expands_fullwidth_tilde_inside_home_workspace(
     )
     adapter = FakeAdapter()
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send ～/notes.txt"))
-        await router.handle_inbound(adapter, _message("/send ～/missing.txt"))
+        await router.handle_inbound(adapter, _message("/files send ～/notes.txt"))
+        await router.handle_inbound(adapter, _message("/files send ～/missing.txt"))
     finally:
         await router.close()
 
@@ -5325,13 +5331,15 @@ async def test_send_expands_fullwidth_tilde_inside_home_workspace(
         OutboundFile("notes.txt", b"hello", "text/plain")
     ]
     assert [text for _ref, _conversation, text in adapter.sent] == [
-        f"File not found: {(workspace / 'missing.txt').resolve()}"
+        "Command failed: kimi server API error 40409: file missing"
     ]
 
 
-async def test_send_surfaces_platform_error_without_kimi_relabeling(
+async def test_files_send_surfaces_platform_error_without_kimi_relabeling(
     tmp_path: Path,
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "large.bin").write_bytes(b"large")
@@ -5349,13 +5357,13 @@ async def test_send_surfaces_platform_error_without_kimi_relabeling(
     adapter = FakeAdapter()
     adapter.file_error = RuntimeError("platform size limit")
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send large.bin"))
+        await router.handle_inbound(adapter, _message("/files send large.bin"))
     finally:
         await router.close()
 

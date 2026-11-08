@@ -554,22 +554,17 @@ List the MCP tools resolved for the bound session. Read-only; takes no arguments
 Example:
 - `/mcp`""",
     ),
-    "/send": CommandHelp(
-        syntax="/send <path>",
-        summary="send one file from the bound workspace",
+    "/workspace": CommandHelp(
+        syntax="/workspace [add|remove|primary <path>]",
+        summary="inspect or change shared native workspace folders",
+        section="Sessions",
+        details="Show the native workspace ID, primary/additional folders and this session’s working directory. add appends a folder; remove removes an additional folder without deleting files; primary atomically swaps primary/additional roles. Changes apply to every session using this workspace. Existing sessions retain their native working directories, including access to that directory after removal from the shared set. Paths consume the remaining text, including spaces.",
+    ),
+    "/files": CommandHelp(
+        syntax="/files [directory] | /files search <query> | /files show|send <n|path>",
+        summary="browse, preview or send native workspace files",
         section="Output",
-        details="""**/send <path>**
-
-Send one regular file from the bound workspace into the chat.
-
-Arguments:
-- `path` — a relative path resolved from the bound workspace, or an absolute path that stays inside it.
-
-Side effects: missing paths, directories, globs, multiple files, and symlinks escaping the workspace are rejected. Feishu sends JPEG/PNG natively, MP4 as native media, and everything else as a file; Telegram sends JPEG/PNG as photos and everything else as documents.
-
-Example:
-- `/send build/report.pdf`
-- `/send /tmp/workspace/chart.png`""",
+        details="List up to 100 entries in the session working directory or a specified directory; search returns up to 50 filename matches. Native ignore rules apply. A successful listing/search replaces this chat/session’s numbered choices; switching sessions or changing folders invalidates them. show previews up to 8 KiB of text; binary files are identified. send delivers a file through the platform’s native file/media handling. Use ./123 for a numeric filename, paths with spaces directly, and /files -- search for a directory named search. Native workspace containment and symlink checks apply to each access.",
     ),
     "/render-thinking": CommandHelp(
         syntax="/render-thinking [on|off]",

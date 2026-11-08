@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 11
+KIMI_SEMANTIC_CONTRACT_VERSION = 12
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -42,6 +42,7 @@ class RestOperationContract:
     request_fields: tuple[SchemaFieldContract, ...] = ()
     query_examples: tuple[Mapping[str, Any], ...] = ()
     response_fields: tuple[SchemaFieldContract, ...] = ()
+    response_media_type: str = "application/json"
     schema_alias_note: str | None = None
 
 
@@ -386,6 +387,14 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/api/v1/sessions/{session_id}:reload",
             request_examples=({},),
         ),
+        RestOperationContract("session_environment", "WorkspaceOperations.get_file_context", "GET", "/sessions/{session_id}/environment", "/api/v1/sessions/{session_id}/environment", response_fields=(_field("workspace_id", "string"), _field("environment_id", "string"), _field("cwd", "string", required=False))),
+        RestOperationContract("list_workspaces", "WorkspaceOperations.get_file_context", "GET", "/workspaces", "/api/v1/workspaces", response_fields=(_field("items", "array"), _field("items.[].id", "string"), _field("items.[].root", "string"), _field("items.[].additional_dirs", "array"))),
+        RestOperationContract("update_workspace", "WorkspaceOperations.change_workspace", "PATCH", "/workspaces/{workspace_id}", "/api/v1/workspaces/{workspace_id}", request_examples=({"additional_dirs": ["/workspace/additional"]},), response_fields=(_field("id", "string"), _field("root", "string"), _field("additional_dirs", "array"))),
+        RestOperationContract("workspace_primary", "WorkspaceOperations.change_workspace", "POST", "/workspaces/{workspace_id}/primary", "/api/v1/workspaces/{workspace_id}/primary", request_examples=({"path": "/workspace/additional"},), response_fields=(_field("id", "string"), _field("root", "string"), _field("additional_dirs", "array"))),
+        RestOperationContract("list_files", "WorkspaceOperations.list_workspace_files", "POST", "/sessions/{session_id}/fs:list", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": ".", "depth": 1, "limit": 100, "allow_external_symlinks": False},), response_fields=(_field("items", "array"), _field("items.[].path", "string"), _field("items.[].name", "string"), _field("items.[].kind", "string"), _field("items.[].size", "integer", required=False), _field("truncated", "boolean"))),
+        RestOperationContract("search_files", "WorkspaceOperations.list_workspace_files", "POST", "/sessions/{session_id}/fs:search", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"query": "fixture", "limit": 50},), response_fields=(_field("items", "array"), _field("items.[].path", "string"), _field("items.[].name", "string"), _field("items.[].kind", "string"), _field("truncated", "boolean"))),
+        RestOperationContract("read_file", "WorkspaceOperations.preview_workspace_file", "POST", "/sessions/{session_id}/fs:read", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": "fixture.txt", "length": 8192, "encoding": "auto", "allow_external_symlinks": False},), response_fields=(_field("path", "string"), _field("content", "string"), _field("encoding", "string", values=("utf-8", "base64")), _field("size", "integer"), _field("is_binary", "boolean"), _field("truncated", "boolean"))),
+        RestOperationContract("download_file", "WorkspaceOperations.download_workspace_file", "GET", "/sessions/{session_id}/fs/{path}:download", "/api/v1/sessions/{session_id}/fs/{*}", response_media_type="application/octet-stream"),
         RestOperationContract(
             "side_question",
             "KimiServerClient.side_question",
@@ -1346,6 +1355,7 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "runtime_path": item.runtime_path,
                 "spec_path": item.spec_path,
                 "request_media_type": item.request_media_type,
+                "response_media_type": item.response_media_type,
                 "request_examples": list(item.request_examples),
                 "request_fields": [
                     field_payload(field) for field in item.request_fields

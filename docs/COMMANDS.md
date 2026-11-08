@@ -1,6 +1,6 @@
 # Commands and interactions
 
-Commands are case-insensitive before the first space; arguments retain their case. Any message not beginning with a recognized slash command is submitted to the bound Kimi session. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt. Path arguments (`/new`, `/send`) treat a standalone fullwidth `～` (U+FF5E, common from mobile IMEs), or one followed by the platform path separator, as `~` when the literal path does not exist; forms such as `～notes` remain literal.
+Commands are case-insensitive before the first space; arguments retain their case. Any message not beginning with a recognized slash command is submitted to the bound Kimi session. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt. Local path arguments (`/new`, `/files`) treat a standalone fullwidth `～` (U+FF5E, common from mobile IMEs), or one followed by the platform path separator, as `~` when the literal path does not exist; forms such as `～notes` remain literal.
 
 ## Exact command grammar
 
@@ -54,7 +54,11 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |
 | `/mcp` | List MCP tools resolved for the session. This is read-only. |
-| `/send <path>` | Send one regular file contained by the bound workspace. |
+| `/workspace [add\|remove\|primary <path>]` | Inspect or change shared native workspace folders; existing sessions retain their working directories. |
+| `/files [directory]` | List files and folders in the session working directory or a specified approved directory. |
+| `/files search <query>` | Search filenames in the native workspace roots. |
+| `/files show <n\|path>` | Preview up to 8 KiB of text, or identify a binary file. |
+| `/files send <n\|path>` | Send a workspace file as a platform attachment. |
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
 
 Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. Changing the bound session clears your task numbers across chats, including when you later switch back. Explicit IDs remain valid without a prior listing. Bare numbers always select list positions; use `/tasks show id <id>` or `/tasks cancel id <id>` for an exact ID, including numeric IDs such as `/tasks show id 123`.
@@ -64,6 +68,10 @@ Agent numbers follow the same chat/session selection scope as task numbers; use 
 Queue numbers refer to the latest `/queue` display in the same chat and session and are cleared on a session change. The active prompt is not numbered. Use `/queue cancel id 123` or `/queue steer id 123` for a numeric native ID, and `/queue -- <message>` to queue text beginning with `cancel` or `steer`. Kimi resolves stale prompt IDs and execution races. Use `/goal -- <objective>` when a new objective begins with a reserved goal action such as `edit`, and `/restore id 123` for a numeric archived session ID. `/switch` requires archived sessions to be restored first.
 
 Model and effort changes are accepted while busy and affect later native requests; an already sent request keeps its settings.
+
+`/workspace` shows the shared primary/additional folders separately from the session working directory. Folder changes affect sessions sharing that native workspace. Promoting a folder keeps the old primary as an additional folder; existing sessions keep their original working directories and access to them even after removal from shared membership. The native session’s directory and current additional folders determine file access, including symlink containment checks.
+
+`/files` lists up to 100 entries; `/files search` returns up to 50 matches under native ignore rules. A successful list or search installs one current numbered selection for that chat and session. Another view replaces it; binding or folder changes invalidate it. Use explicit paths with spaces directly, `./123` for a numeric filename, and `/files -- search` for a directory named `search`. Every open/send revalidates native access. Truncated listings and previews are labelled; directories and binary previews follow native results.
 
 Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh. Plan usage and quota reset information are not exposed by the public local server.
 
@@ -111,8 +119,8 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 
 | While a turn is busy | Commands |
 | --- | --- |
-| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`agents show`, `/todos [all]`, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/archive` |
+| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`/agents show`, `/todos [all]`, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/workspace`, `/files` list/search/show, `/goal`/`/goal status`, bare `/render-thinking` |
+| Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/files send`, `/workspace add`, `/workspace remove`, `/workspace primary`, `/render-thinking on\|off`, `/stop`, `/archive` |
 | Mutations reject instead of queueing | `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.
@@ -147,7 +155,7 @@ Goal complete/blocked transitions and background task/subagent outcomes produce 
 
 Feishu accepts text, native images and videos, generic files, and voice messages. QQ accepts C2C text and HTTPS attachments; only supported native image/video values take the native-media route. WeChat accepts private-chat text, images, voice, files, and video. Native image/video input depends on the selected model's `image_in`/`video_in` capability; otherwise the bridge saves the item under the workspace inbox. Generic files always use the workspace inbox. Voice messages are transcribed using the configured `[voice.asr]` endpoint first and the platform-native fallback when available.
 
-`/send <path>` can send one regular file contained by the bound workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and cannot send it proactively.
+`/files send <n|path>` sends one regular file authorized by the native session workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and cannot send it proactively.
 
 ## Current operating limits
 

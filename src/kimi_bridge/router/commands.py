@@ -7,7 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from functools import partial
-from pathlib import Path
 from typing import cast
 
 from ..kimi_server import (
@@ -19,7 +18,6 @@ from ..kimi_server import (
 )
 from ..platforms.base import ActorRef, ConversationRef, MessageRef, PlatformAdapter
 from ..state import PERMISSION_MODES
-from .files import _load_outbound_file
 from .help import command_help_details, render_help_index
 from .formatting import (
     HISTORY_DEFAULT_COUNT,
@@ -44,6 +42,7 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
+from .workspace import _WorkspaceMixin
 from .activity import _ActivityMixin
 from .session_controls import _SessionControlsMixin
 
@@ -64,7 +63,7 @@ _BOUND_INSPECTION_COMMANDS = frozenset(
     {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm", "/agents", "/todos"}
 )
 
-class _CommandMixin(_SessionControlsMixin, _ActivityMixin):
+class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin):
     async def _handle_command(
         self,
         conversation_key: str,
@@ -290,8 +289,11 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin):
                 argument,
             )
             return
-        if command == "/send":
-            await self._handle_send(conversation_key, adapter, conversation, argument)
+        if command == "/workspace":
+            await self._handle_workspace(conversation_key, adapter, conversation, argument)
+            return
+        if command == "/files":
+            await self._handle_files(conversation_key, adapter, conversation, argument)
             return
         if command == "/render-thinking":
             await self._handle_render_thinking(
@@ -636,29 +638,6 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin):
             return
         usage = await self._client.get_session_usage(binding.session_id)
         await self._send_chunked(adapter, conversation, _format_usage(usage))
-
-    async def _handle_send(
-        self,
-        conversation_key: str,
-        adapter: PlatformAdapter,
-        conversation: ConversationRef,
-        argument: str,
-    ) -> None:
-        if not argument:
-            await self._send_chunked(adapter, conversation, "Usage: /send <path>")
-            return
-        binding = await self._require_binding(conversation_key, adapter, conversation)
-        if binding is None:
-            return
-        try:
-            outbound = _load_outbound_file(Path(binding.workspace), argument)
-        except (OSError, ValueError) as exc:
-            await self._send_chunked(adapter, conversation, str(exc))
-            return
-        try:
-            await adapter.send_file(conversation, outbound)
-        except Exception as exc:
-            await self._send_chunked(adapter, conversation, f"File send failed: {exc}")
 
     async def _handle_render_thinking(
         self,

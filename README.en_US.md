@@ -62,7 +62,7 @@ For more detailed installation steps, platform-side setup, or customization, see
 - Durable Kimi session management: create, list, switch, rename, inspect, compact, and undo.
 - Edit-in-place streaming replies with router-side chunking; a separate thinking stream, interactive approvals, and questions where the platform supports them.
 - Prompt steering and cancellation during busy turns, plus permission mode, model, effort, plan, goal, task, skill, and MCP inspection.
-- Inbound images, videos, files, and transcribed voice, plus `/send` for outbound files.
+- Inbound images, videos, files, and transcribed voice, plus `/files send` for outbound files.
 - Private-chat allowlists, loopback-only Kimi server supervision, and a local `doctor` diagnostic.
 
 ## Commands
@@ -72,7 +72,7 @@ Chat commands include:
 - sessions: `/new`, `/archive`, `/sessions`, `/switch`, `/status`, `/title`, `/usage`, `/compact`, `/undo`;
 - control: `/mode`, `/model`, `/secondary-model`, `/effort`, `/plan`, `/goal`, `/stop`, `/reload`;
 - tasks and tools: `/tasks`, `/skills`, `/mcp`;
-- output: `/send`, `/render-thinking`.
+- output: `/files send`, `/render-thinking`.
 
 Type `/help` in chat or `/<command> ?` for usage; see the [command reference](docs/COMMANDS.md) for exact syntax and platform limits.
 

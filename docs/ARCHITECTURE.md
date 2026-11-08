@@ -11,7 +11,7 @@ kimi-bridge is a single-operator bridge between one instant-messaging adapter an
 ┌──────────────────────▼───────────────────────┐
 │ ChatRouter                                    │
 │ bindings, commands, interactions, streams,   │
-│ workspace-contained outbound authorization    │
+│ native workspace file access    │
 └──────────────────────┬───────────────────────┘
                        │ typed Kimi operations/events
 ┌──────────────────────▼───────────────────────┐
@@ -39,7 +39,7 @@ Session usage totals come from Kimi’s stored cumulative counters. Live `agent`
 
 ## Router boundary
 
-`src/kimi_bridge/router/` exposes the `ChatRouter` facade and owns platform-neutral command orchestration, session and stream lifecycle, interaction lifecycle, answer/thinking rendering, outbound-file authorization, formatting, and private runtime state. Model output, nonterminal notices, and final bridge replies use separate semantic sends so an adapter can preserve an active rendering lifecycle. The router maps an IM conversation to a Kimi session and persists bridge-owned bindings, preferences, and the delivery route used for autonomous replies. Inbound operations are serialized across chats because bindings and displayed selections are shared. Each observed native session owns its subscription, activity baseline, interaction state, and render buffers. Rebinding retains observation only while work remains; foreground output and off-session notices have separate delivery paths. Long-running compaction completion is tracked in the background so serial platform dispatchers can deliver later commands; router shutdown cancels and joins those completion tasks.
+`src/kimi_bridge/router/` exposes the `ChatRouter` facade and owns platform-neutral command orchestration, session and stream lifecycle, interaction lifecycle, answer/thinking rendering, semantic workspace/file operations, formatting, and private runtime state. Model output, nonterminal notices, and final bridge replies use separate semantic sends so an adapter can preserve an active rendering lifecycle. The router maps an IM conversation to a Kimi session and persists bridge-owned bindings, preferences, and the delivery route used for autonomous replies. Inbound operations are serialized across chats because bindings and displayed selections are shared. Each observed native session owns its subscription, activity baseline, interaction state, and render buffers. Rebinding retains observation only while work remains; foreground output and off-session notices have separate delivery paths. Long-running compaction completion is tracked in the background so serial platform dispatchers can deliver later commands; router shutdown cancels and joins those completion tasks.
 
 The router does not construct Feishu cards, QQ message payloads, WeChat item payloads, Telegram dictionaries, or multipart bodies. Adapters classify native media and expose semantic values; the router uses the selected model's capabilities to decide whether native image/video input becomes a Kimi file-backed prompt part or a workspace-inbox path. Generic files always use the workspace inbox. Voice messages resolve through the optional `[voice.asr]` endpoint and then the selected adapter's native transcription path when available.
 
@@ -101,7 +101,7 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 - The managed Kimi server binds only to `127.0.0.1` and requires its generated bearer token.
 - Feishu authorizes stable `open_id`/`user_id` values, QQ authorizes app-scoped C2C `user_openid` values, and WeChat authorizes stable QR-scanner identities. None is a display-name or nickname substitute.
 - Platform secrets remain in protected configuration or adapter-owned managed storage. `state.json` never contains adapter credentials.
-- `/send` accepts only files within the bound workspace, including symlink containment checks.
+- Workspace file browsing, previews, and downloads use Kimi’s session filesystem operations and their native root/symlink checks. Shared folder membership and the session’s original working directory are distinct native values.
 - `ExitPlanMode` plan previews read only regular files under `~/.kimi-code/sessions/**/plans/`; any other wire-supplied path is ignored.
 - The deployment model is one trusted host account and trusted operator, not tenant isolation. Kimi Code and its tools retain the host account's filesystem, process, and network authority.
 
