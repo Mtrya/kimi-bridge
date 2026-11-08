@@ -23,8 +23,10 @@ class _ObservationMixin:
         activity = active.activity
         if activity is None:
             activity = await self._client.inspect_activity(active.session_id)
-        return any(task.status == "running" for task in activity.tasks) or (
-            activity.goal is not None and activity.goal.status == "active"
+        return (
+            any(agent.status == "running" for agent in activity.agents)
+            or any(task.status == "running" for task in activity.tasks)
+            or (activity.goal is not None and activity.goal.status == "active")
         )
 
     async def _notice_once(self, active: _ActiveStream, text: str) -> None:

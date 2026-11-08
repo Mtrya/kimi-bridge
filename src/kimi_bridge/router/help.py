@@ -628,7 +628,11 @@ def command_help_details(command: str, argument: str) -> str | None:
         suffix = f" {token}"
         if argument.endswith(suffix) and (
             _has_sub_forms(command)
-            or (command == "/files" and argument[: -len(suffix)] in {"show", "send", "diff", "search", "changes"})
+            or (
+                command == "/files"
+                and argument[: -len(suffix)].strip()
+                in {"show", "send", "diff", "search", "changes"}
+            )
         ):
             path = argument[: -len(suffix)]
             break

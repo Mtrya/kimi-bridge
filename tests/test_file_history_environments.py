@@ -520,10 +520,15 @@ async def test_recorded_diff_preserves_line_terminator_changes(before, after):
         assert "-value\r\n" in diff.text
 
 
-async def test_large_repetitive_diff_is_rejected_before_expensive_matching():
+@pytest.mark.parametrize("case", ["repetitive", "lines", "characters"])
+async def test_large_repetitive_diff_is_rejected_before_expensive_matching(case):
     from kimi_bridge.kimi_server.file_history import _text_diff
 
     repetitive = "\n".join(f"label {number % 100}" for number in range(100000))
+    if case == "lines":
+        repetitive = "x\n" * 2001
+    elif case == "characters":
+        repetitive = "x" * 131073
     diff = _text_diff(repetitive, "new\n" + repetitive, "fixture.txt")
     assert diff.unavailable == "oversize" and diff.text is None
 
@@ -613,3 +618,61 @@ async def test_decoded_plan_approval_uses_native_projection_in_chat(tmp_path):
             }
         finally:
             await router.close()
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\x85", "\v", "\f"])
+def test_recorded_diff_keeps_unicode_separators_inside_physical_lines(separator):
+    from kimi_bridge.kimi_server.file_history import _text_diff
+
+    diff = _text_diff(
+        "before" + separator + "tail\n", "after" + separator + "tail\n", "fixture.txt"
+    )
+    assert "-before" + separator + "tail\n" in diff.text
+    assert "+after" + separator + "tail\n" in diff.text
+    assert "\\ No newline at end of file" not in diff.text
+
+
+async def test_recorded_deleted_fullwidth_tilde_path_is_literal(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    # The recorded literal no longer exists. Another recorded file is at the expanded path.
+    literal = "～/fixture.txt"
+    expanded = str(tmp_path / "home" / "fixture.txt")
+    http = FakeHttpClient(
+        [
+            _envelope(
+                {
+                    "recorded": True,
+                    "changes": [
+                        _change("deleted", path=literal),
+                        _change(path=expanded),
+                    ],
+                }
+            ),
+            _envelope({"metadata": {"cwd": str(tmp_path)}}),
+            _envelope({"workspace_id": "workspace", "environment_id": "local"}),
+            _envelope(
+                {
+                    "items": [
+                        {
+                            "id": "workspace",
+                            "root": str(tmp_path),
+                            "additional_dirs": [],
+                        }
+                    ]
+                }
+            ),
+            _envelope({"content": {"content": "Recorded deleted fixture\n"}}),
+            _envelope({"content": {"version": 2}}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        diff = await client.get_file_diff("session-1", literal, turn=RecordedTurn(1))
+    assert "-Recorded deleted fixture" in diff.text
+    assert all(
+        request[2]["params"]["path"] == literal
+        for request in http.requests
+        if request[1].endswith("/file-history/content")
+    )

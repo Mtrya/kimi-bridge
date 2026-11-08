@@ -322,3 +322,99 @@ async def test_task_stop_refreshes_unknown_child_owner_after_native_not_found():
         ]
         == "grandchild"
     )
+
+
+@pytest.mark.parametrize("discovery", ["inspection", "subscription"])
+async def test_handshake_remembers_terminal_nested_owner_before_projection_prunes(
+    discovery,
+):
+    frames = [
+        *_nested_frames(),
+        {
+            "type": "task",
+            "session_id": "session-1",
+            "agent_id": "grandchild",
+            **_task_payload("shell-task", status="ended", outcome="completed"),
+        },
+        {"type": "todo", "session_id": "session-1", "agent_id": "main", "items": []},
+    ]
+    listing = FakeWebSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=frames,
+        events_before_ack=True,
+    )
+    watched = FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect([listing, watched]),
+    ) as client:
+        stream = None
+        try:
+            if discovery == "inspection":
+                activity = await client.inspect_activity("session-1")
+            else:
+                from kimi_bridge.kimi_server import ActivityUpdate
+
+                stream = client.subscribe_events("session-1", include_activity=True)
+                async for event in stream:
+                    if isinstance(event, ActivityUpdate):
+                        activity = event.activity
+                        break
+            assert all(task.id != "shell-task" for task in activity.tasks)
+            task = await client.get_task("session-1", "shell-task", output_bytes=0)
+            assert task.owner_agent_id == "grandchild"
+        finally:
+            if stream is not None:
+                await stream.aclose()
+    assert (
+        next(frame for frame in watched.sent if frame["type"] == "task.watch")[
+            "agent_id"
+        ]
+        == "grandchild"
+    )
+
+
+async def test_unknown_owner_retry_closes_each_exchange_and_has_own_timeout():
+    import asyncio
+    import json
+
+    sockets = []
+
+    class SlowSocket(FakeWebSocket):
+        opened = False
+
+        async def __aenter__(self):
+            assert all(not other.opened for other in sockets)
+            self.opened = True
+            return self
+
+        async def __aexit__(self, *_):
+            self.opened = False
+
+        async def send(self, raw_frame):
+            if json.loads(raw_frame)["type"] in {"task.stop", "subscribe_v2"}:
+                await asyncio.sleep(0.2)
+            await super().send(raw_frame)
+
+    missing = SlowSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        task_responses=[{"type": "response", "code": 40406, "msg": "missing"}],
+    )
+    listing = SlowSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        events=_nested_frames(),
+        events_before_ack=True,
+    )
+    stopped = SlowSocket(subscribe_payload={"accepted": ["session-1"]})
+    sockets.extend([missing, listing, stopped])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=FakeHttpClient([]),
+        ws_connect=FakeWebSocketConnect(sockets),
+        timeout=0.35,
+    ) as client:
+        assert await client.cancel_task("session-1", "shell-task")
+    assert all(not socket.opened for socket in sockets)

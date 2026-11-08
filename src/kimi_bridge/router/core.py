@@ -203,13 +203,14 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                             msg.conversation,
                             msg.actor,
                         )
-                    await self._ensure_active_stream(
-                        conversation_key,
-                        binding.session_id,
-                        adapter,
-                        msg.conversation,
-                        msg.actor,
-                    )
+                    else:
+                        await self._ensure_active_stream(
+                            conversation_key,
+                            binding.session_id,
+                            adapter,
+                            msg.conversation,
+                            msg.actor,
+                        )
                     content = await self._build_prompt_content(binding, msg, adapter)
                     result = await self._client.submit_prompt(
                         binding.session_id,

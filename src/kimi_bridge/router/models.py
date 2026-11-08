@@ -59,6 +59,8 @@ class _ActiveStream:
     actor: ActorRef
     foreground: bool = True
     activity: SessionActivity | None = None
+    # Hold initial events until the prepared subscription owns delivery.
+    delivery_ready: asyncio.Event | None = None
     switch_notices: set[str] = field(default_factory=set)
     render: _RenderState = field(default_factory=_RenderState)
     thinking: _RenderState = field(

@@ -33,7 +33,7 @@ from ..state import (
 )
 from .files import _expand_fullwidth_tilde
 from .formatting import _session_recency_key
-from .models import _ActiveStream, _CompactionOutcome
+from .models import _ActiveStream, _CompactionOutcome, _RenderState, THINKING_LABEL
 from .observation import _ObservationMixin
 
 
@@ -328,7 +328,10 @@ class _SessionMixin(_ObservationMixin):
                 actor_aliases=actor.aliases,
             ),
         )
-        self._set_binding(conversation_key, binding)
+        await self._ensure_active_stream(
+            conversation_key, session_id, adapter, conversation, actor,
+            permission_mode=permission_mode, binding=binding,
+        )
         return binding
 
     async def _verify_session_profile(
@@ -375,34 +378,39 @@ class _SessionMixin(_ObservationMixin):
         self._verified_session_profiles.add(session_id)
 
     async def _bind_selected_session(
-        self, conversation_key: str, session: dict[str, Any],
-        adapter: PlatformAdapter, conversation: ConversationRef, actor: ActorRef,
+        self,
+        conversation_key: str,
+        session: dict[str, Any],
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        actor: ActorRef,
     ) -> ConversationBinding:
         current = self._state.bindings.get(conversation_key)
         binding = self._binding_from_session(
-            session, adapter=adapter,
+            session,
+            adapter=adapter,
             render_thinking=current.render_thinking if current is not None else False,
-            conversation=conversation, actor=actor,
+            conversation=conversation,
+            actor=actor,
         )
         status = await self._client.inspect_session(binding.session_id)
         if adapter.supports_interactions and status.permission_mode is not None:
             binding = replace(binding, permission_mode=status.permission_mode)
         await self._verify_session_profile(
-            binding.session_id, binding.permission_mode, replace_existing=False, status=status
+            binding.session_id,
+            binding.permission_mode,
+            replace_existing=False,
+            status=status,
         )
-        self._set_binding(conversation_key, binding)
-        try:
-            await self._ensure_active_stream(
-                conversation_key, binding.session_id, adapter, conversation, actor,
-                permission_mode=binding.permission_mode,
-            )
-        except BaseException:
-            if current is None:
-                self._state.bindings.pop(conversation_key, None)
-                self._state_store.save(self._state)
-            else:
-                self._set_binding(conversation_key, current)
-            raise
+        await self._ensure_active_stream(
+            conversation_key,
+            binding.session_id,
+            adapter,
+            conversation,
+            actor,
+            permission_mode=binding.permission_mode,
+            binding=binding,
+        )
         return binding
 
     def _binding_from_session(
@@ -460,111 +468,150 @@ class _SessionMixin(_ObservationMixin):
         conversation: ConversationRef,
         actor: ActorRef,
         permission_mode: str | None = None,
+        *,
+        binding: ConversationBinding | None = None,
     ) -> None:
-        destination = self._observers.get(session_id)
-        if (
-            destination is not None
-            and destination.task is not None
-            and not destination.task.done()
-            and destination.conversation_key != conversation_key
-        ):
-            raise KimiServerOperationError(
-                "This session is receiving output in another conversation. Use that conversation to control it."
-            )
-        if destination is not None and destination.conversation != conversation:
-            await self._detach_controls(destination)
-            await self._cancel_side_question(conversation_key)
-            await self._stop_observer(destination, preserve_compaction_waiter=True)
-        side = self._side_questions.get(conversation_key)
-        if side is not None and side[0] != session_id:
-            await self._cancel_side_question(conversation_key)
+        active = self._observers.get(session_id)
+        if active is not None and active.task is not None and not active.task.done():
+            if active.conversation_key != conversation_key:
+                raise KimiServerOperationError(
+                    "This session is receiving output in another conversation. Use that conversation to control it."
+                )
+        elif active is not None:
+            await self._stop_observer(active)
+            active = None
+        current = self._state.bindings.get(conversation_key)
         if permission_mode is None:
-            binding = self._state.bindings.get(conversation_key)
             permission_mode = (
-                binding.permission_mode
-                if binding is not None and binding.session_id == session_id
+                current.permission_mode
+                if current is not None and current.session_id == session_id
                 else DEFAULT_PERMISSION_MODE
             )
         await self._verify_session_profile(
-            session_id,
-            permission_mode,
-            replace_existing=False,
+            session_id, permission_mode, replace_existing=False
         )
-        for previous in tuple(self._observers.values()):
-            if previous.session_id == session_id or not previous.foreground:
-                continue
-            has_work = (
-                await self._session_has_work(previous)
-                if previous.conversation_key == conversation_key else True
-            )
-            if previous.conversation_key == conversation_key:
-                previous.foreground = False
-                await self._cancel_side_question(conversation_key)
-                await self._detach_controls(previous)
-                await self._cancel_delayed_flush(previous.render)
-                await self._cancel_delayed_flush(previous.thinking)
-            if has_work:
-                self._state.observations[previous.session_id] = ObservationRoute(previous.conversation_key, DeliveryRoute(
-                    previous.conversation.platform, previous.conversation.bot_id, previous.conversation.conversation_id,
-                    previous.actor.id, previous.actor.aliases,
-                ))
-                self._state_store.save(self._state)
+        previous = []
+        for source in tuple(self._observers.values()):
+            if source.session_id != session_id and source.foreground:
+                has_work = (
+                    await self._session_has_work(source)
+                    if source.conversation_key == conversation_key
+                    else True
+                )
+                previous.append((source, has_work))
+
+        if active is not None and (
+            self._observers.get(session_id) is not active
+            or active.task is None
+            or active.task.done()
+        ):
+            active = None
+        created = active is None
+        relocating = active is not None and active.conversation != conversation
+        returning = active is not None and not active.foreground
+        gate = asyncio.Event()
+        subscription_wait = None
+        try:
+            if created:
+                active = _ActiveStream(
+                    conversation_key,
+                    session_id,
+                    adapter,
+                    conversation,
+                    actor,
+                    delivery_ready=gate,
+                )
+                self._observers[session_id] = active
+                active.task = asyncio.create_task(
+                    self._consume_events(active), name=f"kimi-events-{session_id}"
+                )
+                subscription_wait = asyncio.create_task(
+                    self._client.wait_until_subscribed(session_id)
+                )
+                done, _ = await asyncio.wait(
+                    {active.task, subscription_wait},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if active.task in done:
+                    active.task.result()
+                    raise KimiServerOperationError(
+                        "kimi event stream ended before subscribing"
+                    )
+                await subscription_wait
             else:
-                await self._stop_observer(previous)
-        active = self._observers.get(session_id)
-        if active is not None and active.task is not None and not active.task.done():
-            returning = not active.foreground
+                active.delivery_ready = gate
+            snapshot = (
+                await self._client.get_snapshot(session_id)
+                if returning or relocating
+                else None
+            )
+        except BaseException:
+            if subscription_wait is not None and not subscription_wait.done():
+                subscription_wait.cancel()
+                await asyncio.gather(subscription_wait, return_exceptions=True)
+            if created and active is not None:
+                await self._stop_observer(active)
+            gate.set()
+            if active is not None:
+                active.delivery_ready = None
+            raise
+
+        # Native preparation succeeded; commit the binding and delivery roles.
+        try:
+            if binding is not None:
+                self._set_binding(conversation_key, binding)
+            side = self._side_questions.get(conversation_key)
+            if side is not None and (side[0] != session_id or relocating):
+                await self._cancel_side_question(conversation_key)
+            for source, has_work in previous:
+                if source.conversation_key == conversation_key:
+                    source.foreground = False
+                    await self._detach_controls(source)
+                    await self._cancel_delayed_flush(source.render)
+                    await self._cancel_delayed_flush(source.thinking)
+                if has_work:
+                    self._state.observations[source.session_id] = ObservationRoute(
+                        source.conversation_key,
+                        DeliveryRoute(
+                            source.conversation.platform,
+                            source.conversation.bot_id,
+                            source.conversation.conversation_id,
+                            source.actor.id,
+                            source.actor.aliases,
+                        ),
+                    )
+                else:
+                    await self._stop_observer(source)
+            if relocating:
+                await self._detach_controls(active)
+                await self._cancel_delayed_flush(active.render)
+                await self._cancel_delayed_flush(active.thinking)
+                active.render = _RenderState()
+                active.thinking = _RenderState(prefix=THINKING_LABEL)
+                active.step = None
+                active.pending_finalization = None
+                active.pending_terminal_notice = None
             active.foreground = True
             active.conversation_key = conversation_key
-            active.adapter, active.conversation, active.actor = adapter, conversation, actor
+            active.adapter, active.conversation, active.actor = (
+                adapter,
+                conversation,
+                actor,
+            )
             self._active = active
             self._state.observations.pop(session_id, None)
             self._remember_active_conversation(conversation_key)
-            if returning:
-                await self._render_resync_snapshot(active, await self._client.get_snapshot(session_id))
+            self._state_store.save(self._state)
+            if snapshot is not None:
+                await self._render_resync_snapshot(active, snapshot)
                 async with self._interaction_lock:
                     await self._deliver_interactions(active)
-            return
-        if active is not None:
-            await self._stop_observer(active)
-        active = _ActiveStream(
-            conversation_key=conversation_key,
-            session_id=session_id,
-            adapter=adapter,
-            conversation=conversation,
-            actor=actor,
-        )
-        active.task = asyncio.create_task(
-            self._consume_events(active),
-            name=f"kimi-events-{session_id}",
-        )
-        stream_task = active.task
-        self._active = active
-        self._observers[session_id] = active
-        self._state.observations.pop(session_id, None)
-        subscription_wait = asyncio.create_task(
-            self._client.wait_until_subscribed(session_id),
-            name=f"kimi-subscription-ready-{session_id}",
-        )
-        try:
-            done, _pending = await asyncio.wait(
-                {stream_task, subscription_wait},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if stream_task in done:
-                active.task = None
-                stream_task.result()
-                raise KimiServerOperationError("kimi event stream ended before subscribing")
-            await subscription_wait
-            self._remember_active_conversation(conversation_key)
-        except BaseException:
-            if not subscription_wait.done():
-                subscription_wait.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await subscription_wait
-            await self._stop_active_stream()
-            raise
-        stream_task.add_done_callback(self._stream_done)
+            if created:
+                active.task.add_done_callback(self._stream_done)
+        finally:
+            gate.set()
+            active.delivery_ready = None
+        await asyncio.sleep(0)
 
     async def restore(self, adapter: PlatformAdapter) -> None:
         """Restore event delivery for the conversation active before restart."""
@@ -659,6 +706,8 @@ class _SessionMixin(_ObservationMixin):
         stream = self._client.subscribe_events(active.session_id, include_activity=True)
         try:
             async for event in stream:
+                if active.delivery_ready is not None:
+                    await active.delivery_ready.wait()
                 if self._observers.get(active.session_id) is not active:
                     return
                 if isinstance(event, ActivityUpdate):

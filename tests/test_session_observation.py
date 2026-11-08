@@ -672,21 +672,49 @@ async def test_same_operator_chat_handoff_rebuilds_messages_and_controls(
         )
         await _wait_for(lambda: bool(source.render.messages))
         old_messages = tuple(source.render.messages)
+        prefix = "Original answer prefix " * 3
+        client.snapshots["session-control"] = {
+            "in_flight_turn": {
+                "turn_id": 1,
+                "step": 1,
+                "assistant_text": prefix,
+                "thinking_text": "",
+            },
+            "messages": {"items": []},
+        }
         moved = _message("/status", conversation_id="oc_destination")
         await router.handle_inbound(adapter, moved)
         await _wait_for(lambda: len(adapter.interactions) == 2)
-        assert router._active is not source and source.task is None
+        assert all(
+            message not in old_messages for message in router._active.render.messages
+        )
+        assert any(
+            text == prefix and conversation == moved.conversation
+            for _, conversation, text in adapter.sent
+        )
         assert adapter.interactions[-1][1] == moved.conversation
-        client.emit("session-control", _event("turn.started", turnId=1))
+        client.snapshots["session-control"] = {
+            "in_flight_turn": None,
+            "messages": {
+                "items": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": prefix + "Destination answer"}
+                        ],
+                    }
+                ]
+            },
+        }
         client.emit(
             "session-control",
-            _event("assistant.delta", delta="Destination answer", offset=0),
+            _event("assistant.delta", delta="Destination answer", offset=len(prefix)),
         )
         client.emit(
             "session-control", _event("turn.ended", turnId=1, reason="completed")
         )
         await _wait_for(
-            lambda: any("Destination answer" in text for _, _, text in adapter.sent)
+            lambda: any("Destination answer" in text for _, text in adapter.edits)
         )
         assert all(
             message not in old_messages
@@ -700,3 +728,212 @@ async def test_same_operator_chat_handoff_rebuilds_messages_and_controls(
         )
     finally:
         await router.close()
+
+
+@pytest.mark.parametrize("failure", ["subscription", "snapshot", "other_operator"])
+async def test_failed_switch_preserves_source_delivery_controls_and_selections(
+    tmp_path, failure
+):
+    from kimi_bridge.kimi_server import (
+        KimiServerTransportError,
+        PromptQueue,
+        QueuedPrompt,
+    )
+
+    class Client(FakeKimiClient):
+        fail_snapshot = False
+
+        async def get_snapshot(self, session_id):
+            if self.fail_snapshot and session_id == "other":
+                raise KimiServerTransportError("Destination snapshot unavailable")
+            return await super().get_snapshot(session_id)
+
+    client = Client()
+    client.sessions = [
+        _control_session(busy=True),
+        {**_control_session(busy=True), "id": "other"},
+    ]
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        if failure == "snapshot":
+            await router.handle_inbound(adapter, _message("/switch other"))
+            await router.handle_inbound(adapter, _message("/switch session-control"))
+            client.fail_snapshot = True
+        else:
+            await router.handle_inbound(adapter, _message("/status"))
+            if failure == "other_operator":
+                await router.handle_inbound(
+                    adapter,
+                    _message(
+                        "/switch other", user_id="ou_other", conversation_id="oc_other"
+                    ),
+                )
+            else:
+                client.stream_errors["other"] = KimiServerTransportError(
+                    "Destination unavailable"
+                )
+        request = replace(_approval(), session_id="session-control")
+        client.approvals["session-control"] = [request]
+        client.emit(
+            "session-control", InteractionUpdate("session-control", request.id, request)
+        )
+        await _wait_for(lambda: bool(router._pending))
+        source = router._observers["session-control"]
+        pending = router._pending[source.conversation_key]
+        client.tasks["session-control"] = [_task("selected-task")]
+        client.task_details[("session-control", "selected-task")] = client.tasks[
+            "session-control"
+        ][0]
+        client.prompt_queues["session-control"] = PromptQueue(
+            None, (QueuedPrompt("selected-prompt", "queued", "Fixture"),)
+        )
+        await router.handle_inbound(adapter, _message("/tasks"))
+        await router.handle_inbound(adapter, _message("/queue"))
+        await router.handle_inbound(adapter, _message("/switch other"))
+        assert (
+            store.load().bindings[source.conversation_key].session_id
+            == "session-control"
+        )
+        assert source.foreground and router._pending[source.conversation_key] is pending
+        assert source.task is not None and not source.task.done()
+        await router.handle_inbound(adapter, _message("/tasks show 1"))
+        await router.handle_inbound(adapter, _message("/queue cancel 1"))
+        assert client.task_detail_calls[-1][:2] == ("session-control", "selected-task")
+        assert client.cancelled_prompts[-1] == ("session-control", "selected-prompt")
+        client.emit("session-control", _event("turn.started", turnId=1))
+        client.emit(
+            "session-control",
+            _event(
+                "assistant.delta",
+                delta="Source continues after failed switch",
+                offset=0,
+            ),
+        )
+        client.emit(
+            "session-control", _event("turn.ended", turnId=1, reason="completed")
+        )
+        await _wait_for(
+            lambda: any(
+                "Source continues after failed switch" in text
+                for _, _, text in adapter.sent
+            )
+        )
+        assert all(
+            conversation == source.conversation
+            for _, conversation, text in adapter.sent
+            if "Source continues after failed switch" in text
+        )
+    finally:
+        await router.close()
+
+
+async def test_running_agent_retains_observation_without_main_busy_or_tasks(tmp_path):
+    class Client(FakeKimiClient):
+        async def inspect_activity(self, session_id):
+            return SessionActivity(session_id, (AgentActivity("child", "running"),), ())
+
+    client = Client()
+    client.sessions = [_control_session(), {**_control_session(), "id": "other"}]
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/status"))
+        source = router._active
+        await router.handle_inbound(adapter, _message("/switch other"))
+        assert router._observers["session-control"] is source and not source.foreground
+        assert "session-control" in store.load().observations
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("state", ["completed", "failed", "cancelled"])
+async def test_native_side_question_recovers_terminal_reset_without_resubmitting(state):
+    class SideSocket(FakeWebSocket):
+        def _agent_burst_frames(self, session_id, *, include_reset=True):
+            frames = super()._agent_burst_frames(
+                session_id, include_reset=include_reset
+            )
+            for frame in frames:
+                frame["agent_id"] = "side-agent"
+                if frame["type"] == "transcript.reset":
+                    frame["payload"]["agent_id"] = "side-agent"
+            return frames
+
+    turn = {
+        "kind": "turn",
+        "turnId": "side-turn",
+        "ordinal": 1,
+        "state": state,
+        "triggerPromptId": "side-prompt",
+        "steps": [
+            {
+                "stepId": "side-step",
+                "ordinal": 1,
+                "state": state,
+                "frames": [
+                    {
+                        "kind": "text",
+                        "role": "assistant",
+                        "text": "Recovered side fixture",
+                    }
+                ],
+            }
+        ],
+    }
+    first = SideSocket(
+        subscribe_payload={"accepted": ["session-1"]}, disconnect_after_events=True
+    )
+    second = SideSocket(
+        subscribe_payload={"accepted": ["session-1"]},
+        reset_on_resume=True,
+        reset_seq=10,
+    )
+    second._reset_snapshot_items = [turn]
+    empty = {
+        "items": [],
+        "agents": [],
+        "pending_interactions": [],
+        "attachments": [],
+        "has_more": False,
+        "seq": 1,
+    }
+    complete = {**empty, "items": [turn], "seq": 10}
+    http = FakeHttpClient(
+        [
+            _envelope({"agent_id": "side-agent"}),
+            _envelope({"prompt_id": "side-prompt", "status": "running"}),
+            _envelope(None, code=40903, msg="already ended"),
+        ],
+        transcript_snapshots=[empty, complete, complete],
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([first, second]),
+        sleep=lambda _: asyncio.sleep(0),
+    ) as client:
+
+        async def collect():
+            return [
+                event
+                async for event in client.side_question("session-1", "Inspect fixture")
+            ]
+
+        events = await asyncio.wait_for(collect(), 1)
+    ended = [event for event in events if event["payload"]["type"] == "turn.ended"]
+    assert len(ended) == 1 and ended[0]["payload"]["reason"] == state
+    assert ended[0]["snapshot"]["messages"]["items"][-1]["content"] == [
+        {"type": "text", "text": "Recovered side fixture"}
+    ]
+    assert (
+        len(
+            [
+                request
+                for request in http.requests
+                if request[0] == "POST" and request[1].endswith("/prompts")
+            ]
+        )
+        == 1
+    )

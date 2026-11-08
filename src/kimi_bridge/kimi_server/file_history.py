@@ -6,6 +6,7 @@ import asyncio
 import difflib
 import ntpath
 import posixpath
+from io import StringIO
 from pathlib import PureWindowsPath
 
 from .types import FileChange, FileChanges, FileDiff, RecordedTurn
@@ -57,7 +58,6 @@ class FileHistoryOperations:
         if not view.recorded or view.turn is None:
             return FileDiff(None, "unrecorded")
         context = await self.get_file_context(session_id)
-        path = _local_input(context, path)
         paths = ntpath if PureWindowsPath(context.cwd).is_absolute() else posixpath
 
         def key(value: str) -> str:
@@ -70,6 +70,16 @@ class FileHistoryOperations:
         change = next(
             (change for change in view.changes if key(change.path) == key(path)), None
         )
+        if change is None:
+            expanded = _local_input(context, path)
+            change = next(
+                (
+                    change
+                    for change in view.changes
+                    if key(change.path) == key(expanded)
+                ),
+                None,
+            )
         if change is None:
             return FileDiff(None, "missing")
         path = change.path
@@ -99,7 +109,10 @@ def _text_diff(before: str, after: str, path: str) -> FileDiff:
     # Bound matching work as well as output; repetitive text can be quadratic.
     if max(len(before), len(after)) > 131072:
         return FileDiff(None, "oversize")
-    old_lines, new_lines = before.splitlines(keepends=True), after.splitlines(keepends=True)
+    old_lines, new_lines = (
+        list(StringIO(before, newline="")),
+        list(StringIO(after, newline="")),
+    )
     if max(len(old_lines), len(new_lines)) > 2000:
         return FileDiff(None, "oversize")
     chunks = []

@@ -105,14 +105,6 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _Int
                 environment_id=environment_id,
                 environment_cwd=environment_cwd,
             )
-            await self._ensure_active_stream(
-                conversation_key,
-                binding.session_id,
-                adapter,
-                conversation,
-                actor,
-                permission_mode=binding.permission_mode,
-            )
             target = await self._client.get_file_context(binding.session_id) if environment_id else None
             await self._send_chunked(
                 adapter,

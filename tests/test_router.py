@@ -7275,6 +7275,7 @@ def test_help_resolver_preserves_free_form_arguments() -> None:
     assert command_help_details("/new", "/tmp/dir ?") is None
     for action in ("show", "send", "search", "changes", "diff"):
         assert command_help_details("/files", action + " ?") == COMMAND_HELP["/files"].details
+        assert command_help_details("/files", action + "   ?") == COMMAND_HELP["/files"].details
     assert command_help_details("/files", "folder name ?") is None
     assert command_help_details("/files", "show file name ?") is None
     assert (
