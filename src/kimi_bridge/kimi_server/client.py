@@ -39,6 +39,7 @@ from .prompts import deliver_prompt
 from .supervisor import KimiServerSupervisor
 from .transcript import snapshot_from_transcript
 from .types import (
+    ActivityUpdate,
     SessionActivity,
     BackgroundOutcome,
     GoalControl,
@@ -57,6 +58,7 @@ from .types import (
     PromptDelivery,
     PromptMedia,
     PromptQueue,
+    PromptOutcome,
     PromptSubmission,
     SecondaryModelConfig,
     ServerConnection,
@@ -137,12 +139,12 @@ class KimiServerClient:
         self._sleep = sleep
         self._reconnect_initial_backoff = reconnect_initial_backoff
         self._reconnect_max_backoff = reconnect_max_backoff
-        self._subscription_lock = asyncio.Lock()
+        self._subscription_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._secondary_model_lock = asyncio.Lock()
         self._subscription_ready: dict[str, asyncio.Event] = {}
         self._agent_frames: dict[str, dict[str, Any]] = {}
         self._usage_frames: dict[str, dict[str, Any]] = {}
-        self._active_ws: Any | None = None
+        self._active_ws: dict[tuple[str, str], Any] = {}
         self._activities: dict[str, ActivityProjection] = {}
         self._task_owners: dict[tuple[str, str], str] = {}
         self._closed = False
@@ -155,8 +157,7 @@ class KimiServerClient:
 
     async def aclose(self) -> None:
         self._closed = True
-        if self._active_ws is not None:
-            await self._active_ws.close()
+        await asyncio.gather(*(ws.close() for ws in tuple(self._active_ws.values())))
         if self._owns_http:
             await self._http.aclose()
 
@@ -606,6 +607,7 @@ class KimiServerClient:
         thinking: str | None = None,
         permission_mode: PermissionMode | None = None,
         plan_mode: bool | None = None,
+        agent_id: str | None = None,
     ) -> PromptSubmission:
         if not isinstance(delivery, PromptDelivery):
             raise ValueError("delivery must be a PromptDelivery")
@@ -619,6 +621,8 @@ class KimiServerClient:
             payload["permission_mode"] = permission_mode
         if plan_mode is not None:
             payload["plan_mode"] = plan_mode
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
         connection = await self._connection_info()
 
         async def request(operation: str, body: dict[str, Any]) -> Any:
@@ -630,6 +634,40 @@ class KimiServerClient:
             )
 
         return await deliver_prompt(request, payload, delivery)
+
+    async def side_question(self, session_id: str, question: str) -> AsyncIterator[dict[str, Any]]:
+        """Ask the native read-only side agent once, observing its own journal."""
+
+        data = await self._request_operation("side_question", path_parameters={"session_id": session_id}, json_body={})
+        agent_id = data["agent_id"]
+        if not isinstance(agent_id, str) or not agent_id:
+            raise KimiServerProtocolError("side-question creation returned no agent")
+        stream = self.subscribe_events(session_id, agent_id=agent_id)
+        prompt_id: str | None = None
+        try:
+            async for event in stream:
+                if isinstance(event, InteractionSnapshot):
+                    if prompt_id is None:
+                        receipt = await self.submit_prompt(session_id, question, agent_id=agent_id)
+                        prompt_id = receipt.prompt_id
+                        if receipt.outcome == PromptOutcome.BLOCKED:
+                            raise KimiServerOperationError("Side question was blocked before execution")
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                ended = event.get("payload", {}).get("type") == "turn.ended"
+                if ended:
+                    event = {**event, "snapshot": await self.get_snapshot(session_id, agent_id=agent_id)}
+                yield event
+                if ended:
+                    return
+        finally:
+            await stream.aclose()
+            if prompt_id is not None:
+                try:
+                    await self._abort_prompt_by_id(session_id, prompt_id)
+                except KimiServerOperationError:
+                    LOGGER.warning("could not cancel the native side question", exc_info=True)
 
     async def _prompt_content_to_wire(
         self, content: str | PromptContent
@@ -963,7 +1001,7 @@ class KimiServerClient:
             raise
         return bool(data["aborted"])
 
-    async def get_snapshot(self, session_id: str) -> dict[str, Any]:
+    async def get_snapshot(self, session_id: str, *, agent_id: str = _MAIN_AGENT_ID) -> dict[str, Any]:
         """Read history through the agent transcript's own sequence watermark.
 
         The transcript REST surface reads each agent's live in-memory store
@@ -974,7 +1012,7 @@ class KimiServerClient:
         transcript = await self._request_operation(
             "transcript",
             path_parameters={"session_id": session_id},
-            params={"agent_id": _MAIN_AGENT_ID, "page_size": 100},
+            params={"agent_id": agent_id, "page_size": 100},
         )
         return snapshot_from_transcript(transcript)
 
@@ -1063,11 +1101,11 @@ class KimiServerClient:
             ) from exc
 
     async def subscribe_events(
-        self, session_id: str
-    ) -> AsyncIterator[dict[str, Any] | InteractionUpdate | InteractionSnapshot]:
+        self, session_id: str, *, include_activity: bool = False, agent_id: str = _MAIN_AGENT_ID
+    ) -> AsyncIterator[dict[str, Any] | InteractionUpdate | InteractionSnapshot | ActivityUpdate]:
         """Yield semantic session events and reconnect from the transcript seq.
 
-        Only one subscription generator may own the socket at a time. The
+        Each session/agent subscription owns a socket and journal. The
         subscription asks for delta-grade transcript frames, folds their
         operations into the bridge's semantic event vocabulary, and on a
         reconnect resumes from the last applied sequence. When the journal
@@ -1076,7 +1114,8 @@ class KimiServerClient:
         consumers can rebuild any derived presentation state.
         """
 
-        ready = self._subscription_ready.setdefault(session_id, asyncio.Event())
+        key = (session_id, agent_id)
+        ready = self._subscription_ready.setdefault(session_id, asyncio.Event()) if agent_id == _MAIN_AGENT_ID else asyncio.Event()
         # A new consumer needs a baseline; only this generator's transport
         # reconnects may resume from its existing presentation state.
         projection = TranscriptProjection(session_id)
@@ -1084,7 +1123,7 @@ class KimiServerClient:
         subscribed_once = False
         consecutive_ack_mismatches = 0
 
-        async with self._subscription_lock:
+        async with self._subscription_locks.setdefault(key, asyncio.Lock()):
             while not self._closed:
                 ready.clear()
                 connection = await self._connection_info()
@@ -1101,11 +1140,11 @@ class KimiServerClient:
                         ping_interval=None,
                         max_size=None,
                     ) as ws:
-                        self._active_ws = ws
+                        self._active_ws[key] = ws
                         await self._expect_server_hello(ws)
                         await self._send_client_hello(ws)
                         _subscribe_ack, pending_frames = await self._send_subscribe_v2(
-                            ws, session_id, projection.seq
+                            ws, session_id, projection.seq, agent_id=agent_id
                         )
 
                         # Pending interactions are replayed without sequence
@@ -1114,7 +1153,7 @@ class KimiServerClient:
                         interaction_snapshot = InteractionSnapshot(
                             session_id,
                             await self._get_pending_interaction_ids(
-                                session_id, connection
+                                session_id, connection, **({"agent_id": agent_id} if agent_id != _MAIN_AGENT_ID else {})
                             ),
                         )
                         # Frames read before the ack precede this REST
@@ -1132,7 +1171,8 @@ class KimiServerClient:
                             )
                         ]
                         activity = ActivityProjection(session_id)
-                        self._activities[session_id] = activity
+                        if agent_id == _MAIN_AGENT_ID:
+                            self._activities[session_id] = activity
                         for frame in pending_frames:
                             activity.apply(frame)
                             if (
@@ -1150,14 +1190,19 @@ class KimiServerClient:
                         consecutive_ack_mismatches = 0
                         reconnect_delay = self._reconnect_initial_backoff
                         yield interaction_snapshot
+                        if include_activity:
+                            yield ActivityUpdate(activity.snapshot(), baseline=True)
                         frame_queue: list[dict[str, Any]] = list(pending_frames)
                         while not self._closed:
+                            initial_frame = bool(frame_queue)
                             if frame_queue:
                                 frame = frame_queue.pop(0)
                             else:
                                 frame = await self._receive_json(ws)
                             frame_type = frame.get("type")
                             if activity.apply(frame):
+                                if include_activity and not initial_frame:
+                                    yield ActivityUpdate(activity.snapshot())
                                 for task in activity.tasks.values():
                                     self._task_owners[(session_id, task.id)] = task.owner_agent_id
                             if frame_type == "ping":
@@ -1193,7 +1238,7 @@ class KimiServerClient:
                                     raise KimiServerProtocolError(
                                         "transcript.reset frame must carry a payload"
                                     )
-                                if payload.get("agent_id", _MAIN_AGENT_ID) != _MAIN_AGENT_ID:
+                                if payload.get("agent_id", _MAIN_AGENT_ID) != agent_id:
                                     continue
                                 for event in projection.apply_reset(payload):
                                     yield event
@@ -1204,7 +1249,7 @@ class KimiServerClient:
                                     raise KimiServerProtocolError(
                                         "transcript.ops frame must carry a payload"
                                     )
-                                if payload.get("agent_id", _MAIN_AGENT_ID) != _MAIN_AGENT_ID:
+                                if payload.get("agent_id", _MAIN_AGENT_ID) != agent_id:
                                     continue
                                 for event in projection.apply_ops(payload):
                                     yield event
@@ -1264,10 +1309,11 @@ class KimiServerClient:
                     )
                 finally:
                     ready.clear()
-                    self._active_ws = None
-                    self._activities.pop(session_id, None)
-                    self._agent_frames.pop(session_id, None)
-                    self._usage_frames.pop(session_id, None)
+                    self._active_ws.pop(key, None)
+                    if agent_id == _MAIN_AGENT_ID:
+                        self._activities.pop(session_id, None)
+                        self._agent_frames.pop(session_id, None)
+                        self._usage_frames.pop(session_id, None)
                 if self._closed:
                     break
                 await self._sleep(reconnect_delay)
@@ -1508,14 +1554,14 @@ class KimiServerClient:
         await self._wait_for_ack(ws, request_id)
 
     async def _send_subscribe_v2(
-        self, ws: Any, session_id: str, seq: int | None
+        self, ws: Any, session_id: str, seq: int | None, *, agent_id: str = _MAIN_AGENT_ID
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         payload: dict[str, Any] = {
             "session_id": session_id,
-            "transcript": {_MAIN_AGENT_ID: "delta", "*": "turn"},
+            "transcript": ({_MAIN_AGENT_ID: "delta", "*": "turn"} if agent_id == _MAIN_AGENT_ID else {agent_id: "delta"}),
         }
         if seq is not None:
-            payload["transcript_since"] = {_MAIN_AGENT_ID: seq}
+            payload["transcript_since"] = {agent_id: seq}
         return await self._subscribe(ws, session_id, payload)
 
     async def _subscribe(

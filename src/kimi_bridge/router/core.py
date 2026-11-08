@@ -100,7 +100,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._interaction_sleep = interaction_sleep
         self._poll_sleep = poll_sleep
         self._clock = clock
-        # Bindings, cached listings, and the single active stream span chats.
+        # Bindings and displayed selections span chats for one operator.
         self._inbound_lock = asyncio.Lock()
         self._command_tasks: set[asyncio.Task[None]] = set()
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
@@ -113,13 +113,18 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         ] = {}
         self._verified_session_profiles: set[str] = set()
         self._active: _ActiveStream | None = None
+        self._observers: dict[str, _ActiveStream] = {}
+        self._side_questions: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._pending: dict[str, _PendingInteraction] = {}
         self._compaction_waiters: dict[str, _CompactionWaiter] = {}
         self._interaction_lock = asyncio.Lock()
 
     async def close(self) -> None:
         self._fail_all_compaction_waiters(KimiServerError("kimi event stream stopped"))
-        await self._stop_active_stream()
+        for active in tuple(self._observers.values()):
+            await self._stop_observer(active)
+        for key in tuple(self._side_questions):
+            await self._cancel_side_question(key)
         tasks = tuple(self._command_tasks)
         for task in tasks:
             task.cancel()

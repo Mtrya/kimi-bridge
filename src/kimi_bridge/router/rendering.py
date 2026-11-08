@@ -38,6 +38,9 @@ class _RenderingMixin:
         active = self._active
         if active is None or active.conversation_key != session_key:
             return
+        await self._dispatch_stream_event(active, event)
+
+    async def _dispatch_stream_event(self, active: _ActiveStream, event: dict[str, Any]) -> None:
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return
@@ -294,7 +297,7 @@ class _RenderingMixin:
     ) -> None:
         try:
             await self._sleep(delay)
-            if self._active is active and (
+            if active.foreground and self._observers.get(active.session_id) is active and (
                 active.render is render or active.thinking is render
             ):
                 await self._flush(active, render)

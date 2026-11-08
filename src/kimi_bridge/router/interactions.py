@@ -41,8 +41,7 @@ from .models import _ActiveStream, _PendingInteraction
 LOGGER = logging.getLogger(__name__)
 INTERACTION_RETRY_SECONDS = 1.0
 STALE_INTERACTION_TEXT = (
-    "This interaction is stale or was already resolved. Run the task again "
-    "if you still need it."
+    "This interaction is no longer active. Switch back to its session to answer current requests."
 )
 
 # ExitPlanMode approvals carry only the plan file path; the bridge reads the
@@ -144,6 +143,10 @@ class _InteractionMixin:
                         action.conversation, STALE_INTERACTION_TEXT
                     )
                 return
+            binding = self._state.bindings.get(pending.conversation_key)
+            if binding is None or binding.session_id != pending.session_id:
+                await adapter.send_final_text(action.conversation, f"Switch back to session {pending.session_id} to answer.")
+                return
             if (
                 _conversation_key(action) != pending.conversation_key
                 or action.actor.id != pending.actor.id
@@ -192,8 +195,9 @@ class _InteractionMixin:
                     approval_decision=approval_decision,
                 ),
             )
-            if self._active is not None:
-                await self._deliver_interactions(self._active)
+            active = self._observers.get(pending.session_id)
+            if active is not None:
+                await self._deliver_interactions(active)
 
     async def _finish_archived_interactions(self, session_id: str) -> None:
         # The archive operation holds the interaction lock through disposal.
@@ -212,6 +216,27 @@ class _InteractionMixin:
             except Exception:
                 LOGGER.exception("failed to finish interaction for archived session")
 
+    async def _detach_controls(self, active: _ActiveStream) -> None:
+        """Retire chat UI while leaving the native request pending."""
+
+        async with self._interaction_lock:
+            pending = self._pending.get(active.conversation_key)
+            if pending is None or pending.session_id != active.session_id:
+                return
+            self._pending.pop(active.conversation_key)
+            if pending.timeout_task is not None:
+                pending.timeout_task.cancel()
+                await asyncio.gather(pending.timeout_task, return_exceptions=True)
+            try:
+                await pending.adapter.finish_interaction(pending.message, InteractionOutcome(
+                    state="stale", detail=f"Switch back to session {active.session_id} to answer."
+                ))
+            except Exception:
+                LOGGER.exception("failed to retire off-session controls")
+            if pending.request_id not in active.switch_notices:
+                active.switch_notices.add(pending.request_id)
+                await self._notice_once(active, "Input needed. Switch back to this session to answer.")
+
     async def _cancel_active_work(
         self,
         conversation_key: str,
@@ -222,11 +247,7 @@ class _InteractionMixin:
     ) -> tuple[bool, bool]:
         async with self._interaction_lock:
             pending = self._pending.get(conversation_key)
-            session_ids: list[str] = []
-            if pending is not None:
-                session_ids.append(pending.session_id)
-            if session_id not in session_ids:
-                session_ids.append(session_id)
+            session_ids = [session_id]
             cancelled_sessions: set[str] = set()
             for target_session_id in session_ids:
                 if session_wide:
@@ -245,7 +266,7 @@ class _InteractionMixin:
                     pending.message,
                     InteractionOutcome(state="cancelled", detail=detail),
                 )
-            active = self._active
+            active = self._observers.get(session_id)
             if active is not None and active.session_id in cancelled_sessions:
                 active.handled_interactions.update(active.interactions)
                 active.interactions.clear()
@@ -256,7 +277,7 @@ class _InteractionMixin:
     ) -> None:
         async with self._interaction_lock:
             if (
-                self._active is not active
+                self._observers.get(active.session_id) is not active
                 or event.session_id != active.session_id
             ):
                 return
@@ -322,7 +343,7 @@ class _InteractionMixin:
     async def _deliver_interactions(self, active: _ActiveStream) -> bool:
         """Deliver queued controls under the lock; retry failures independently."""
 
-        if self._active is not active:
+        if self._observers.get(active.session_id) is not active:
             return True
         try:
             for pending in tuple(self._pending.values()):
@@ -357,7 +378,7 @@ class _InteractionMixin:
 
     async def _retry_interactions(self, active: _ActiveStream) -> None:
         delay = INTERACTION_RETRY_SECONDS
-        while self._active is active:
+        while self._observers.get(active.session_id) is active:
             await self._poll_sleep(delay)
             async with self._interaction_lock:
                 if await self._deliver_interactions(active):
@@ -375,16 +396,9 @@ class _InteractionMixin:
     async def _present_next_interaction(self, active: _ActiveStream) -> None:
         """Present queued requests while the interaction lock is held."""
 
-        if self._active is not active:
+        if self._observers.get(active.session_id) is not active:
             return
         while active.interactions:
-            if active.conversation_key in self._pending:
-                return
-            if any(
-                pending.session_id == active.session_id
-                for pending in self._pending.values()
-            ):
-                return
             request = next(
                 (
                     item
@@ -410,6 +424,16 @@ class _InteractionMixin:
                 active.interactions.pop(request_id)
                 active.handled_interactions.add(request_id)
                 continue
+
+            if not active.foreground:
+                if request_id not in active.switch_notices:
+                    active.switch_notices.add(request_id)
+                    await self._notice_once(active, "Input needed. Switch back to this session to answer.")
+                return
+            if active.conversation_key in self._pending or any(
+                pending.session_id == active.session_id for pending in self._pending.values()
+            ):
+                return
 
             interaction_id = uuid.uuid4().hex
             session = await self._client.get_session(active.session_id)
@@ -503,12 +527,13 @@ class _InteractionMixin:
                 pending.message,
                 InteractionOutcome(state="timed_out", detail=detail),
             )
-            if self._active is not None:
-                await self._deliver_interactions(self._active)
+            active = self._observers.get(pending.session_id)
+            if active is not None:
+                await self._deliver_interactions(active)
 
     async def _clear_pending(self, pending: _PendingInteraction) -> None:
-        active = self._active
-        if active is not None and active.session_id == pending.session_id:
+        active = self._observers.get(pending.session_id)
+        if active is not None:
             active.interactions.pop(pending.request_id, None)
             if pending.completion is None or pending.completion.state == "stale":
                 active.handled_interactions.add(pending.request_id)

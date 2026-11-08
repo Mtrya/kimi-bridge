@@ -430,6 +430,12 @@ Side effects: rejected during running agent turns or compaction. The server and 
 Example:
 - `/reload`""",
     ),
+    "/btw": CommandHelp(
+        syntax="/btw <question>",
+        summary="ask a native read-only side question",
+        section="Activity",
+        details="Ask one side question using the current native context. Its answer is labelled Side question; main work and ordinary steering continue independently. Another /btw replaces the previous side question. Switching sessions, archiving, or shutting down closes it as in the native interface. Native read-only tools are enforced by Kimi; the bridge does not resubmit uncertain work.",
+    ),
     "/agents": CommandHelp(
         syntax="/agents [show|background <n|id>]",
         summary="inspect live agents or background their owning task",

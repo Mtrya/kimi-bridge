@@ -46,6 +46,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, including a known ended task, with at most the last 8 KiB of output. |
 | `/tasks cancel <n\|id>` | Cancel a task by displayed number or explicit ID. |
 | `/tasks background <n\|id>` | Release a supported foreground task wait, allowing its work to continue. |
+| `/btw <question>` | Ask a native read-only side question, with a separate labelled answer while main work continues. |
 | `/agents` | Show the main agent and discoverable subagent hierarchy, assignment, model, and state. |
 | `/agents show <n\|id>` | Inspect a live agent without changing where ordinary messages are sent. |
 | `/agents background <n\|id>` | Background the selected agent’s owning task when supported. |
@@ -118,7 +119,7 @@ A normal non-command message sent during a running turn is submitted and steered
 
 If the turn finishes before steering, the submitted prompt remains under Kimi's normal execution lifecycle. A prompt blocked before execution is reported in chat. If submission or steering cannot be confirmed, check `/status` or `/history` before resending; the bridge does not automatically resubmit. Goal creation submits its initial prompt as separate work and reports when the goal was created but its initial prompt failed or was blocked.
 
-Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` close the relevant interaction as cancelled.
+Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` address the bound session and close its relevant interaction as cancelled. If another session needs input after switching away, one labelled notice asks you to switch back. Its old controls cannot answer from the new session; returning presents the current native request.
 
 ## Permission modes and interactions
 
@@ -137,6 +138,10 @@ Answers stream through editable messages where the platform supports edits and a
 `/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
 
 QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary. If a stream frame fails after applicable URL correction or transport retries, the bridge buffers subsequent edits and sends the latest text as a regular message at the next idle or segment boundary. After two failed regular-message delivery attempts, it abandons that response and attempts one in-chat warning; failures are logged, and later segments can proceed.
+
+Goal complete/blocked transitions and background task/subagent outcomes produce short session-labelled notices. Leaving work running by switching, creating, or forking sessions retains observation and its original allowed delivery route across restarts. A notice leaves the current binding unchanged. Initial/reconnect snapshots establish baselines; absent tasks do not imply a completion. The bridge attempts each notice once, logs failed delivery, and drops it. Adapter transport retry behavior still applies.
+
+`/btw` uses Kimi’s native read-only side agent and returns one answer labelled “Side question”. Main work, thinking output, and queued prompts remain independent; ordinary messages continue targeting main. Another `/btw` replaces the previous side question. Switching sessions, archiving, and shutdown close it; a disconnected subscription resumes its journal without resubmitting the question.
 
 ## Inbound and outbound media
 

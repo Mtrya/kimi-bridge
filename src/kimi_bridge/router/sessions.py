@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 
 from ..kimi_server import (
     InteractionSnapshot,
+    ActivityUpdate,
     InteractionUpdate,
     KimiServerError,
     KimiServerOperationError,
@@ -28,17 +29,19 @@ from ..state import (
     PERMISSION_MODES,
     ConversationBinding,
     DeliveryRoute,
+    ObservationRoute,
 )
 from .files import _expand_fullwidth_tilde
 from .formatting import _session_recency_key
 from .models import _ActiveStream, _CompactionOutcome
+from .observation import _ObservationMixin
 
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_PERMISSION_MODE = "manual"
 
 
-class _SessionMixin:
+class _SessionMixin(_ObservationMixin):
     def _set_binding(
         self, conversation_key: str, binding: ConversationBinding
     ) -> None:
@@ -137,13 +140,12 @@ class _SessionMixin:
         return status
 
     async def _archive_session(self, session_id: str) -> None:
-        active = self._active
-        if active is not None and active.session_id == session_id:
+        active = self._observers.get(session_id)
+        if active is not None:
             # Archive emits terminal events while disposing the runtime. Stop
             # snapshot reads first so they cannot materialize it again.
-            await self._stop_active_stream(preserve_compaction_waiter=True)
-        else:
-            active = None
+            await self._cancel_side_question(active.conversation_key)
+            await self._stop_observer(active, preserve_compaction_waiter=True)
         async with self._interaction_lock:
             try:
                 await self._client.archive_session(session_id)
@@ -199,8 +201,10 @@ class _SessionMixin:
         for key, (bound_session, _choices) in tuple(self._queue_choices.items()):
             if bound_session == session_id:
                 del self._queue_choices[key]
-        if self._active is not None and self._active.session_id == session_id:
-            await self._stop_active_stream()
+        self._state.observations.pop(session_id, None)
+        observer = self._observers.get(session_id)
+        if observer is not None:
+            await self._stop_observer(observer)
         await self._finish_archived_interactions(session_id)
         self._state_store.save(self._state)
 
@@ -438,6 +442,9 @@ class _SessionMixin:
         actor: ActorRef,
         permission_mode: str | None = None,
     ) -> None:
+        side = self._side_questions.get(conversation_key)
+        if side is not None and side[0] != session_id:
+            await self._cancel_side_question(conversation_key)
         if permission_mode is None:
             binding = self._state.bindings.get(conversation_key)
             permission_mode = (
@@ -450,21 +457,39 @@ class _SessionMixin:
             permission_mode,
             replace_existing=False,
         )
-        active = self._active
+        for previous in tuple(self._observers.values()):
+            if previous.session_id == session_id or not previous.foreground:
+                continue
+            if previous.conversation_key == conversation_key:
+                previous.foreground = False
+                await self._cancel_side_question(conversation_key)
+                await self._detach_controls(previous)
+                await self._cancel_delayed_flush(previous.render)
+                await self._cancel_delayed_flush(previous.thinking)
+            if await self._session_has_work(previous):
+                self._state.observations[previous.session_id] = ObservationRoute(previous.conversation_key, DeliveryRoute(
+                    previous.conversation.platform, previous.conversation.bot_id, previous.conversation.conversation_id,
+                    previous.actor.id, previous.actor.aliases,
+                ))
+                self._state_store.save(self._state)
+            else:
+                await self._stop_observer(previous)
+        active = self._observers.get(session_id)
         if active is not None and active.task is not None and not active.task.done():
-            if active.conversation_key != conversation_key:
-                raise KimiServerOperationError(
-                    "another conversation is still receiving a response; "
-                    "retry after it finishes"
-                )
-            if active.session_id == session_id:
-                active.adapter = adapter
-                active.conversation = conversation
-                active.actor = actor
-                self._remember_active_conversation(conversation_key)
-                return
-
-        await self._stop_active_stream()
+            returning = not active.foreground
+            active.foreground = True
+            active.conversation_key = conversation_key
+            active.adapter, active.conversation, active.actor = adapter, conversation, actor
+            self._active = active
+            self._state.observations.pop(session_id, None)
+            self._remember_active_conversation(conversation_key)
+            if returning:
+                await self._render_resync_snapshot(active, await self._client.get_snapshot(session_id))
+                async with self._interaction_lock:
+                    await self._deliver_interactions(active)
+            return
+        if active is not None:
+            await self._stop_observer(active)
         active = _ActiveStream(
             conversation_key=conversation_key,
             session_id=session_id,
@@ -478,6 +503,8 @@ class _SessionMixin:
         )
         stream_task = active.task
         self._active = active
+        self._observers[session_id] = active
+        self._state.observations.pop(session_id, None)
         subscription_wait = asyncio.create_task(
             self._client.wait_until_subscribed(session_id),
             name=f"kimi-subscription-ready-{session_id}",
@@ -507,6 +534,7 @@ class _SessionMixin:
 
         async with self._inbound_lock:
             await self._restore_active_stream(adapter)
+            await self._restore_observations(adapter)
 
     async def _restore_active_stream(self, adapter: PlatformAdapter) -> None:
         conversation_key = self._state.active_conversation
@@ -544,14 +572,6 @@ class _SessionMixin:
         binding = self._state.bindings.get(conversation_key)
         if binding is None or binding.delivery is None:
             return
-        active = self._active
-        if (
-            active is not None
-            and active.task is not None
-            and not active.task.done()
-            and active.conversation_key != conversation_key
-        ):
-            return
         try:
             if await self._client.is_session_archived(binding.session_id):
                 async with self._interaction_lock:
@@ -573,9 +593,14 @@ class _SessionMixin:
 
     async def _stop_active_stream(self, *, preserve_compaction_waiter: bool = False) -> None:
         active = self._active
-        self._active = None
-        if active is None:
-            return
+        if active is not None:
+            await self._stop_observer(active, preserve_compaction_waiter=preserve_compaction_waiter)
+
+    async def _stop_observer(self, active: _ActiveStream, *, preserve_compaction_waiter: bool = False) -> None:
+        if self._active is active:
+            self._active = None
+        if self._observers.get(active.session_id) is active:
+            self._observers.pop(active.session_id)
         active.preserve_compaction_waiter = preserve_compaction_waiter
         await self._cancel_delayed_flush(active.render)
         await self._cancel_delayed_flush(active.thinking)
@@ -594,14 +619,22 @@ class _SessionMixin:
 
     async def _consume_events(self, active: _ActiveStream) -> None:
         failure: KimiServerError | None = None
+        stream = self._client.subscribe_events(active.session_id, include_activity=True)
         try:
-            async for event in self._client.subscribe_events(active.session_id):
-                if self._active is not active:
+            async for event in stream:
+                if self._observers.get(active.session_id) is not active:
                     return
-                if isinstance(event, (InteractionUpdate, InteractionSnapshot)):
+                if isinstance(event, ActivityUpdate):
+                    if await self._observe_activity(active, event):
+                        return
+                elif isinstance(event, (InteractionUpdate, InteractionSnapshot)):
                     await self._handle_interaction_event(active, event)
                 else:
-                    await self.dispatch_event(active.conversation_key, event)
+                    if active.foreground:
+                        await self._dispatch_stream_event(active, event)
+                    else:
+                        payload = event.get("payload", {})
+                        self._dispatch_compaction_event(active.session_id, payload.get("type", ""), payload)
         except asyncio.CancelledError:
             failure = KimiServerError("kimi event stream stopped")
             raise
@@ -611,6 +644,7 @@ class _SessionMixin:
         else:
             failure = KimiServerError("kimi event stream ended")
         finally:
+            await stream.aclose()
             if failure is None:
                 failure = KimiServerError("kimi event stream stopped")
             if not active.preserve_compaction_waiter:
@@ -679,18 +713,16 @@ class _SessionMixin:
             self._fail_compaction_waiter(session_id, error)
 
     def _stream_done(self, task: asyncio.Task[None]) -> None:
-        active = self._active
-        if active is not None and active.task is task:
+        active = next((observer for observer in self._observers.values() if observer.task is task), None)
+        if active is not None:
             active.task = None
-        else:
-            active = None
         if task.cancelled():
             return
         try:
             task.result()
         except Exception:
             LOGGER.exception("kimi event stream stopped unexpectedly")
-            if active is not None:
+            if active is not None and active.foreground:
                 active.failure_notice_task = asyncio.create_task(
                     self._report_stream_failure(active),
                     name=f"kimi-stream-failure-notice-{active.session_id}",

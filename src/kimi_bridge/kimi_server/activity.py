@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .types import (
+    GoalActivity,
     AgentActivity,
     KimiServerProtocolError,
     SessionActivity,
@@ -20,16 +21,21 @@ class ActivityProjection:
         self.session_id = session_id
         self.agents: dict[str, AgentActivity] = {}
         self.tasks: dict[tuple[str, str], TaskInfo] = {}
+        self.goal: GoalActivity | None = None
 
     def apply(self, frame: dict[str, Any]) -> bool:
         if frame.get("session_id") != self.session_id:
             return False
         kind = frame.get("type")
-        if kind not in {"agent", "todo", "task", "task.list"}:
+        if kind not in {"agent", "todo", "task", "task.list", "goal"}:
             return False
         owner = frame["agent_id"]
         agent = self.agents.setdefault(owner, AgentActivity(owner, "unknown"))
-        if kind == "agent":
+        if kind == "goal":
+            if owner == "main":
+                goal = frame.get("goal")
+                self.goal = GoalActivity(goal["objective"], goal["status"]) if goal else None
+        elif kind == "agent":
             self.agents[owner] = replace(
                 agent, status=frame["status"], model=frame.get("model")
             )
@@ -71,5 +77,5 @@ class ActivityProjection:
                 task=task,
             )
         return SessionActivity(
-            self.session_id, tuple(agents.values()), tuple(self.tasks.values())
+            self.session_id, tuple(agents.values()), tuple(self.tasks.values()), self.goal
         )

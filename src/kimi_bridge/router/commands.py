@@ -205,6 +205,9 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin):
         if command == "/restore":
             await self._handle_restore(conversation_key, adapter, conversation, actor, argument)
             return
+        if command == "/btw":
+            await self._handle_btw(conversation_key, adapter, conversation, actor, argument)
+            return
         if command == "/queue":
             await self._handle_queue(conversation_key, adapter, conversation, actor, argument)
             return

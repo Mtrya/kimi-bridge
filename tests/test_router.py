@@ -589,7 +589,7 @@ class FakeKimiClient:
         ready = self._ready.setdefault(session_id, asyncio.Event())
         await asyncio.wait_for(ready.wait(), timeout)
 
-    async def subscribe_events(self, session_id: str):
+    async def subscribe_events(self, session_id: str, *, include_activity: bool = False):
         self.subscriptions.append(session_id)
         self.stream_actions.append(("subscribe", session_id))
         error = self.stream_errors.get(session_id)
@@ -1435,7 +1435,7 @@ async def test_persisted_selected_model_is_not_replaced_by_startup_default(
     ]
 
 
-async def test_cross_conversation_prompt_is_rejected_without_stopping_active_stream(
+async def test_cross_conversation_prompts_keep_independent_active_streams(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -1449,6 +1449,7 @@ async def test_cross_conversation_prompt_is_rejected_without_stopping_active_str
     )
     try:
         await router.handle_inbound(adapter_a, _message("start A"))
+        client.sessions[0]["busy"] = True
         active = router._active
         assert active is not None
         active_task = active.task
@@ -1460,17 +1461,10 @@ async def test_cross_conversation_prompt_is_rejected_without_stopping_active_str
             _message("start B", user_id="ou_other", conversation_id="oc_other"),
         )
 
-        assert len(adapter_b.final_texts) == 1
-        assert adapter_b.final_texts[0][2].startswith("Prompt failed:")
-        assert client.prompts == [
-            (
-                "session-1",
-                PromptContent(text="start A"),
-                {"permission_mode": "manual"},
-            )
-        ]
-        assert client.stream_actions == [("subscribe", "session-1")]
-        assert router._active is active
+        assert adapter_b.final_texts == []
+        assert [prompt[0] for prompt in client.prompts] == ["session-1", "session-2"]
+        assert client.stream_actions == [("subscribe", "session-1"), ("subscribe", "session-2")]
+        assert set(router._observers) == {"session-1", "session-2"}
         assert active.task is active_task
         assert not active_task.done()
     finally:
@@ -3488,7 +3482,7 @@ async def test_goal_pause_aborts_busy_turn_and_cancels_pending_interaction(
     assert any("Status: paused" in text for text in texts)
 
 
-async def test_goal_cancel_cleans_origin_interaction_after_session_switch(
+async def test_goal_cancel_keeps_origin_interaction_after_session_switch(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -3531,10 +3525,10 @@ async def test_goal_cancel_cleans_origin_interaction_after_session_switch(
     finally:
         await router.close()
 
-    assert client.aborted == ["session-1", "session-2"]
+    assert client.aborted == ["session-2"]
     assert "session-2" not in client.goals
     assert [outcome.state for _ref, outcome in origin_adapter.outcomes] == [
-        "cancelled",
+        "stale",
         "stale",
     ]
     assert current_adapter.outcomes == []
@@ -4854,7 +4848,7 @@ async def test_unsuccessful_abort_preserves_pending_and_queued_interactions(
     assert adapter.interactions[-1][2].request == second
 
 
-async def test_stop_aborts_pending_interaction_after_binding_changes(
+async def test_stop_keeps_off_session_pending_interaction_after_binding_changes(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -4884,8 +4878,8 @@ async def test_stop_aborts_pending_interaction_after_binding_changes(
     finally:
         await router.close()
 
-    assert client.stopped == ["session-1", "session-2"]
-    assert adapter.outcomes[-1][1].state == "cancelled"
+    assert client.stopped == ["session-2"]
+    assert adapter.outcomes[-1][1].state == "stale"
 
 
 async def test_approval_timeout_auto_rejects_and_finishes_interaction(

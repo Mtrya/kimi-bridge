@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 10
+KIMI_SEMANTIC_CONTRACT_VERSION = 11
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -387,6 +387,15 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             request_examples=({},),
         ),
         RestOperationContract(
+            "side_question",
+            "KimiServerClient.side_question",
+            "POST",
+            "/sessions/{session_id}:btw",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the side-agent response; side-question creation validates the returned agent ID",
+        ),
+        RestOperationContract(
             "fork_session",
             "KimiServerClient.fork_session",
             "POST",
@@ -495,6 +504,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
             request_examples=(
+                {"agent_id": "side-agent", "content": [{"type": "text", "text": "Side question"}]},
                 {
                     "content": [{"type": "text", "text": "hello"}],
                     "model": "kimi-code/k3",
@@ -939,6 +949,9 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("type", "string", values=("goal",)),
             _field("session_id", "string"),
             _field("agent_id", "string"),
+            _field("goal", "object", required=False),
+            _field("goal.objective", "string", required=False),
+            _field("goal.status", "string", required=False, values=("active", "paused", "blocked", "complete")),
         ),
     ),
     WebSocketMessageContract(

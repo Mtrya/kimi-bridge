@@ -320,10 +320,23 @@ class AgentActivity:
 
 
 @dataclass(frozen=True, slots=True)
+class GoalActivity:
+    objective: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class SessionActivity:
     session_id: str
     agents: tuple[AgentActivity, ...]
     tasks: tuple[TaskInfo, ...]
+    goal: GoalActivity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityUpdate:
+    activity: SessionActivity
+    baseline: bool = False
 
 
 BackgroundOutcome = Literal["backgrounded", "already_background", "ended", "unsupported"]

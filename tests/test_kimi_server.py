@@ -1065,7 +1065,7 @@ async def test_snapshot_reads_the_transcript_without_disturbing_the_subscription
     snapshot = await asyncio.wait_for(client.get_snapshot("session-1"), 1)
     assert snapshot["as_of_seq"] == 987
     assert snapshot["messages"]["items"] == []
-    assert client._active_ws is live
+    assert client._active_ws[("session-1", "main")] is live
     assert not live.closed
     assert http.requests[-1][2]["params"] == {"agent_id": "main", "page_size": 100}
     assert len([r for r in http.requests if r[1].endswith("/transcript")]) == 2
