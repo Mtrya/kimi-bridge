@@ -47,6 +47,9 @@ class _SessionMixin:
             for key in tuple(self._task_choices):
                 if key[0] == conversation_key:
                     del self._task_choices[key]
+            for key in tuple(self._agent_choices):
+                if key[0] == conversation_key:
+                    del self._agent_choices[key]
             for key in tuple(self._queue_choices):
                 if key[0] == conversation_key:
                     del self._queue_choices[key]
@@ -176,6 +179,7 @@ class _SessionMixin:
     async def _detach_archived_session(self, session_id: str) -> None:
         """Drop bridge references only after Kimi confirms the archive."""
 
+        self._agent_choices = {key: choice for key, choice in self._agent_choices.items() if choice[0] != session_id}
         for key, binding in tuple(self._state.bindings.items()):
             if binding.session_id == session_id:
                 del self._state.bindings[key]

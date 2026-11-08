@@ -659,7 +659,7 @@ class FakeWebSocket:
                     self._incoming.put_nowait(json.dumps(event))
             if self._disconnect_after_events:
                 self._incoming.put_nowait(OSError("connection lost"))
-        elif frame["type"] in ("task.watch", "task.stop"):
+        elif frame["type"] in ("task.watch", "task.stop", "task.background"):
             for extra in getattr(self, "_task_output_frames_before_response", ()):
                 self._incoming.put_nowait(json.dumps(extra))
             if self._task_responses is not None:
@@ -1632,7 +1632,7 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     list_subscribe = next(
         frame for frame in list_socket.sent if frame["type"] == "subscribe_v2"
     )
-    assert list_subscribe["payload"]["transcript"] == {"main": "turn"}
+    assert list_subscribe["payload"]["transcript"] == {"*": "turn"}
     watch_request = next(
         frame for frame in watch_socket.sent if frame["type"] == "task.watch"
     )
@@ -2545,7 +2545,7 @@ async def test_subscribe_v2_resumes_the_session_without_a_status_call() -> None:
     subscribe = next(
         frame for frame in socket.sent if frame["type"] == "subscribe_v2"
     )
-    assert subscribe["payload"]["transcript"] == {"main": "delta"}
+    assert subscribe["payload"]["transcript"] == {"main": "delta", "*": "turn"}
     assert "transcript_since" not in subscribe["payload"]
 
 
@@ -3084,7 +3084,7 @@ async def test_document_fetch_and_probe_subscription_stay_inside_client_boundary
         subscribe = next(
             frame for frame in socket.sent if frame["type"] == "subscribe_v2"
         )
-        assert subscribe["payload"]["transcript"] == {"main": "delta"}
+        assert subscribe["payload"]["transcript"] == {"main": "delta", "*": "turn"}
         assert subscribe["payload"]["session_id"] == "session-1"
     assert "transcript_since" not in sockets[0].sent[1]["payload"]
     assert sockets[1].sent[1]["payload"]["transcript_since"] == {"main": 1}

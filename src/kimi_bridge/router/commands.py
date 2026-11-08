@@ -44,6 +44,7 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
+from .activity import _ActivityMixin
 from .session_controls import _SessionControlsMixin
 
 
@@ -60,10 +61,10 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "yolo": "Regular tools are auto-approved; questions and plan review remain interactive.",
 }
 _BOUND_INSPECTION_COMMANDS = frozenset(
-    {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm"}
+    {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm", "/agents", "/todos"}
 )
 
-class _CommandMixin(_SessionControlsMixin):
+class _CommandMixin(_SessionControlsMixin, _ActivityMixin):
     async def _handle_command(
         self,
         conversation_key: str,
@@ -236,6 +237,12 @@ class _CommandMixin(_SessionControlsMixin):
                 await self._send_chunked(adapter, conversation, "Usage: /usage")
                 return
             await self._handle_usage(conversation_key, adapter, conversation)
+            return
+        if command == "/agents":
+            await self._handle_agents(conversation_key, adapter, conversation, argument)
+            return
+        if command == "/todos":
+            await self._handle_todos(conversation_key, adapter, conversation, argument)
             return
         if command == "/tasks":
             await self._handle_tasks(conversation_key, adapter, conversation, argument)
@@ -739,7 +746,7 @@ class _CommandMixin(_SessionControlsMixin):
             return
         parts = argument.split()
         explicit_id = len(parts) == 3 and parts[1] == "id"
-        if (len(parts) == 2 or explicit_id) and parts[0] in {"show", "cancel"}:
+        if (len(parts) == 2 or explicit_id) and parts[0] in {"show", "cancel", "background"}:
             task_id = parts[-1]
             if not explicit_id and task_id.isdecimal():
                 choices = self._task_choices.get((conversation_key, conversation))
@@ -763,6 +770,9 @@ class _CommandMixin(_SessionControlsMixin):
                     output_bytes=TASK_OUTPUT_BYTES,
                 )
                 await self._send_chunked(adapter, conversation, _format_task_detail(task))
+            elif parts[0] == "background":
+                outcome = await self._client.background_task(binding.session_id, task_id)
+                await self._send_chunked(adapter, conversation, f"Task {task_id}: {outcome.replace('_', ' ')}")
             else:
                 await self._client.cancel_task(binding.session_id, task_id)
                 await self._send_chunked(
@@ -772,7 +782,7 @@ class _CommandMixin(_SessionControlsMixin):
         await self._send_chunked(
             adapter,
             conversation,
-            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id>\n"
+            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id> | /tasks background <n|id>\n"
             "Use /tasks show id <id> or /tasks cancel id <id> for an exact ID, including numeric IDs.",
         )
 

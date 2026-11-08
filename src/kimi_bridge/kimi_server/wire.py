@@ -275,7 +275,7 @@ _TASK_OUTCOMES = {
 
 
 def _task_info_from_wire(
-    value: dict[str, Any], *, session_id: str
+    value: dict[str, Any], *, session_id: str, owner_agent_id: str = "main"
 ) -> TaskInfo:
     kind = value.get("kind")
     status = value.get("status")
@@ -309,6 +309,12 @@ def _task_info_from_wire(
         completed_at=value.get("ended_at"),
         output_preview=preview,
         output_bytes=None,
+        owner_agent_id=owner_agent_id,
+        child_agent_id=value.get("child_agent_id"),
+        detached=bool(value.get("detached", True)),
+        swarm_index=value.get("swarm_index"),
+        phase=value.get("phase"),
+        model=value.get("model"),
     )
 
 

@@ -107,6 +107,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._task_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
         ] = {}
+        self._agent_choices: dict[tuple[str, ConversationRef], tuple[str, tuple[str, ...]]] = {}
         self._queue_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
         ] = {}

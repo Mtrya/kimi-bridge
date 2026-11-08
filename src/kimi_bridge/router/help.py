@@ -430,6 +430,24 @@ Side effects: rejected during running agent turns or compaction. The server and 
 Example:
 - `/reload`""",
     ),
+    "/agents": CommandHelp(
+        syntax="/agents [show|background <n|id>]",
+        summary="inspect live agents or background their owning task",
+        section="Activity",
+        details="/agents shows the main agent and discoverable subagents, their parents, assignment, model and state. /agents show <n|id> is read-only. /agents background <n|id> releases a supported foreground wait; swarm members cannot be detached individually. Numbers refer to the latest display in this chat/session; use id <id> for numeric native IDs. Ordinary messages still target main.",
+    ),
+    "/todos": CommandHelp(
+        syntax="/todos [all]",
+        summary="show main or all available agent checklists",
+        section="Activity",
+        details="/todos shows the main checklist. /todos all groups available checklists by agent. Counts show completed/total, with ✓ done, → in progress, and ○ pending. These are on-demand native snapshots; no prompt is submitted.",
+    ),
+    "/tasks background": CommandHelp(
+        syntax="/tasks background <n|id>",
+        summary="release a supported task’s foreground wait",
+        section="Activity",
+        details="Background a task by the latest task number in this chat/session or explicit native ID. Use id <id> for numeric IDs. The result distinguishes newly backgrounded, already backgrounded, ended and unsupported work. Native swarm members cannot be detached individually. /tasks show remains the on-demand output command.",
+    ),
     "/tasks": CommandHelp(
         syntax="/tasks [all|completed|failed|cancelled]",
         summary="list tasks",

@@ -45,6 +45,11 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/tasks [all\|completed\|failed\|cancelled]` | List numbered running tasks. `all` also lists only running tasks; terminal-status filters return no tasks because Kimi omits ended tasks from discovery. |
 | `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, including a known ended task, with at most the last 8 KiB of output. |
 | `/tasks cancel <n\|id>` | Cancel a task by displayed number or explicit ID. |
+| `/tasks background <n\|id>` | Release a supported foreground task wait, allowing its work to continue. |
+| `/agents` | Show the main agent and discoverable subagent hierarchy, assignment, model, and state. |
+| `/agents show <n\|id>` | Inspect a live agent without changing where ordinary messages are sent. |
+| `/agents background <n\|id>` | Background the selected agent’s owning task when supported. |
+| `/todos [all]` | Show main-agent todos, or group available checklists by agent; counts show completed/total with ✓ done, → in progress, and ○ pending. |
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |
 | `/mcp` | List MCP tools resolved for the session. This is read-only. |
@@ -52,6 +57,8 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
 
 Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. Changing the bound session clears your task numbers across chats, including when you later switch back. Explicit IDs remain valid without a prior listing. Bare numbers always select list positions; use `/tasks show id <id>` or `/tasks cancel id <id>` for an exact ID, including numeric IDs such as `/tasks show id 123`.
+
+Agent numbers follow the same chat/session selection scope as task numbers; use `/agents show id 123` or `/agents background id 123` for a numeric native ID. Discovery shows current native activity rather than a complete task history. Backgrounding reports newly backgrounded, already backgrounded, ended, or unsupported work. Native swarm members cannot be detached individually. Output remains available on demand through `/tasks show`.
 
 Queue numbers refer to the latest `/queue` display in the same chat and session and are cleared on a session change. The active prompt is not numbered. Use `/queue cancel id 123` or `/queue steer id 123` for a numeric native ID, and `/queue -- <message>` to queue text beginning with `cancel` or `steer`. Kimi resolves stale prompt IDs and execution races. Use `/goal -- <objective>` when a new objective begins with a reserved goal action such as `edit`, and `/restore id 123` for a numeric archived session ID. `/switch` requires archived sessions to be restored first.
 
@@ -103,7 +110,7 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 
 | While a turn is busy | Commands |
 | --- | --- |
-| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/goal`/`/goal status`, bare `/render-thinking` |
+| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`agents show`, `/todos [all]`, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/goal`/`/goal status`, bare `/render-thinking` |
 | Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/archive` |
 | Mutations reject instead of queueing | `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
 

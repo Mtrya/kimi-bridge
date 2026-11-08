@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 9
+KIMI_SEMANTIC_CONTRACT_VERSION = 10
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -186,6 +186,10 @@ _TASK_FRAME_FIELDS = (
         values=("completed", "failed", "timed_out", "killed", "lost"),
     ),
     _field("detached", "boolean"),
+    _field("child_agent_id", "string", required=False),
+    _field("swarm_index", "integer", required=False),
+    _field("phase", "string", required=False, values=("working", "suspended")),
+    _field("model", "string", required=False),
     _field("description", "string", required=False),
     _field("command", "string", required=False),
     _field("started_at", "string", required=False),
@@ -945,6 +949,8 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("session_id", "string"),
             _field("agent_id", "string"),
             _field("items", "array"),
+            _field("items.[].title", "string"),
+            _field("items.[].status", "string", values=("pending", "in_progress", "done")),
         ),
     ),
     WebSocketMessageContract(
@@ -1016,6 +1022,26 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             {
                 "type": "task.stop",
                 "request_id": "request-4",
+                "session_id": "session-1",
+                "agent_id": "main",
+                "task_id": "bash-1",
+            },
+        ),
+    ),
+    WebSocketMessageContract(
+        "task_background",
+        "KimiServerClient.background_task",
+        (
+            _field("type", "string", values=("task.background",)),
+            _field("request_id", "string"),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("task_id", "string"),
+        ),
+        (
+            {
+                "type": "task.background",
+                "request_id": "request-background",
                 "session_id": "session-1",
                 "agent_id": "main",
                 "task_id": "bash-1",

@@ -294,6 +294,39 @@ class TaskInfo:
     completed_at: Any = None
     output_preview: str | None = None
     output_bytes: int | None = None
+    owner_agent_id: str = "main"
+    child_agent_id: str | None = None
+    detached: bool = True
+    swarm_index: int | None = None
+    phase: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItem:
+    title: str
+    status: Literal["pending", "in_progress", "done"]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActivity:
+    id: str
+    status: str
+    model: str | None = None
+    parent_id: str | None = None
+    assignment: str | None = None
+    task: TaskInfo | None = None
+    todos: tuple[TodoItem, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SessionActivity:
+    session_id: str
+    agents: tuple[AgentActivity, ...]
+    tasks: tuple[TaskInfo, ...]
+
+
+BackgroundOutcome = Literal["backgrounded", "already_background", "ended", "unsupported"]
 
 
 @dataclass(frozen=True, slots=True)

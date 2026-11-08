@@ -19,6 +19,10 @@ from .supervisor import KimiServerSupervisor, parse_server_startup_line
 from .events import session_notice_from_event
 from .probe import probe_kimi_compatibility
 from .types import (
+    BackgroundOutcome,
+    SessionActivity,
+    AgentActivity,
+    TodoItem,
     GoalBudget,
     GoalControl,
     GoalInfo,
@@ -64,6 +68,10 @@ from .types import (
 )
 
 __all__ = [
+    "BackgroundOutcome",
+    "SessionActivity",
+    "AgentActivity",
+    "TodoItem",
     "GoalBudget",
     "GoalControl",
     "GoalInfo",
