@@ -8,6 +8,7 @@ from datetime import timezone
 
 from ..kimi_server import AccountQuota, KimiServerOperationError
 from ..platforms.base import ConversationRef, PlatformAdapter
+from .formatting import _usage_bar
 
 
 LOGGER = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ def _format_account_quota(quota: AccountQuota) -> str:
         ratio = (
             max(0, min(1, window.used_ratio)) if math.isfinite(window.used_ratio) else 0
         )
-        text = f"{window.name}: {ratio * 100:.1f}% used"
+        text = f"{window.name}: {_usage_bar(ratio)} {ratio * 100:.1f}% used"
         if window.reset_at is not None:
             reset = window.reset_at
             label = (

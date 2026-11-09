@@ -148,7 +148,7 @@ Example:
         section="Sessions",
         details="""**/usage**
 
-Show cumulative session input/output/cache counters, live context usage, and a separate managed-account quota section with available window percentages and UTC reset times. Account-only failures keep valid session statistics. Takes no arguments; read-only.
+Show cumulative session input/output/cache counters, live context usage, and a separate managed-account quota section. Available context and quota ratios include compact bars and percentages; quota reset times appear in UTC. Account-only failures keep valid session statistics. Takes no arguments; read-only.
 
 Example:
 - `/usage`""",

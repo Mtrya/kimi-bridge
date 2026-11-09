@@ -197,14 +197,19 @@ def _format_status(
     )
 
 
+def _usage_bar(ratio: float) -> str:
+    filled = min(10, max(0, round(ratio * 10)))
+    return "[" + "█" * filled + "░" * (10 - filled) + "]"
+
+
 def _format_usage(usage: SessionUsage) -> str:
     if usage.context_tokens is None or usage.context_limit is None:
         context = "unknown"
     elif usage.context_limit <= 0:
         context = f"{usage.context_tokens}/{usage.context_limit} (unknown percentage)"
     else:
-        percentage = usage.context_tokens / usage.context_limit * 100
-        context = f"{usage.context_tokens}/{usage.context_limit} ({percentage:.1f}%)"
+        ratio = usage.context_tokens / usage.context_limit
+        context = f"{_usage_bar(ratio)} {ratio * 100:.1f}% ({usage.context_tokens}/{usage.context_limit})"
     return "\n".join(
         (
             f"Input tokens: {_optional_number(usage.input_tokens)}",

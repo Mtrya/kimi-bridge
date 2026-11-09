@@ -88,7 +88,7 @@ Use `/new /host/workspace --env target --cwd "/target/project with spaces"` to s
 
 MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
 
-`/usage` keeps session counters separate from managed-account limits. Available quota windows show percentage used and reset times in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves valid session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
+`/usage` keeps session counters separate from managed-account limits. Available context and quota ratios show compact bars alongside percentages used. Quota reset times appear in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves valid session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
 
 `/reload` refreshes Kimi Code's configuration, plugins, skills, and agent definitions and rebuilds the bound session with its existing history. It preserves the session ID, selected model, and bridge permission mode. Kimi rejects reload during running agent turns or compaction. Global Kimi settings are refreshed, and new sessions use the latest default model; the bridge's own configuration is loaded at bridge startup.
 

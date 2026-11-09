@@ -217,6 +217,7 @@ async def test_quota_projection_percentages_optional_windows_and_timezone():
     assert result.windows[0].used_ratio == 0.125
     text = _format_account_quota(result)
     assert "12.5%" in text and "25.0%" in text and "2026-11-09 00:00:00 UTC" in text
+    assert "█" in text and "░" in text
     assert "PRIVATE_TOKEN_SENTINEL" not in repr(result)
     assert http.requests[0][0] == "GET"
 

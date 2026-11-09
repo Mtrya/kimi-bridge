@@ -2026,7 +2026,9 @@ async def test_status_title_and_usage_report_session_owned_values(
     assert "Kimi-code: 0.28.1" in status_text
     usage_text = next(text for text in texts if "Input tokens: 100" in text)
     assert "Cache-read tokens: 25" in usage_text
-    assert "Context: 300/1200 (25.0%)" in usage_text
+    context_line = next(line for line in usage_text.splitlines() if line.startswith("Context:"))
+    assert "300/1200" in context_line and "25.0%" in context_line
+    assert "█" in context_line and "░" in context_line
     assert "Turns:" not in usage_text
     assert "Cost:" not in usage_text
     assert texts[-1].count("unknown") >= 5
