@@ -102,8 +102,8 @@ class _WorkspaceMixin:
             if rest.strip():
                 await self._send_chunked(adapter, conversation, "Usage: /files changes")
                 return
-            self._file_choices.pop(key, None)
             changes = await self._client.get_file_changes(binding.session_id)
+            self._file_choices.pop(key, None)
             if changes.turn is None:
                 text = "No completed turn is available."
             elif not changes.recorded:
@@ -208,12 +208,12 @@ class _WorkspaceMixin:
             )
             return
         directory = rest.strip() if verb == "--" else (argument or ".")
-        self._file_choices.pop(key, None)
         listing = await self._client.list_workspace_files(
             binding.session_id,
             directory,
             query=rest.strip() if verb == "search" else None,
         )
+        self._file_choices.pop(key, None)
         await self._send_chunked(
             adapter,
             conversation,

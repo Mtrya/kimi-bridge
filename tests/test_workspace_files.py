@@ -426,6 +426,22 @@ async def test_failed_file_list_display_does_not_install_new_numbers(tmp_path: P
         await router.close()
 
 
+async def test_failed_file_list_fetch_preserves_previous_numbers(tmp_path: Path):
+    workspace, _, _, adapter, router = _setup(tmp_path)
+    (workspace / "fixture.txt").write_text("selected fixture")
+    try:
+        await router.handle_inbound(adapter, _message("/files"))
+        await router.handle_inbound(adapter, _message("/files missing-directory"))
+        await router.handle_inbound(adapter, _message("/files show 1"))
+        assert "selected fixture" in adapter.sent[-1][2]
+        for _ in range(2):
+            await router.handle_inbound(adapter, _message("/files send 1"))
+            assert adapter.files[-1][2].data == b"selected fixture"
+        assert len(adapter.files) == 2
+    finally:
+        await router.close()
+
+
 async def test_workspace_rejections_leave_native_folder_set_intact(tmp_path: Path):
     workspace, client, _, _, router = _setup(tmp_path)
     extra = tmp_path / "extra"
