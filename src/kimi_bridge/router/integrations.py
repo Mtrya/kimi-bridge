@@ -98,7 +98,7 @@ class _IntegrationMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"✅ **Restart acknowledged** · {server.id}\n{MCP_RUNTIME_SCOPE}\nCheck with /mcp show {server.id}.",
+                f"✓ **Restart acknowledged** · {server.id}\n{MCP_RUNTIME_SCOPE}\nCheck with /mcp show {server.id}.",
             )
             return
         inspection = await self._client.inspect_mcp(binding.session_id)

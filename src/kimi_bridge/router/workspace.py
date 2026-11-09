@@ -58,7 +58,7 @@ class _WorkspaceMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"✅ {label}: **{_folder_name(selected)}**\n`{selected}`",
+                f"✓ {label}: **{_folder_name(selected)}**\n`{selected}`",
             )
             return
         context = await self._client.get_file_context(binding.session_id)
@@ -237,14 +237,14 @@ def _workspace_text(context: FileContext) -> str:
     elif context.cwd in info.additional:
         roles.append("additional")
     sections = [
-        f"📍 **{_folder_name(context.cwd)}** · {' · '.join(roles)}\n`{context.cwd}`"
+        f"› **{_folder_name(context.cwd)}** · {' · '.join(roles)}\n`{context.cwd}`"
     ]
     folders = [(info.primary, "primary"), *((path, "additional") for path in info.additional)]
     for path, role in folders:
         if local and path == context.cwd:
             continue
         label = role if local else f"{role} · host"
-        sections.append(f"📂 **{_folder_name(path)}** · {label}\n`{path}`")
+        sections.append(f"· **{_folder_name(path)}** · {label}\n`{path}`")
     return "\n\n".join(sections)
 
 

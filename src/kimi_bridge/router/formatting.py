@@ -32,10 +32,10 @@ HISTORY_MAX_COUNT = 50
 HISTORY_RECAP_COUNT = 2
 HISTORY_MESSAGE_LIMIT = 500
 _TASK_STATUS_DISPLAY: dict[TaskStatus, tuple[int, str, str]] = {
-    "running": (0, "🟡", "Running"),
-    "failed": (1, "❌", "Failed"),
-    "cancelled": (2, "⏹️", "Cancelled"),
-    "completed": (3, "✅", "Completed"),
+    "running": (0, "●", "Running"),
+    "failed": (1, "×", "Failed"),
+    "cancelled": (2, "−", "Cancelled"),
+    "completed": (3, "✓", "Completed"),
 }
 
 
@@ -189,13 +189,13 @@ def _format_status(
 ) -> str:
     state = "busy" if status.busy else "idle"
     lines = [
-        f"{'🟡' if status.busy else '🟢'} **{profile.title}** · {state}",
+        f"{'●' if status.busy else '○'} **{profile.title}** · {state}",
         f"Model: {_effective_model(profile, status, default_model)}",
         f"Effort: {status.thinking_effort} · Plan: {'on' if status.plan_mode else 'off'} · Mode: {permission_mode}",
     ]
     if profile.pending_interaction != "none":
         lines.append(f"Pending: {profile.pending_interaction}")
-    lines.extend(("", "📍 **Working folder**", _inline_code(context.cwd), f"Target: {context.environment_id}"))
+    lines.extend(("", "› **Working folder**", _inline_code(context.cwd), f"Target: {context.environment_id}"))
     if context.environment_id != "local":
         lines.append(f"Host workspace: {_inline_code(context.workspace.primary)}")
     elif context.workspace.primary != context.cwd:
@@ -368,7 +368,7 @@ def _format_goal(goal: GoalInfo | None) -> str:
     if goal is None:
         return "No active goal."
     budget = goal.budget
-    lines = [f"🎯 **Goal · {goal.status}**", goal.objective]
+    lines = [f"› **Goal · {goal.status}**", goal.objective]
     if goal.completion_criterion is not None:
         lines.extend(("", "**Done when**", goal.completion_criterion))
     lines.extend((
@@ -399,7 +399,7 @@ def _format_goal(goal: GoalInfo | None) -> str:
     ]
     lines.extend([line for line in budgets if line] or ["No limits set."])
     if budget.over_budget:
-        lines.append("⚠️ Budget exceeded.")
+        lines.append("**Budget exceeded.**")
     if goal.terminal_reason is not None:
         lines.extend(("", "**Outcome**", goal.terminal_reason))
     return "\n".join(lines)

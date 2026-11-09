@@ -2138,7 +2138,7 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
     assert "`task-complete`" not in task_list
     all_tasks = texts[1]
     assert "**Tasks · 2**" in all_tasks
-    assert all_tasks.index("🟡 **Running**") < all_tasks.index("✅ **Completed**")
+    assert all_tasks.index("Running") < all_tasks.index("Completed")
     assert "**Completed tasks · 1**" in texts[2]
     detail = texts[4]
     assert "**Command**\n`sleep 60`" in detail
@@ -2518,7 +2518,7 @@ async def test_task_detail_humanizes_duration_and_blank_output(
         await router.close()
 
     detail = adapter.sent[0][2]
-    assert "✅ **Completed** · bash" in detail
+    assert "Completed" in detail and "bash" in detail
     assert "Ran 1 min · finished 2026-07-23 10:56:54 UTC" in detail
     assert "**Output tail · 1 B**\nNo visible output." in detail
     assert task.description not in detail

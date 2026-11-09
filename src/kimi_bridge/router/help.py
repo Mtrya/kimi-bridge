@@ -789,7 +789,7 @@ def render_help_index() -> str:
     for key, entry in COMMAND_HELP.items():
         if " " not in key and key != "/help":
             groups.setdefault(entry.section, []).append(entry)
-    lines = ["**Commands**", "Send `/files ?` for options and examples."]
+    lines = ["**Commands**", "Use `/<command> ?` for options and examples.", "Example: `/files ?`."]
     for section in ("Sessions", "Workspaces & files", "Work", "Settings", "Tools", "Maintenance"):
         lines.append(f"\n**{section}**")
         lines.extend(
