@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from ..kimi_server import (
+    FileContext,
     GoalInfo,
     KimiServerProtocolError,
     ModelInfo,
@@ -44,14 +45,17 @@ def _format_prompt_queue(queue: PromptQueue) -> str:
         return text if len(text) <= 180 else text[:180] + "…"
 
     active = queue.active
-    lines = [
-        f"Active: {active.id} [{active.status}] {preview(active.text)}"
-        if active is not None else "Active: none"
-    ]
+    lines = ["**Active prompt**"]
+    lines.append(
+        f"{preview(active.text)}\n`{active.id}` · {active.status}"
+        if active is not None else "None"
+    )
     if not queue.waiting:
-        lines.append("No waiting prompts.")
+        lines.append("\nNo waiting prompts.")
+    else:
+        lines.append(f"\n**Waiting · {len(queue.waiting)}**")
     for index, prompt in enumerate(queue.waiting, 1):
-        lines.append(f"{index}. {prompt.id} [{prompt.status}] {preview(prompt.text)}")
+        lines.append(f"{index}. **{preview(prompt.text)}**\n   `{prompt.id}` · {prompt.status}\n")
     return "\n".join(lines)
 
 
@@ -104,16 +108,16 @@ def _format_sessions(sessions: list[dict[str, Any]]) -> str:
         title = session.get("title") or "Untitled"
         workspace = session.get("metadata", {}).get("cwd", "unknown workspace")
         status = "busy" if session.get("busy") else "idle"
-        lines.append(f"{index}. {title} [{status}]\n{workspace}\n{session['id']}")
+        lines.append(f"{index}. **{title}** · {status}\n   {_inline_code(workspace)}\n   ID: {_inline_code(session['id'])}")
     return "\n\n".join(lines)
 
 
 def _format_models(current_model: str, models: list[ModelInfo]) -> str:
-    lines = [f"Current model: {current_model}", "Available models:"]
+    lines = [f"**Current model**\n{_inline_code(current_model)}", "\n**Available models**"]
     for model in models:
         display_name = model.display_name or "display name unavailable"
         efforts = ", ".join(_model_effort_choices(model))
-        lines.append(f"- {model.alias} — {display_name} — thinking efforts: {efforts}")
+        lines.append(f"- **{model.alias}** · {display_name}\n  Effort: {efforts}")
     return "\n".join(lines)
 
 
@@ -122,9 +126,10 @@ def _format_secondary_models(
 ) -> str:
     current = config.default_model or "primary model (inherited)"
     pool = dict(config.models or ())
-    lines = [f"Secondary model: {current}", "Available models:"]
+    lines = [f"**Subagent default**\n{_inline_code(current)}", "Global · applies to future subagents."]
     if config.force:
-        lines.insert(1, "Subagent model selection is forced to the default.")
+        lines.append("Selection is forced to the default.")
+    lines.append("\n**Available models**")
     for model in models:
         display_name = model.display_name or "display name unavailable"
         labels: list[str] = []
@@ -134,12 +139,12 @@ def _format_secondary_models(
             labels.append("pool")
         marker = f" [{', '.join(labels)}]" if labels else ""
         description = pool.pop(model.alias, "")
-        hint = f" — {description}" if description else ""
-        lines.append(f"- {model.alias}{marker} — {display_name}{hint}")
+        hint = f"\n  {description}" if description else ""
+        lines.append(f"- **{model.alias}**{marker} · {display_name}{hint}")
     for alias, description in pool.items():
         marker = "default, pool" if alias == config.default_model else "pool"
-        hint = f" — {description}" if description else ""
-        lines.append(f"- {alias} [{marker}] — unavailable in catalog{hint}")
+        hint = f"\n  {description}" if description else ""
+        lines.append(f"- **{alias}** [{marker}] · unavailable in catalog{hint}")
     return "\n".join(lines)
 
 
@@ -180,21 +185,23 @@ def _format_status(
     permission_mode: str,
     server_version: str,
     default_model: str,
+    context: FileContext,
 ) -> str:
-    return "\n".join(
-        (
-            f"Session: {profile.title}",
-            f"ID: {profile.session_id}",
-            f"Workspace: {profile.workspace}",
-            f"State: {'busy' if status.busy else 'idle'}",
-            f"Pending interaction: {profile.pending_interaction}",
-            f"Model: {_effective_model(profile, status, default_model)}",
-            f"Thinking effort: {status.thinking_effort}",
-            f"Plan mode: {'on' if status.plan_mode else 'off'}",
-            f"Permission mode: {permission_mode}",
-            f"Kimi-code: {server_version}",
-        )
-    )
+    state = "busy" if status.busy else "idle"
+    lines = [
+        f"{'🟡' if status.busy else '🟢'} **{profile.title}** · {state}",
+        f"Model: {_effective_model(profile, status, default_model)}",
+        f"Effort: {status.thinking_effort} · Plan: {'on' if status.plan_mode else 'off'} · Mode: {permission_mode}",
+    ]
+    if profile.pending_interaction != "none":
+        lines.append(f"Pending: {profile.pending_interaction}")
+    lines.extend(("", "📍 **Working folder**", _inline_code(context.cwd), f"Target: {context.environment_id}"))
+    if context.environment_id != "local":
+        lines.append(f"Host workspace: {_inline_code(context.workspace.primary)}")
+    elif context.workspace.primary != context.cwd:
+        lines.append(f"Primary folder: {_inline_code(context.workspace.primary)}")
+    lines.extend(("", f"Session ID: {_inline_code(profile.session_id)}", f"Kimi Code {server_version}"))
+    return "\n".join(lines)
 
 
 def _usage_bar(ratio: float) -> str:
@@ -361,40 +368,40 @@ def _format_goal(goal: GoalInfo | None) -> str:
     if goal is None:
         return "No active goal."
     budget = goal.budget
-    lines = [
-        f"Goal: {goal.objective}",
-        f"Status: {goal.status}",
-    ]
+    lines = [f"🎯 **Goal · {goal.status}**", goal.objective]
     if goal.completion_criterion is not None:
-        lines.append(f"Completion criterion: {goal.completion_criterion}")
-    lines.extend(
-        (
-            f"Used: {goal.turns_used} turns; {goal.tokens_used} tokens; {_format_milliseconds(goal.wall_clock_ms)}",
-            "Budgets:",
-            _format_goal_budget_line(
-                "Tokens",
-                budget.token_budget,
-                budget.remaining_tokens,
-                budget.token_budget_reached,
-            ),
-            _format_goal_budget_line(
-                "Turns",
-                budget.turn_budget,
-                budget.remaining_turns,
-                budget.turn_budget_reached,
-            ),
-            _format_goal_budget_line(
-                "Time",
-                budget.wall_clock_budget_ms,
-                budget.remaining_wall_clock_ms,
-                budget.wall_clock_budget_reached,
-                milliseconds=True,
-            ),
-            f"Over budget: {'yes' if budget.over_budget else 'no'}",
-        )
-    )
+        lines.extend(("", "**Done when**", goal.completion_criterion))
+    lines.extend((
+        "", "**Progress**",
+        f"{goal.turns_used} turns · {goal.tokens_used} tokens · {_format_milliseconds(goal.wall_clock_ms)}",
+        "", "**Budgets**",
+    ))
+    budgets = [
+        _format_goal_budget_line(
+            "Tokens",
+            budget.token_budget,
+            budget.remaining_tokens,
+            budget.token_budget_reached,
+        ),
+        _format_goal_budget_line(
+            "Turns",
+            budget.turn_budget,
+            budget.remaining_turns,
+            budget.turn_budget_reached,
+        ),
+        _format_goal_budget_line(
+            "Time",
+            budget.wall_clock_budget_ms,
+            budget.remaining_wall_clock_ms,
+            budget.wall_clock_budget_reached,
+            milliseconds=True,
+        ),
+    ]
+    lines.extend([line for line in budgets if line] or ["No limits set."])
+    if budget.over_budget:
+        lines.append("⚠️ Budget exceeded.")
     if goal.terminal_reason is not None:
-        lines.append(f"Terminal reason: {goal.terminal_reason}")
+        lines.extend(("", "**Outcome**", goal.terminal_reason))
     return "\n".join(lines)
 
 
@@ -406,6 +413,8 @@ def _format_goal_budget_line(
     *,
     milliseconds: bool = False,
 ) -> str:
+    if limit is None and remaining is None and not reached:
+        return ""
     if milliseconds:
         limit_text = _format_milliseconds(limit) if limit is not None else "not set"
         remaining_text = (
@@ -414,10 +423,7 @@ def _format_goal_budget_line(
     else:
         limit_text = str(limit) if limit is not None else "not set"
         remaining_text = str(remaining) if remaining is not None else "not set"
-    return (
-        f"- {label}: limit {limit_text}; remaining {remaining_text}; "
-        f"reached {'yes' if reached else 'no'}"
-    )
+    return f"- {label}: {remaining_text} left / {limit_text}" + (" · limit reached" if reached else "")
 
 
 def _format_milliseconds(value: int) -> str:
@@ -436,7 +442,7 @@ def _format_skills(skills: list[SkillInfo]) -> str:
     if not skills:
         return "No skills available."
     return "\n\n".join(
-        f"{skill.name} [{skill.source}]\n{skill.description}" for skill in skills
+        f"**{skill.name}** · {skill.source}\n{_truncate(_one_line(skill.description), 180)}" for skill in skills
     )
 
 
@@ -450,10 +456,10 @@ def _format_mcp_tools(tools: list[ToolInfo]) -> str:
         return "No MCP tools available for this session."
     sections: list[str] = []
     for server_id in sorted(grouped):
-        lines = [server_id]
+        lines = [f"**{server_id}**"]
         for tool in sorted(grouped[server_id], key=lambda item: item.name):
-            description = f" — {tool.description}" if tool.description else ""
-            lines.append(f"- {tool.name}{description}")
+            description = f" — {_truncate(_one_line(tool.description), 180)}" if tool.description else ""
+            lines.append(f"- **{tool.name}**{description}")
         sections.append("\n".join(lines))
     return "MCP servers:\n" + "\n\n".join(sections)
 

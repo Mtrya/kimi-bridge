@@ -296,7 +296,8 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _Int
             binding = await self._require_binding(conversation_key, adapter, conversation)
             if binding is not None:
                 environments = await self._client.list_environments(binding.session_id)
-                await self._send_chunked(adapter, conversation, "Native configured environments\n" + "\n".join(f"{item.id} · {item.kind} · {item.status}" for item in environments))
+                blocks = [f"**{item.id}** · {item.kind}\n{item.status}" for item in environments]
+                await self._send_chunked(adapter, conversation, "**Execution targets**\n\n" + "\n\n".join(blocks))
             return
         if command == "/workspace":
             await self._handle_workspace(conversation_key, adapter, conversation, argument)
@@ -617,7 +618,8 @@ class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _Int
                 binding.permission_mode,
                 server_version,
                 self._model,
-            ) + f"\nEnvironment: {context.environment_id}\nTarget working directory: {context.cwd}",
+                context,
+            ),
         )
 
     async def _handle_title(

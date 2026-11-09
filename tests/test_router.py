@@ -1601,27 +1601,27 @@ async def test_bridge_commands_switch_stop_and_mode(
 
     texts = [text for _message, _conversation, text in adapter.sent]
     help_text = next(text for text in texts if text.startswith("**Commands**"))
-    for grammar in (
-        "/mode <manual|auto|yolo>",
-        "/model [alias]",
-        "/secondary-model [alias] | set <alias> <description>",
-        "/effort [effort]",
-        "/plan [on|off]",
+    for command in (
+        "/mode",
+        "/model",
+        "/secondary-model",
+        "/effort",
+        "/plan",
         "/status",
-        "/title [text]",
+        "/title",
         "/usage",
-        "/tasks [all|completed|failed|cancelled]",
-        "/skills run <name> [args]",
-        "/mcp [servers|show <server>|restart <server>]",
-        "/compact [instruction]",
-        "/undo [count]",
-        "/goal [status|edit <objective>|pause|resume|cancel|-- <objective>|<objective>]",
-        "/files [directory] | /files search <query> | /files show|send|diff <n|path> | /files changes",
-        "/render-thinking [on|off]",
+        "/tasks",
+        "/skills",
+        "/mcp",
+        "/compact",
+        "/undo",
+        "/goal",
+        "/files",
+        "/render-thinking",
         "/reload",
     ):
-        assert f"**{grammar}**" in help_text
-    assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
+        assert f"**{command}**" in help_text
+    assert any(all(value in text for value in ("Alpha", "idle", "Beta", "busy")) for text in texts)
     assert any("Switched to session-b" in text for text in texts)
     assert any("Permission mode: yolo" in text for text in texts)
     assert any(text == "Stopped." for text in texts)
@@ -1804,11 +1804,11 @@ async def test_model_and_effort_commands_use_exact_catalog_and_profile_inheritan
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    catalog = next(text for text in texts if "Available models:" in text)
-    assert "kimi-code/k3 — K3" in catalog
-    assert "kimi-code/other — Other" in catalog
-    assert "kimi-code/legacy — Legacy — thinking efforts: on" in catalog
-    assert "kimi-code/fast — Fast" in catalog
+    catalog = next(text for text in texts if "Available models" in text)
+    for model in client.models:
+        assert any(model.alias in line and model.display_name in line for line in catalog.splitlines())
+    legacy = catalog.split("kimi-code/legacy", 1)[1].split("kimi-code/fast", 1)[0]
+    assert "on" in legacy
     assert any("Unknown model alias: K3" in text for text in texts)
     assert any("Valid choices: low, high, max" in text for text in texts)
     assert any(
@@ -1881,10 +1881,12 @@ async def test_secondary_model_command_updates_global_pool_without_a_session(
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    listings = [text for text in texts if "Available models:" in text]
-    assert "kimi-code/k3 [default, pool]" in listings[0]
+    listings = [text for text in texts if "**Available models**" in text]
+    default_row = next(line for line in listings[0].splitlines() if "kimi-code/k3" in line and "pool" in line)
+    assert "default" in default_row
     assert "hard tasks" in listings[0]
-    assert "kimi-code/fast [default, pool]" in listings[1]
+    default_row = next(line for line in listings[1].splitlines() if "kimi-code/fast" in line and "pool" in line)
+    assert "default" in default_row
     assert any("Unknown model alias: K3" in text for text in texts)
     assert client.secondary_model_updates == ["kimi-code/fast"]
     assert client.sessions == []
@@ -2016,14 +2018,9 @@ async def test_status_title_and_usage_report_session_owned_values(
     texts = [text for _message_ref, _conversation, text in adapter.sent]
     assert "Title: Control session" in texts
     assert "Title: Exact  Title" in texts
-    status_text = next(text for text in texts if text.startswith("Session:"))
-    assert "Session: Exact  Title" in status_text
-    assert "State: busy" in status_text
-    assert "Pending interaction: question" in status_text
-    assert "Thinking effort: max" in status_text
-    assert "Plan mode: on" in status_text
-    assert "Permission mode: manual" in status_text
-    assert "Kimi-code: 0.28.1" in status_text
+    status_text = next(text for text in texts if "session-control" in text and "Exact  Title" in text)
+    assert all(value in status_text for value in ("busy", "question", "max", "manual", "0.28.1"))
+    assert "Plan: on" in status_text
     usage_text = next(text for text in texts if "Input tokens: 100" in text)
     assert "Cache-read tokens: 25" in usage_text
     context_line = next(line for line in usage_text.splitlines() if line.startswith("Context:"))
@@ -2060,7 +2057,7 @@ async def test_empty_session_uses_configured_default_as_effective_model(
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    assert "Current model: kimi-code/k3" in texts[0]
+    assert "kimi-code/k3" in texts[0].split("Available models", 1)[0]
     assert "Valid choices: low, high, max" in texts[1]
     assert "Model: kimi-code/k3" in texts[2]
     assert client.profile_updates == [
@@ -2594,10 +2591,10 @@ async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(
     ]
     assert client.activation_subscription_ready == [True]
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    assert any("harmless [user]" in text for text in texts)
+    assert any("harmless" in text and "user" in text for text in texts)
     assert any("Unknown skill: missing" in text for text in texts)
     assert texts.count("SKILL_OK") == 1
-    mcp_text = next(text for text in texts if text.startswith("MCP servers:"))
+    mcp_text = next(text for text in texts if text.startswith("MCP servers:")).replace("**", "")
     assert "docs\n- search — Search docs" in mcp_text
     assert "records\n- lookup — Look up records" in mcp_text
     assert "builtin" not in mcp_text
@@ -3313,18 +3310,14 @@ async def test_goal_status_reports_none_and_all_public_fields_while_busy(
     texts = [text for _ref, _conversation, text in adapter.sent]
     assert texts[0] == "No active goal."
     status = texts[1]
-    for fragment in (
-        "Goal: Ship the bridge",
-        "Status: active",
-        "Completion criterion: All checks pass",
-        "Used: 3 turns; 4200 tokens; 1 min 5 s",
-        "Tokens: limit 10000; remaining 5800; reached no",
-        "Turns: limit 8; remaining 5; reached no",
-        "Time: limit 2 min; remaining 55 s; reached no",
-        "Over budget: no",
-        "Terminal reason: Waiting for review",
-    ):
-        assert fragment in status
+    goal = client.goals["session-control"]
+    for value in (goal.objective, goal.status, goal.completion_criterion, goal.terminal_reason):
+        assert value in status
+    for value in ("3 turns", "4200 tokens", "1 min 5 s"):
+        assert value in status
+    for label, values in (("Tokens", ("10000", "5800")), ("Turns", ("8", "5")), ("Time", ("2 min", "55 s"))):
+        row = next(line for line in status.splitlines() if line.startswith(f"- {label}:"))
+        assert all(value in row for value in values)
 
 
 async def test_goal_creation_orders_public_profile_then_normal_manual_turn(
@@ -3513,7 +3506,7 @@ async def test_goal_pause_aborts_busy_turn_and_cancels_pending_interaction(
         "stale",
     ]
     texts = [text for _ref, _conversation, text in adapter.sent]
-    assert any("Status: paused" in text for text in texts)
+    assert any(client.goals["session-1"].objective in text and "paused" in text for text in texts)
 
 
 async def test_goal_cancel_keeps_origin_interaction_after_session_switch(
@@ -7249,15 +7242,15 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     texts = [text for _message, _conversation, text in adapter.sent]
     index = next(text for text in texts if text.startswith("**Commands**"))
     assert "(details:" not in index
-    goal_details = [text for text in texts if text.startswith("**/goal [status")]
+    goal_details = [text for text in texts if text == COMMAND_HELP["/goal"].details]
     assert len(goal_details) == 1
     assert "/goal -- <objective>" in goal_details[0]
-    assert "\nExample" in goal_details[0]
+    assert "/goal -- status of the migration" in goal_details[0]
     show_details = next(
-        text for text in texts if text.startswith("**/tasks show <n|id>**")
+        text for text in texts if text == COMMAND_HELP["/tasks show"].details
     )
     assert "8 KiB" in show_details
-    task_fallbacks = [text for text in texts if text.startswith("**/tasks [all")]
+    task_fallbacks = [text for text in texts if text == COMMAND_HELP["/tasks"].details]
     assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
     # `help` is not a help token: the keyword reaches the search handler.
     assert not any(
@@ -7277,10 +7270,12 @@ def test_help_resolver_preserves_free_form_arguments() -> None:
     assert command_help_details("/mode", "yolo ?") is None
     assert command_help_details("/new", "/tmp/dir ?") is None
     for action in ("show", "send", "search", "changes", "diff"):
-        assert command_help_details("/files", action + " ?") == COMMAND_HELP["/files"].details
-        assert command_help_details("/files", action + "   ?") == COMMAND_HELP["/files"].details
+        assert command_help_details("/files", action + " ?") == COMMAND_HELP[f"/files {action}"].details
+        assert command_help_details("/files", action + "   ?") == COMMAND_HELP[f"/files {action}"].details
     assert command_help_details("/files", "folder name ?") is None
     assert command_help_details("/files", "show file name ?") is None
+    assert command_help_details("/workspace", "add ?") == COMMAND_HELP["/workspace add"].details
+    assert command_help_details("/workspace", "add folder name ?") is None
     assert (
         command_help_details("/sessions", "search help") is None
     )

@@ -13,7 +13,7 @@ from .formatting import _usage_bar
 
 LOGGER = logging.getLogger(__name__)
 MCP_RUNTIME_SCOPE = (
-    "Native MCP runtime: the most recently created session, if it is live."
+    "Connections use the most recently created session, if live."
 )
 
 
@@ -31,8 +31,9 @@ class _IntegrationMixin:
         if not argument:
             plugins = await self._client.list_plugins()
             text = (
-                "\n".join(
-                    f"{item.id} · {item.name} · {'enabled' if item.enabled else 'disabled'} · {item.state} · {item.skill_count} skills · {item.server_count} MCP servers"
+                "\n\n".join(
+                    f"**{item.name}** · {'enabled' if item.enabled else 'disabled'} · {item.state}\n"
+                    f"{item.skill_count} skills · {item.server_count} MCP servers\n`{item.id}`"
                     for item in plugins
                 )
                 or "No installed Kimi plugins."
@@ -50,28 +51,23 @@ class _IntegrationMixin:
         )
         item = details.plugin
         lines = [
-            f"{item.name} ({item.id})",
-            f"Version: {item.version or 'unavailable'}",
-            f"State: {item.state} · {'enabled' if item.enabled else 'disabled'}",
-            "Declared skills: " + (", ".join(details.skills) or "none"),
+            f"**{item.name}** · {'enabled' if item.enabled else 'disabled'} · {item.state}",
+            f"Version: {item.version or 'unavailable'} · ID: {item.id}",
+            "",
+            "**Skills**",
+            "\n".join(f"- {skill}" for skill in details.skills) or "None",
+            "",
+            "**MCP servers**",
         ]
         lines.extend(
-            f"MCP: {server.name} → {server.runtime_name} · {server.transport} · {'enabled' if server.enabled else 'disabled'}"
+            f"- **{server.name}** · {server.transport} · {'enabled' if server.enabled else 'disabled'}\n  Runtime: {server.runtime_name}"
             for server in details.servers
         )
-        lines.append(
-            "Diagnostics: "
-            + (
-                ", ".join(
-                    f"{count} {severity}" for severity, count in details.diagnostics
-                )
-                or "none"
-            )
-        )
-        lines.append(
-            "Available tools in the bound session: "
-            + (", ".join(details.tools) or "none")
-        )
+        if not details.servers:
+            lines.append("None")
+        diagnostics = ", ".join(f"{count} {severity}" for severity, count in details.diagnostics)
+        lines.extend(("", "**Diagnostics**", diagnostics or "None"))
+        lines.extend(("", "**Available tools · current session**", "\n".join(f"- {tool}" for tool in details.tools) or "None"))
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_mcp_inspection(
@@ -102,13 +98,13 @@ class _IntegrationMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"{MCP_RUNTIME_SCOPE}\nRestart acknowledged for {server.id}. Use /mcp show {server.id} to inspect connection state.",
+                f"✅ **Restart acknowledged** · {server.id}\n{MCP_RUNTIME_SCOPE}\nCheck with /mcp show {server.id}.",
             )
             return
         inspection = await self._client.inspect_mcp(binding.session_id)
         lines = [
+            "**Connections**",
             MCP_RUNTIME_SCOPE,
-            f"Authentication/configuration and available tools below use bound session {binding.session_id}.",
         ]
         servers = (
             inspection.servers
@@ -129,7 +125,7 @@ class _IntegrationMixin:
             )
             return
         lines.extend(
-            f"{server.id} · {server.transport} · {server.status} · {server.tool_count} runtime tools"
+            f"\n**{server.id}** · {server.status}\n{server.transport} · {server.tool_count} runtime tools"
             for server in servers
         )
         if verb == "servers" and not servers:
@@ -137,23 +133,24 @@ class _IntegrationMixin:
         names = {server.id for server in servers} | {server.name for server in servers}
         if verb == "show":
             names.add(name)
-        lines.extend(
-            f"Authentication: {server} · {status}"
+        lines.extend(("", "**Authentication · current session**"))
+        auth_lines = [
+            f"- {server} · {status}"
             for server, status in inspection.auth_statuses
             if verb == "servers" or server in names
-        )
+        ]
+        lines.extend(auth_lines or ["No authentication state reported."])
         if verb == "show":
-            lines.append(
-                "Available bound-session tools: "
-                + (
-                    ", ".join(
-                        tool.name
+            lines.extend(("", "**Available tools · current session**",
+                (
+                    "\n".join(
+                        f"- {tool.name}"
                         for tool in inspection.tools
                         if tool.mcp_server_id in names
                     )
                     or "none"
-                )
-            )
+                ),
+            ))
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _account_quota_text(self) -> str:

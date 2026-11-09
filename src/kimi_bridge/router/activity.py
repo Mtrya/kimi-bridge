@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..kimi_server import TodoItem
 from ..platforms.base import ConversationRef, PlatformAdapter
+from .formatting import _one_line, _truncate
 
 
 class _ActivityMixin:
@@ -21,15 +22,17 @@ class _ActivityMixin:
         choice_key = (conversation_key, conversation)
         if not argument:
             self._agent_choices.pop(choice_key, None)
-            lines = ["Agents (current native activity)"]
+            blocks = [f"**Agents · {len(activity.agents)}**"]
             for number, agent in enumerate(activity.agents, 1):
-                parent = f" ← {agent.parent_id}" if agent.parent_id else ""
-                lines.append(
-                    f"{number}. {agent.id}{parent} · {agent.status} · {agent.model or 'model unavailable'}"
-                )
+                lines = [f"{number}. **{agent.id}** · {agent.status}"]
+                if agent.model:
+                    lines.append(f"Model: {agent.model}")
+                if agent.parent_id:
+                    lines.append(f"Parent: {agent.parent_id}")
                 if agent.assignment:
-                    lines.append(agent.assignment)
-            await self._send_chunked(adapter, conversation, "\n".join(lines))
+                    lines.append(_truncate(_one_line(agent.assignment), 180))
+                blocks.append("\n".join(lines))
+            await self._send_chunked(adapter, conversation, "\n\n".join(blocks))
             self._agent_choices[choice_key] = (
                 binding.session_id,
                 tuple(agent.id for agent in activity.agents),
@@ -78,19 +81,18 @@ class _ActivityMixin:
             )
             return
         lines = [
-            f"Agent {agent.id}",
-            f"State: {agent.status}",
+            f"**Agent {agent.id}** · {agent.status}",
             f"Model: {agent.model or 'unavailable'}",
         ]
         if agent.parent_id:
             lines.append(f"Parent: {agent.parent_id}")
         if agent.assignment:
-            lines.append(f"Assignment: {agent.assignment}")
+            lines.extend(("", "**Assignment**", agent.assignment))
         if agent.task:
             lines.append(
                 f"Task: {agent.task.id} · {'background' if agent.task.detached else 'foreground'}"
             )
-        lines.extend(_todo_lines(agent.todos))
+        lines.extend(("", *_todo_lines(agent.todos)))
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_todos(
@@ -108,7 +110,7 @@ class _ActivityMixin:
             return
         activity = await self._client.inspect_activity(binding.session_id)
         blocks = [
-            f"Agent {agent.id}\n" + "\n".join(_todo_lines(agent.todos))
+            f"**Agent {agent.id}**\n" + "\n".join(_todo_lines(agent.todos))
             for agent in activity.agents
             if argument == "all" or agent.id == "main"
         ]
@@ -124,6 +126,7 @@ def _todo_lines(items: tuple[TodoItem, ...]) -> list[str]:
     }
     markers = {"done": "✓", "in_progress": "→", "pending": "○"}
     return [
-        f"Todos: {counts['done']}/{len(items)} completed · {counts['in_progress']} in progress · {counts['pending']} pending",
+        f"**Todos · {counts['done']}/{len(items)} completed**",
+        f"{counts['in_progress']} in progress · {counts['pending']} pending",
         *(f"{markers[item.status]} {item.title}" for item in items),
     ]

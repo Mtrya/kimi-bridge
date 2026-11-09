@@ -4,7 +4,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 
 ## Exact command grammar
 
-`/help` shows the compact index below. Every command also answers `/<command> ?` with detailed usage, including arguments, defaults, side effects, and examples.
+`/help` groups commands by task and keeps options out of the overview. Add `?` for focused instructions and examples: `/workspace ?`, `/workspace primary ?`, `/files send ?`, or `/goal edit ?`. The full grammar is listed below.
 
 | Command | Behavior |
 | --- | --- |
@@ -78,6 +78,8 @@ Model and effort changes are accepted while busy and affect later native request
 
 `/workspace` puts the current folder first, with primary/additional roles beside folder names and full paths underneath. A local folder with several roles appears once. Add/remove/primary commands return a short confirmation; use bare `/workspace` for the full view. Folder changes affect sessions sharing that native workspace. Promoting a folder keeps the old primary as an additional folder; existing sessions keep their original working directories and access to them even after removal from shared membership. The native session’s directory and current additional folders determine file access, including symlink containment checks.
 
+To work in a different project, start a session with `/new /path/to/project`, or find one with `/sessions search <keyword>` and resume it with `/switch <number>`.
+
 `/files` lists up to 100 entries; `/files search` returns up to 50 matches under native ignore rules. Directory names end in `/`; symlinks are labelled `[symlink]`. Use `/files <directory>` to list a folder; `show` and `send` require a file. A successful list or search installs one current numbered selection for that chat and session. A changes view uses the same list; its entries retain their recorded turn. Ordinary turns and `show`/`send`/`diff` reuse those numbers without consuming them. Another view replaces the list; failed lookups retain the previous choices. Binding or folder changes invalidate it, and remembered numbers are cleared on bridge restart. Use explicit paths with spaces directly, `./123` for a numeric filename, and `/files ./search` for a directory named `search`. Every open/send revalidates native access. Use direct paths without `..` segments; links must resolve within the session's permitted folders.
 
 `/files send` accepts every file extension, including unknown and extensionless filenames. Adapters use supported native image/video messages and generic attachments for other formats. `/files show` previews text only for these extensions, ignoring case: `.txt`, `.md`, `.rst`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.xml`, `.html`, `.htm`, `.css`, `.scss`, `.py`, `.pyi`, `.js`, `.jsx`, `.ts`, `.tsx`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.sql`, `.c`, `.h`, `.cc`, `.cpp`, `.hpp`, `.go`, `.rs`, `.java`, `.rb`, `.php`, `.lua`, and `.r`; recognized filenames are `README`, `LICENSE`, `COPYING`, `NOTICE`, `Dockerfile`, `Makefile`, `justfile`, `.gitignore`, `.gitattributes`, `.dockerignore`, `.editorconfig`, and `.env`. Other formats and binary content remain sendable, with a download hint instead of a text preview. Text previews are limited to 8 KiB and labelled when truncated.
@@ -92,7 +94,7 @@ Use `/new /host/workspace --env target --cwd "/target/project with spaces"` to s
 
 MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
 
-`/usage` keeps session counters separate from managed-account limits. Available context and quota ratios show compact bars alongside percentages used. Quota reset times appear in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves valid session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
+`/usage` keeps session counters separate from managed-account limits. Kimi Code 2.5.2 reports placeholder zeros for cumulative session counters; live context and account quota are read separately. Available context and quota ratios show compact bars alongside percentages used. Quota reset times appear in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
 
 `/reload` refreshes Kimi Code's configuration, plugins, skills, and agent definitions and rebuilds the bound session with its existing history. It preserves the session ID, selected model, and bridge permission mode. Kimi rejects reload during running agent turns or compaction. Global Kimi settings are refreshed, and new sessions use the latest default model; the bridge's own configuration is loaded at bridge startup.
 

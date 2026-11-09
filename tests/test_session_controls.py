@@ -168,8 +168,10 @@ async def test_queue_controls_select_waiting_ids_and_keep_enqueue_distinct(
     try:
         await router.handle_inbound(adapter, _message("/queue"))
         listing = adapter.sent[-1][2]
-        assert "1. waiting-a" in listing and "2. waiting-b" in listing
-        assert "1. active-id" not in listing
+        listing = listing.replace("**", "")
+        assert listing.index("First request") < listing.index("Second request")
+        assert "1. First request" in listing and "2. Second request" in listing
+        assert "1. Active request" not in listing
         await router.handle_inbound(adapter, _message("/queue cancel 1"))
         await router.handle_inbound(adapter, _message("/queue steer 2"))
         await router.handle_inbound(adapter, _message("/queue -- cancel the fixture"))
