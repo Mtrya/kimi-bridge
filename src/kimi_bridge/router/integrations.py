@@ -33,7 +33,8 @@ class _IntegrationMixin:
             text = (
                 "\n\n".join(
                     f"**{item.name}** · {'enabled' if item.enabled else 'disabled'} · {item.state}\n"
-                    f"{item.skill_count} skills · {item.server_count} MCP servers\n`{item.id}`"
+                    f"{item.skill_count} skill{'s' if item.skill_count != 1 else ''} · "
+                    f"{item.server_count} MCP server{'s' if item.server_count != 1 else ''}\n`{item.id}`"
                     for item in plugins
                 )
                 or "No installed Kimi plugins."
@@ -101,23 +102,16 @@ class _IntegrationMixin:
                 f"✓ **Restart acknowledged** · {server.id}\n{MCP_RUNTIME_SCOPE}\nCheck with /mcp show {server.id}.",
             )
             return
-        inspection = await self._client.inspect_mcp(binding.session_id)
+        inspection = await self._client.inspect_mcp(
+            binding.session_id, selector=name if verb == "show" else None
+        )
         lines = [
             "**Connections**",
             MCP_RUNTIME_SCOPE,
         ]
-        servers = (
-            inspection.servers
-            if verb == "servers"
-            else tuple(
-                server
-                for server in inspection.servers
-                if name in {server.id, server.name}
-            )
-        )
-        auth = dict(inspection.auth_statuses)
-        matching_tools = tuple(tool for tool in inspection.tools if tool.mcp_server_id == name)
-        if verb == "show" and not servers and name not in auth and not matching_tools:
+        if verb == "show" and not (
+            inspection.servers or inspection.auth_statuses or inspection.tools
+        ):
             await self._send_chunked(
                 adapter,
                 conversation,
@@ -126,18 +120,14 @@ class _IntegrationMixin:
             return
         lines.extend(
             f"\n**{server.id}** · {server.status}\n{server.transport} · {server.tool_count} runtime tools"
-            for server in servers
+            for server in inspection.servers
         )
-        if verb == "servers" and not servers:
+        if verb == "servers" and not inspection.servers:
             lines.append("No servers in that native runtime.")
-        names = {server.id for server in servers} | {server.name for server in servers}
-        if verb == "show":
-            names.add(name)
         lines.extend(("", "**Authentication · current session**"))
         auth_lines = [
             f"- {server} · {status}"
             for server, status in inspection.auth_statuses
-            if verb == "servers" or server in names
         ]
         lines.extend(auth_lines or ["No authentication state reported."])
         if verb == "show":
@@ -146,7 +136,6 @@ class _IntegrationMixin:
                     "\n".join(
                         f"- {tool.name}"
                         for tool in inspection.tools
-                        if tool.mcp_server_id in names
                     )
                     or "none"
                 ),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -49,6 +50,23 @@ def _select(
             "Integration name is unknown or ambiguous; use its native ID"
         )
     return matches[0]
+
+
+def _mcp_tool_namespace(name: str) -> str:
+    # Native qualified tool names sanitize server names, then collapse underscores.
+    return re.sub(r"_+", "_", re.sub(r"[^a-zA-Z0-9_-]", "_", name))
+
+
+def _tools_for_servers(
+    tools: tuple[ToolInfo, ...], names: set[str]
+) -> tuple[ToolInfo, ...]:
+    namespaces = {_mcp_tool_namespace(name) for name in names}
+    return tuple(
+        tool for tool in tools
+        if tool.active and tool.source == "mcp"
+        and tool.mcp_server_id is not None
+        and _mcp_tool_namespace(tool.mcp_server_id) in namespaces
+    )
 
 
 class IntegrationOperations:
@@ -99,8 +117,7 @@ class IntegrationOperations:
             ),
             tuple(
                 tool.name
-                for tool in tools
-                if tool.active and tool.mcp_server_id in runtime_names
+                for tool in _tools_for_servers(tools, runtime_names)
             ),
         )
 
@@ -117,7 +134,9 @@ class IntegrationOperations:
             for item in data["servers"]
         )
 
-    async def inspect_mcp(self, session_id: str) -> McpInspection:
+    async def inspect_mcp(
+        self, session_id: str, *, selector: str | None = None
+    ) -> McpInspection:
         session = await self.get_session(session_id)
         servers, auth, tools = await asyncio.gather(
             self.list_mcp_servers(),
@@ -127,10 +146,30 @@ class IntegrationOperations:
             ),
             self._integration_tools(session_id),
         )
-        return McpInspection(
+        inspection = McpInspection(
             servers,
             tuple((item["name"], item["authStatus"]) for item in auth),
             tuple(tool for tool in tools if tool.active and tool.source == "mcp"),
+        )
+        if selector is None:
+            return inspection
+        namespace = _mcp_tool_namespace(selector)
+        selected = tuple(
+            server for server in servers
+            if namespace in {
+                _mcp_tool_namespace(server.id), _mcp_tool_namespace(server.name)
+            }
+        )
+        names = {selector}
+        names.update(name for server in selected for name in (server.id, server.name))
+        namespaces = {_mcp_tool_namespace(name) for name in names}
+        return McpInspection(
+            selected,
+            tuple(
+                (name, status) for name, status in inspection.auth_statuses
+                if _mcp_tool_namespace(name) in namespaces
+            ),
+            _tools_for_servers(inspection.tools, names),
         )
 
     async def restart_mcp_server(self, selector: str) -> McpServer:

@@ -57,7 +57,7 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/plugins [show <name>]` | Inspect installed plugin state, declared contributions, diagnostic counts, and available bound-session tools. |
 | `/mcp` | List MCP tools currently available in the bound session. |
 | `/mcp servers` | Inspect native runtime connection states and bound-session configuration authentication states. |
-| `/mcp show <server>` | Inspect one server and its available bound-session tools. |
+| `/mcp show <server>` | Inspect one server by native name or listed tool namespace and show its available bound-session tools. |
 | `/mcp restart <server>` | Request a native connection restart; acknowledgement does not establish connection health. |
 | `/workspace [add\|remove\|primary <path>]` | Inspect or change shared native workspace folders; existing sessions retain their working directories. |
 | `/files [directory]` | List files and folders in the session working directory or a specified approved directory. |
@@ -92,7 +92,7 @@ Use `/new /host/workspace --env target --cwd "/target/project with spaces"` to s
 
 `/plugins` shows installed native state; `show` separates declared skills/MCP contributions from tools currently available to the bound session. Diagnostic severity counts are displayed; inspect detailed diagnostics and manage configuration or authentication in Kimi.
 
-MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
+MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` uses the native connection ID/name and confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
 
 `/usage` keeps session counters separate from managed-account limits. Kimi Code 2.5.2 reports placeholder zeros for cumulative session counters; live context and account quota are read separately. Available context and quota ratios show compact bars alongside percentages used. Quota reset times appear in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
 

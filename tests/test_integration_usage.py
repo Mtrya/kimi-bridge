@@ -35,7 +35,15 @@ def _plugin(enabled=True, state="ok"):
     }
 
 
-async def test_plugin_projection_keeps_contributions_and_excludes_configuration_secrets():
+@pytest.mark.parametrize("runtime_name,tool_namespace", [
+    ("plugin-weather-calendar", "plugin-weather-calendar"),
+    ("plugin-weather:calendar", "plugin-weather_calendar"),
+    ("plugin.weather//calendar", "plugin_weather_calendar"),
+    ("plugin__weather::calendar", "plugin_weather_calendar"),
+])
+async def test_plugin_projection_keeps_contributions_and_excludes_configuration_secrets(
+    runtime_name: str, tool_namespace: str,
+):
     secret = "PRIVATE_TOKEN_SENTINEL"
     detail = {
         **_plugin(),
@@ -43,7 +51,7 @@ async def test_plugin_projection_keeps_contributions_and_excludes_configuration_
         "mcpServers": [
             {
                 "name": "calendar",
-                "runtimeName": "plugin-weather-calendar",
+                "runtimeName": runtime_name,
                 "enabled": True,
                 "transport": "http",
                 "url": "https://example.invalid/?token=" + secret,
@@ -60,15 +68,22 @@ async def test_plugin_projection_keeps_contributions_and_excludes_configuration_
                 "name": "available",
                 "description": "",
                 "source": "mcp",
-                "mcp_server_id": "plugin-weather-calendar",
+                "mcp_server_id": tool_namespace,
                 "active": True,
             },
             {
                 "name": "inactive",
                 "description": "",
                 "source": "mcp",
-                "mcp_server_id": "plugin-weather-calendar",
+                "mcp_server_id": tool_namespace,
                 "active": False,
+            },
+            {
+                "name": "other_plugin_tool",
+                "description": "",
+                "source": "mcp",
+                "mcp_server_id": "other-server",
+                "active": True,
             },
         ]
     }
@@ -81,7 +96,7 @@ async def test_plugin_projection_keeps_contributions_and_excludes_configuration_
         result = await client.get_plugin_details("session-1", "Weather")
     assert result.skills == ("forecast",) and result.tools == ("available",)
     assert result.diagnostics == (("error", 1),)
-    assert result.servers[0].runtime_name == "plugin-weather-calendar"
+    assert result.servers[0].runtime_name == runtime_name
     assert secret not in repr(asdict(result))
     assert all(request[0] == "GET" for request in http.requests)
 
@@ -142,6 +157,38 @@ async def test_mcp_inspection_keeps_runtime_auth_and_bound_tools_scopes_separate
     assert http.requests[2][1].endswith("/api/v2/mcp/auth-statuses")
     assert http.requests[2][2]["params"] == {"cwd": "/bound", "verify": "false"}
     assert http.requests[3][2]["params"] == {"session_id": "bound-session"}
+    assert all(request[0] == "GET" for request in http.requests)
+
+
+@pytest.mark.parametrize("selector", [
+    "plugin-weather:calendar", "plugin-weather_calendar", "unknown",
+])
+async def test_mcp_inspection_matches_native_server_names_and_tool_namespaces(selector):
+    http = FakeHttpClient([
+        _envelope({"metadata": {"cwd": "/bound"}}),
+        _envelope({"servers": [
+            {"id": name, "name": name, "transport": "stdio", "status": "connected", "tool_count": 1}
+            for name in ("plugin-weather:calendar", "other-server")
+        ]}),
+        _envelope([
+            {"name": name, "authStatus": "not-applicable"}
+            for name in ("plugin-weather:calendar", "other-server")
+        ]),
+        _envelope({"tools": [
+            {"name": name, "description": "", "source": "mcp", "mcp_server_id": namespace, "active": True}
+            for name, namespace in (("forecast", "plugin-weather_calendar"), ("unrelated", "other-server"))
+        ]}),
+    ])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        result = await client.inspect_mcp("session-1", selector=selector)
+    if selector == "unknown":
+        assert result == McpInspection((), (), ())
+    else:
+        assert [server.id for server in result.servers] == ["plugin-weather:calendar"]
+        assert result.auth_statuses == (("plugin-weather:calendar", "not-applicable"),)
+        assert [tool.name for tool in result.tools] == ["forecast"]
     assert all(request[0] == "GET" for request in http.requests)
 
 
@@ -263,7 +310,7 @@ class IntegrationClient(FakeKimiClient):
             (),
         )
 
-    async def inspect_mcp(self, session_id):
+    async def inspect_mcp(self, session_id, *, selector=None):
         return McpInspection(
             (McpServer("server", "server", "http", "disconnected", 0),),
             (("server", "oauth-required"),),
@@ -354,7 +401,7 @@ async def test_integration_tool_errors_never_expose_native_diagnostics(operation
 
 async def test_mcp_show_retains_bound_tools_without_runtime_or_auth_entry(tmp_path):
     class Client(IntegrationClient):
-        async def inspect_mcp(self, session_id):
+        async def inspect_mcp(self, session_id, *, selector=None):
             return McpInspection(
                 (), (), (ToolInfo("fixture_tool", "", "mcp", "tool-only"),)
             )
