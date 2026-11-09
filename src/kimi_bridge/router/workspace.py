@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..kimi_server import FileAccessError, RecordedTurn, WorkspaceFile
+from ..kimi_server import FileAccessError, FileContext, RecordedTurn, WorkspaceFile
 from ..platforms.base import ConversationRef, OutboundFile, PlatformAdapter
 
 
@@ -53,20 +53,16 @@ class _WorkspaceMixin:
             for choice_key, (_, current, _) in tuple(self._file_choices.items()):
                 if current.workspace.id == info.id:
                     self._file_choices.pop(choice_key)
-        context = await self._client.get_file_context(binding.session_id)
-        info = context.workspace
-        lines = [
-            f"Workspace {info.id}",
-            f"Primary: {info.primary}",
-            "Additional folders:",
-            *(info.additional or ("None",)),
-            f"Session working directory: {context.cwd}",
-        ]
-        if argument:
-            lines.append(
-                "The shared folder set applies to every session using this workspace. Existing sessions keep their working directories."
+            selected = info.primary if action == "primary" else path.strip()
+            label = {"add": "Added", "remove": "Removed from workspace", "primary": "Primary folder"}[action]
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"✅ {label}: **{_folder_name(selected)}**\n`{selected}`",
             )
-        await self._send_chunked(adapter, conversation, "\n".join(lines))
+            return
+        context = await self._client.get_file_context(binding.session_id)
+        await self._send_chunked(adapter, conversation, _workspace_text(context))
 
     async def _handle_files(
         self,
@@ -224,6 +220,32 @@ class _WorkspaceMixin:
             context,
             tuple(_FileChoice(entry.path) for entry in listing.entries),
         )
+
+
+def _folder_name(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "/"
+
+
+def _workspace_text(context: FileContext) -> str:
+    info = context.workspace
+    local = context.environment_id == "local"
+    roles = ["current"]
+    if not local:
+        roles.append("target")
+    elif context.cwd == info.primary:
+        roles.append("primary")
+    elif context.cwd in info.additional:
+        roles.append("additional")
+    sections = [
+        f"📍 **{_folder_name(context.cwd)}** · {' · '.join(roles)}\n`{context.cwd}`"
+    ]
+    folders = [(info.primary, "primary"), *((path, "additional") for path in info.additional)]
+    for path, role in folders:
+        if local and path == context.cwd:
+            continue
+        label = role if local else f"{role} · host"
+        sections.append(f"📂 **{_folder_name(path)}** · {label}\n`{path}`")
+    return "\n\n".join(sections)
 
 
 def _file_listing_text(entries: tuple[WorkspaceFile, ...], truncated: bool) -> str:
