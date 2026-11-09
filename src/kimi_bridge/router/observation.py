@@ -1,4 +1,4 @@
-"""Session-labelled, one-attempt notices and independent side answers."""
+"""One-attempt activity notices and independent side answers."""
 
 from __future__ import annotations
 
@@ -36,12 +36,11 @@ class _ObservationMixin:
 
     async def _notice_once(self, active: _ActiveStream, text: str) -> None:
         try:
-            session = await self._client.get_session(active.session_id)
-            title = str(session.get("title") or active.session_id)
-            await active.adapter.send_notice_text(
-                active.conversation,
-                _format_observation_notice(title, active.session_id, text),
-            )
+            if not active.foreground:
+                session = await self._client.get_session(active.session_id)
+                title = str(session.get("title") or active.session_id)
+                text = _format_observation_notice(title, active.session_id, text)
+            await active.adapter.send_notice_text(active.conversation, text)
         except Exception:
             LOGGER.exception(
                 "background notice failed; dropping it for session %s",

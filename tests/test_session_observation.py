@@ -58,8 +58,9 @@ def _activity(
 
 
 @pytest.mark.parametrize("transition", ["complete", "blocked"])
+@pytest.mark.parametrize("off_session", [False, True])
 async def test_goal_and_task_notices_survive_switch_without_changing_binding(
-    tmp_path: Path, transition
+    tmp_path: Path, transition, off_session: bool,
 ):
     client = FakeKimiClient()
     client.sessions = [
@@ -78,8 +79,10 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
             ),
         )
         await _wait_for(lambda: router._active.activity is not None)
-        await router.handle_inbound(adapter, _message("/switch other"))
-        assert "session-control" in store.load().observations
+        selected = "other" if off_session else "session-control"
+        if off_session:
+            await router.handle_inbound(adapter, _message("/switch other"))
+            assert "session-control" in store.load().observations
         client.emit(
             "session-control",
             _activity(
@@ -95,18 +98,23 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
                 tasks=(replace(running, status="completed"),),
             ),
         )
-        client.emit("other", _event("turn.started", turnId=1))
-        client.emit("other", _event("assistant.delta", delta="B answer", offset=0))
-        client.emit("other", _event("turn.ended", turnId=1, reason="completed"))
+        client.emit(selected, _event("turn.started", turnId=1))
+        client.emit(selected, _event("assistant.delta", delta="B answer", offset=0))
+        client.emit(selected, _event("turn.ended", turnId=1, reason="completed"))
         await _wait_for(lambda: any("B answer" in text for _, _, text in adapter.sent))
         assert len(adapter.notice_texts) == 2
         for _, _, text in adapter.notice_texts:
-            heading, body, action = text.split("\n\n")
-            assert "Control session" in heading
-            assert heading.startswith("**") and heading.endswith("**")
+            if off_session:
+                heading, body, action = text.split("\n\n")
+                assert "Control session" in heading
+                assert heading.startswith("**") and heading.endswith("**")
+                assert "/switch session-control" in action
+            else:
+                body = text
+                assert "Control session" not in text and "session-control" not in text
+                assert "/switch" not in text
             assert "\n" in body
-            assert "/switch session-control" in action
-        assert store.load().bindings["feishu:cli_bot:ou_user"].session_id == "other"
+        assert store.load().bindings["feishu:cli_bot:ou_user"].session_id == selected
     finally:
         await router.close()
 
