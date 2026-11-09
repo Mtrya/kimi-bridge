@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..interactions import ApprovalRequest, InteractionOutcome, QuestionRequest
-from ..kimi_server import SessionNotice
+from ..kimi_server import SessionNotice, SessionActivity
 from ..platforms.base import (
     ActorRef,
     ConversationRef,
@@ -57,6 +57,11 @@ class _ActiveStream:
     adapter: PlatformAdapter
     conversation: ConversationRef
     actor: ActorRef
+    foreground: bool = True
+    activity: SessionActivity | None = None
+    # Hold initial events until the prepared subscription owns delivery.
+    delivery_ready: asyncio.Event | None = None
+    switch_notices: set[str] = field(default_factory=set)
     render: _RenderState = field(default_factory=_RenderState)
     thinking: _RenderState = field(
         default_factory=lambda: _RenderState(prefix=THINKING_LABEL)

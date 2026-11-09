@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from datetime import datetime
 from typing import Any, Literal
 
 from ..interactions import ApprovalRequest, QuestionRequest
@@ -44,6 +45,18 @@ class KimiServerAPIError(KimiServerOperationError):
         self.details = details
 
 
+class FileAccessError(KimiServerOperationError):
+    """A native file operation rejected a directory or a disallowed path."""
+
+    def __init__(self, reason: Literal["directory", "path_rejected"]) -> None:
+        self.reason = reason
+        super().__init__(
+            "The selected path is a directory."
+            if reason == "directory"
+            else "Kimi rejected the file path."
+        )
+
+
 class KimiServerProtocolError(KimiServerError):
     """The server violated or rejected the expected REST/WebSocket protocol."""
 
@@ -74,6 +87,21 @@ class PromptSubmission:
 
     prompt_id: str
     outcome: PromptOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class QueuedPrompt:
+    """One native input shown by queue inspection."""
+
+    id: str
+    status: Literal["running", "queued", "blocked"]
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromptQueue:
+    active: QueuedPrompt | None
+    waiting: tuple[QueuedPrompt, ...]
 
 
 class PromptSubmissionUncertain(KimiServerOperationError):
@@ -137,7 +165,7 @@ TaskStatus = Literal["running", "completed", "failed", "cancelled"]
 TaskKind = Literal["subagent", "bash", "tool"]
 SkillSource = Literal["project", "user", "extra", "builtin"]
 ToolSource = Literal["builtin", "skill", "mcp"]
-PromptMediaKind = Literal["image", "video"]
+PromptMediaKind = Literal["image", "video", "file"]
 SessionNoticeKind = Literal["error", "warning"]
 
 
@@ -279,6 +307,52 @@ class TaskInfo:
     completed_at: Any = None
     output_preview: str | None = None
     output_bytes: int | None = None
+    owner_agent_id: str = "main"
+    child_agent_id: str | None = None
+    detached: bool = True
+    swarm_index: int | None = None
+    phase: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItem:
+    title: str
+    status: Literal["pending", "in_progress", "done"]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentActivity:
+    id: str
+    status: str
+    model: str | None = None
+    parent_id: str | None = None
+    assignment: str | None = None
+    task: TaskInfo | None = None
+    todos: tuple[TodoItem, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GoalActivity:
+    objective: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionActivity:
+    session_id: str
+    agents: tuple[AgentActivity, ...]
+    tasks: tuple[TaskInfo, ...]
+    goal: GoalActivity | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityUpdate:
+    activity: SessionActivity
+    baseline: bool = False
+
+
+BackgroundOutcome = Literal["backgrounded", "already_background", "ended", "unsupported"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,3 +375,147 @@ class ToolInfo:
     description: str
     source: ToolSource
     mcp_server_id: str | None = None
+    active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceInfo:
+    id: str
+    primary: str
+    additional: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FileContext:
+    workspace: WorkspaceInfo
+    cwd: str
+    environment_id: str = "local"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceFile:
+    path: str
+    name: str
+    kind: str
+    size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FileListing:
+    entries: tuple[WorkspaceFile, ...]
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FilePreview:
+    path: str
+    text: str | None
+    size: int
+    binary: bool
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FileDownload:
+    name: str
+    data: bytes
+    media_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedTurn:
+    number: int
+
+
+@dataclass(frozen=True, slots=True)
+class FileChange:
+    path: str
+    status: str
+    additions: int
+    deletions: int
+    binary: bool = False
+    oversize: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FileChanges:
+    turn: RecordedTurn | None
+    recorded: bool
+    changes: tuple[FileChange, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FileDiff:
+    text: str | None
+    unavailable: Literal["unrecorded", "not_recorded", "missing", "binary", "oversize"] | None = None
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentInfo:
+    id: str
+    kind: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanDocument:
+    name: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginInfo:
+    id: str
+    name: str
+    enabled: bool
+    state: str
+    version: str | None = None
+    skill_count: int = 0
+    server_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PluginServer:
+    name: str
+    runtime_name: str
+    enabled: bool
+    transport: str
+
+
+@dataclass(frozen=True, slots=True)
+class PluginDetails:
+    plugin: PluginInfo
+    skills: tuple[str, ...]
+    servers: tuple[PluginServer, ...]
+    diagnostics: tuple[tuple[str, int], ...]
+    tools: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class McpServer:
+    id: str
+    name: str
+    transport: str
+    status: str
+    tool_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class McpInspection:
+    servers: tuple[McpServer, ...]
+    auth_statuses: tuple[tuple[str, str], ...]
+    tools: tuple[ToolInfo, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class QuotaWindow:
+    name: str
+    used_ratio: float
+    reset_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class AccountQuota:
+    available: bool
+    windows: tuple[QuotaWindow, ...] = ()

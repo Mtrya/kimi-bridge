@@ -1,6 +1,7 @@
 """Kimi wire-shape serialization and typed response parsing."""
 
 from __future__ import annotations
+from dataclasses import replace
 
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ from .types import (
     ModelInfo,
     PendingInteractionKind,
     PermissionMode,
+    QueuedPrompt,
     SecondaryModelConfig,
     SessionProfile,
     SessionStatus,
@@ -38,6 +40,19 @@ from .types import (
     ToolInfo,
     ToolSource,
 )
+
+
+def _queued_prompt_from_wire(value: dict[str, Any]) -> QueuedPrompt:
+    status = value["status"]
+    if status not in {"running", "queued", "blocked"}:
+        raise KimiServerProtocolError(f"unknown prompt status: {status!r}")
+    parts = []
+    for part in value["content"]:
+        if part["type"] == "text":
+            parts.append(part["text"])
+        else:
+            parts.append(f"[attachment: {part.get('name') or part['type']}]")
+    return QueuedPrompt(str(value["prompt_id"]), status, "\n".join(parts))
 
 
 def _model_info_from_wire(value: dict[str, Any]) -> ModelInfo:
@@ -261,7 +276,7 @@ _TASK_OUTCOMES = {
 
 
 def _task_info_from_wire(
-    value: dict[str, Any], *, session_id: str
+    value: dict[str, Any], *, session_id: str, owner_agent_id: str = "main"
 ) -> TaskInfo:
     kind = value.get("kind")
     status = value.get("status")
@@ -295,6 +310,12 @@ def _task_info_from_wire(
         completed_at=value.get("ended_at"),
         output_preview=preview,
         output_bytes=None,
+        owner_agent_id=owner_agent_id,
+        child_agent_id=value.get("child_agent_id"),
+        detached=bool(value.get("detached", True)),
+        swarm_index=value.get("swarm_index"),
+        phase=value.get("phase"),
+        model=value.get("model"),
     )
 
 
@@ -330,6 +351,7 @@ def _tool_info_from_wire(value: dict[str, Any]) -> ToolInfo:
         mcp_server_id=(
             str(mcp_server_id) if mcp_server_id is not None else None
         ),
+        active=bool(value.get("active", True)),
     )
 
 
@@ -364,10 +386,13 @@ def _interaction_update_from_wire(value: dict[str, Any]) -> InteractionUpdate:
         if kind == "approval"
         else _question_request_from_wire
     )
+    request = parser(value["request"], interaction_id=interaction_id, session_id=session_id)
+    if isinstance(request, ApprovalRequest):
+        request = replace(request, agent_id=value["agent_id"], tool_call_id=value.get("tool_call_id"))
     return InteractionUpdate(
         session_id,
         interaction_id,
-        parser(value["request"], interaction_id=interaction_id, session_id=session_id),
+        request,
     )
 
 

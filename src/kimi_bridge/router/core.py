@@ -11,6 +11,7 @@ from typing import Any
 
 from ..kimi_server import (
     KimiServerClient,
+    FileContext,
     KimiServerError,
     KimiServerOperationError,
     PromptContent,
@@ -31,6 +32,7 @@ from .interactions import _InteractionMixin
 from .models import _ActiveStream, _CompactionWaiter, _PendingInteraction
 from .rendering import _RenderingMixin
 from .sessions import _SessionMixin
+from .workspace import _FileChoice
 
 
 # ASR output inevitably contains recognition errors; the prefix marks the
@@ -100,22 +102,32 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self._interaction_sleep = interaction_sleep
         self._poll_sleep = poll_sleep
         self._clock = clock
-        # Bindings, cached listings, and the single active stream span chats.
+        # Bindings and displayed selections span chats for one operator.
         self._inbound_lock = asyncio.Lock()
         self._command_tasks: set[asyncio.Task[None]] = set()
         self._session_choices: dict[str, list[dict[str, Any]]] = {}
         self._task_choices: dict[
             tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
         ] = {}
+        self._file_choices: dict[tuple[str, ConversationRef], tuple[str, FileContext, tuple[_FileChoice, ...]]] = {}
+        self._agent_choices: dict[tuple[str, ConversationRef], tuple[str, tuple[str, ...]]] = {}
+        self._queue_choices: dict[
+            tuple[str, ConversationRef], tuple[str, tuple[str, ...]]
+        ] = {}
         self._verified_session_profiles: set[str] = set()
         self._active: _ActiveStream | None = None
+        self._observers: dict[str, _ActiveStream] = {}
+        self._side_questions: dict[str, tuple[str, asyncio.Task[None]]] = {}
         self._pending: dict[str, _PendingInteraction] = {}
         self._compaction_waiters: dict[str, _CompactionWaiter] = {}
         self._interaction_lock = asyncio.Lock()
 
     async def close(self) -> None:
         self._fail_all_compaction_waiters(KimiServerError("kimi event stream stopped"))
-        await self._stop_active_stream()
+        for active in tuple(self._observers.values()):
+            await self._stop_observer(active)
+        for key in tuple(self._side_questions):
+            await self._cancel_side_question(key)
         tasks = tuple(self._command_tasks)
         for task in tasks:
             task.cancel()
@@ -191,13 +203,14 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                             msg.conversation,
                             msg.actor,
                         )
-                    await self._ensure_active_stream(
-                        conversation_key,
-                        binding.session_id,
-                        adapter,
-                        msg.conversation,
-                        msg.actor,
-                    )
+                    else:
+                        await self._ensure_active_stream(
+                            conversation_key,
+                            binding.session_id,
+                            adapter,
+                            msg.conversation,
+                            msg.actor,
+                        )
                     content = await self._build_prompt_content(binding, msg, adapter)
                     result = await self._client.submit_prompt(
                         binding.session_id,
@@ -320,12 +333,12 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         InboundFile(video.data, video.name, video.media_type)
                     )
         if inbox_files:
-            saved_paths = _save_inbound_files(
-                Path(binding.workspace),
-                self._inbox_subdir,
-                tuple(inbox_files),
-            )
-            text_parts.extend(f"Attached file saved at: {path}" for path in saved_paths)
+            context = await self._client.get_file_context(binding.session_id)
+            if context.environment_id == "local":
+                saved_paths = _save_inbound_files(Path(context.cwd), self._inbox_subdir, tuple(inbox_files))
+                text_parts.extend(f"Attached file saved at: {path}" for path in saved_paths)
+            else:
+                prompt_media.extend(PromptMedia("file", item.data, item.name, item.media_type) for item in inbox_files)
         return PromptContent(
             text="\n\n".join(text_parts) if text_parts else None,
             media=tuple(prompt_media),

@@ -13,7 +13,7 @@ kimi-bridge reads `~/.kimi-bridge/config.toml` by default. `--config PATH` selec
 | `edit_throttle_seconds` | number | `1.5` | Positive and finite. |
 | `max_output_seconds` | number | `300` | Positive and finite; must leave room for Feishu's edit schedule. |
 | `interaction_timeout_seconds` | number | `600` | Positive; applies to approval/question requests. |
-| `inbox_subdir` | relative path | `.kimi-bridge-inbox` | Must remain inside the session workspace. |
+| `inbox_subdir` | relative path | `.kimi-bridge-inbox` | Local-session attachment directory; must remain inside the session workspace. |
 | `session_list_limit` | integer | `5` | Positive. |
 | `kimi_server.port` | integer or omitted | omitted | If present, must be 1–65535; omitted selects an available port. |
 | `kimi_server.http_timeout_seconds` | number | `30` | Positive and finite; applies to Kimi Code REST requests. Increase it when the local server regularly needs more than 30 seconds to respond. |
@@ -194,7 +194,7 @@ request_format = "multipart"
 - `~/.kimi-bridge/config.toml` contains platform configuration, the Telegram bot token, and optional complete Feishu/QQ TOML fallback credentials. Use mode `600` on Linux/macOS, or a current-user ACL on Windows.
 - `~/.kimi-bridge/state.json` stores bridge-owned conversation bindings and preferences, not adapter credentials. Use `state_path` to relocate it.
 - `feishu.storage_path`, `qq.storage_path`, and `wechat.storage_path` relocate private adapter-owned storage. The application creates POSIX directories/files with `700`/`600` permissions; Windows uses the host ACL model.
-- `<session workspace>/<inbox_subdir>/` receives generic inbound files and native media that the selected model cannot consume directly.
+- `<local session working directory>/<inbox_subdir>/` receives generic inbound files and native media that the selected model cannot consume directly.
 
 Never commit adapter credentials or paste them into chat or issue reports. Adapter credentials are stored in the protected config or adapter-owned local storage; the voice ASR API key may instead use the supported `[voice.asr].api_key_env` setting. `kimi-bridge doctor` reports credential presence and safe metadata, not secret values.
 

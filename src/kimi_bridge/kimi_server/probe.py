@@ -168,6 +168,22 @@ async def probe_kimi_compatibility(
                 "KimiServerClient.get_snapshot",
             )
         )
+        fork_id = await client.fork_session(session_id)
+        if fork_id == session_id:
+            raise RuntimeError("session fork did not create a distinct session")
+        await client.archive_session(fork_id)
+        if not await client.is_session_archived(fork_id):
+            raise RuntimeError("session fork was not archived")
+        restored_id = await client.restore_session(fork_id)
+        if restored_id != fork_id or await client.is_session_archived(fork_id):
+            raise RuntimeError("archived fork did not restore its native identity")
+        runtime_checks.append(
+            _pass(
+                "runtime.behavior.session.fork_restore", "runtime",
+                "an empty fork can be archived and explicitly restored without inference",
+                "KimiServerClient.fork_session/restore_session",
+            )
+        )
         for command in (client.get_task, client.cancel_task):
             try:
                 await command(session_id, "missing-canary-task")

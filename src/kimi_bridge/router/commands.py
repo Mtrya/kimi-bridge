@@ -7,7 +7,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from functools import partial
-from pathlib import Path
 from typing import cast
 
 from ..kimi_server import (
@@ -19,7 +18,6 @@ from ..kimi_server import (
 )
 from ..platforms.base import ActorRef, ConversationRef, MessageRef, PlatformAdapter
 from ..state import PERMISSION_MODES
-from .files import _load_outbound_file
 from .help import command_help_details, render_help_index
 from .formatting import (
     HISTORY_DEFAULT_COUNT,
@@ -44,6 +42,10 @@ from .formatting import (
     _sort_tasks,
 )
 from .models import _CompactionWaiter
+from .integrations import _IntegrationMixin
+from .workspace import _WorkspaceMixin, _parse_new_options
+from .activity import _ActivityMixin
+from .session_controls import _SessionControlsMixin
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,10 +61,10 @@ PERMISSION_MODE_DESCRIPTIONS = {
     "yolo": "Regular tools are auto-approved; questions and plan review remain interactive.",
 }
 _BOUND_INSPECTION_COMMANDS = frozenset(
-    {"/status", "/tasks", "/history", "/title", "/usage"}
+    {"/status", "/tasks", "/history", "/title", "/usage", "/queue", "/swarm", "/agents", "/todos"}
 )
 
-class _CommandMixin:
+class _CommandMixin(_SessionControlsMixin, _ActivityMixin, _WorkspaceMixin, _IntegrationMixin):
     async def _handle_command(
         self,
         conversation_key: str,
@@ -88,7 +90,8 @@ class _CommandMixin:
             )
         if command == "/new":
             try:
-                workspace = await self._resolve_new_workspace(argument)
+                workspace_argument, environment_id, environment_cwd = _parse_new_options(argument)
+                workspace = await self._resolve_new_workspace(workspace_argument)
             except ValueError as exc:
                 await self._send_chunked(adapter, conversation, str(exc))
                 return
@@ -99,19 +102,14 @@ class _CommandMixin:
                 adapter,
                 conversation,
                 actor,
+                environment_id=environment_id,
+                environment_cwd=environment_cwd,
             )
-            await self._ensure_active_stream(
-                conversation_key,
-                binding.session_id,
-                adapter,
-                conversation,
-                actor,
-                permission_mode=binding.permission_mode,
-            )
+            target = await self._client.get_file_context(binding.session_id) if environment_id else None
             await self._send_chunked(
                 adapter,
                 conversation,
-                f"Created session {binding.session_id}\nWorkspace: {binding.workspace}",
+                f"Created session {binding.session_id}\nWorkspace: {binding.workspace}" + (f"\nEnvironment: {target.environment_id}\nTarget working directory: {target.cwd}" if target is not None else ""),
             )
             return
         if command == "/archive":
@@ -141,8 +139,13 @@ class _CommandMixin:
                     )
                     return
                 sessions = await self._search_sessions(keyword)
-            else:
+            elif argument == "archived":
+                sessions = await self._list_recent_sessions(archived_only=True)
+            elif not argument:
                 sessions = await self._list_recent_sessions()
+            else:
+                await self._send_chunked(adapter, conversation, "Usage: /sessions [archived] | /sessions search <keyword>")
+                return
             self._session_choices[conversation_key] = sessions
             await self._send_chunked(adapter, conversation, _format_sessions(sessions))
             return
@@ -172,38 +175,40 @@ class _CommandMixin:
                     adapter, conversation, f"Session not found: {argument}"
                 )
                 return
-            current = self._state.bindings.get(conversation_key)
-            binding = self._binding_from_session(
-                session,
-                adapter=adapter,
-                render_thinking=(
-                    current.render_thinking if current is not None else False
-                ),
-                conversation=conversation,
-                actor=actor,
-            )
+            if session.get("archived"):
+                await self._send_chunked(adapter, conversation, "Use /restore to restore an archived session.")
+                return
             try:
-                await self._ensure_active_stream(
-                    conversation_key,
-                    binding.session_id,
-                    adapter,
-                    conversation,
-                    actor,
-                    permission_mode=binding.permission_mode,
+                binding = await self._bind_selected_session(
+                    conversation_key, session, adapter, conversation, actor
                 )
             except KimiServerOperationError as exc:
                 await self._send_chunked(
                     adapter,
                     conversation,
-                    f"Could not switch to {binding.session_id}: {exc}",
+                    f"Could not switch to {session['id']}: {exc}",
                 )
                 return
-            self._set_binding(conversation_key, binding)
             recap = await self._history_recap(binding.session_id)
             confirmation = f"Switched to {binding.session_id}"
             if recap is not None:
                 confirmation += f"\n\n{recap}"
             await self._send_chunked(adapter, conversation, confirmation)
+            return
+        if command == "/fork":
+            await self._handle_fork(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/restore":
+            await self._handle_restore(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/btw":
+            await self._handle_btw(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/queue":
+            await self._handle_queue(conversation_key, adapter, conversation, actor, argument)
+            return
+        if command == "/swarm":
+            await self._handle_swarm(conversation_key, adapter, conversation, argument)
             return
         if command == "/model":
             await self._handle_model(conversation_key, adapter, conversation, argument)
@@ -232,6 +237,12 @@ class _CommandMixin:
                 return
             await self._handle_usage(conversation_key, adapter, conversation)
             return
+        if command == "/agents":
+            await self._handle_agents(conversation_key, adapter, conversation, argument)
+            return
+        if command == "/todos":
+            await self._handle_todos(conversation_key, adapter, conversation, argument)
+            return
         if command == "/tasks":
             await self._handle_tasks(conversation_key, adapter, conversation, argument)
             return
@@ -244,11 +255,14 @@ class _CommandMixin:
                 argument,
             )
             return
+        if command == "/plugins":
+            await self._handle_plugins(conversation_key, adapter, conversation, argument)
+            return
         if command == "/mcp":
             if argument:
-                await self._send_chunked(adapter, conversation, "Usage: /mcp")
-                return
-            await self._handle_mcp(conversation_key, adapter, conversation)
+                await self._handle_mcp_inspection(conversation_key, adapter, conversation, argument)
+            else:
+                await self._handle_mcp(conversation_key, adapter, conversation)
             return
         if command == "/compact":
             return await self._handle_compact(
@@ -275,8 +289,21 @@ class _CommandMixin:
                 argument,
             )
             return
-        if command == "/send":
-            await self._handle_send(conversation_key, adapter, conversation, argument)
+        if command == "/environments":
+            if argument:
+                await self._send_chunked(adapter, conversation, "Usage: /environments")
+                return
+            binding = await self._require_binding(conversation_key, adapter, conversation)
+            if binding is not None:
+                environments = await self._client.list_environments(binding.session_id)
+                blocks = [f"**{item.id}** · {item.kind}\n{item.status}" for item in environments]
+                await self._send_chunked(adapter, conversation, "**Execution targets**\n\n" + "\n\n".join(blocks))
+            return
+        if command == "/workspace":
+            await self._handle_workspace(conversation_key, adapter, conversation, argument)
+            return
+        if command == "/files":
+            await self._handle_files(conversation_key, adapter, conversation, argument)
             return
         if command == "/render-thinking":
             await self._handle_render_thinking(
@@ -392,11 +419,7 @@ class _CommandMixin:
             )
             return
 
-        status = await self._require_idle(
-            binding, adapter, conversation, "Model changes"
-        )
-        if status is None:
-            return
+        status = await self._client.get_session_status(binding.session_id)
         models = await self._client.list_models()
         selected = next((model for model in models if model.alias == argument), None)
         if selected is None:
@@ -428,6 +451,8 @@ class _CommandMixin:
         lines = [f"Model: {selected.alias}"]
         if next_effort != current_effort:
             lines.append(f"Thinking effort adjusted: {current_effort} -> {next_effort}")
+        if status.busy:
+            lines.append("Later requests use this selection; an already sent request keeps its settings.")
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_effort(
@@ -455,11 +480,7 @@ class _CommandMixin:
             )
             return
 
-        status = await self._require_idle(
-            binding, adapter, conversation, "Thinking-effort changes"
-        )
-        if status is None:
-            return
+        status = await self._client.get_session_status(binding.session_id)
         profile, models = await asyncio.gather(
             self._client.get_session_profile(binding.session_id),
             self._client.list_models(),
@@ -481,7 +502,10 @@ class _CommandMixin:
             )
             return
         await self._client.update_profile(binding.session_id, thinking=argument)
-        await self._send_chunked(adapter, conversation, f"Thinking effort: {argument}")
+        text = f"Thinking effort: {argument}"
+        if status.busy:
+            text += "\nLater requests use this selection; an already sent request keeps its settings."
+        await self._send_chunked(adapter, conversation, text)
 
     async def _handle_secondary_model(
         self,
@@ -579,10 +603,11 @@ class _CommandMixin:
         binding = await self._require_binding(conversation_key, adapter, conversation)
         if binding is None:
             return
-        profile, status, server_version = await asyncio.gather(
+        profile, status, server_version, context = await asyncio.gather(
             self._client.get_session_profile(binding.session_id),
             self._client.get_session_status(binding.session_id),
             self._client.get_server_version(),
+            self._client.get_file_context(binding.session_id),
         )
         await self._send_chunked(
             adapter,
@@ -593,6 +618,7 @@ class _CommandMixin:
                 binding.permission_mode,
                 server_version,
                 self._model,
+                context,
             ),
         )
 
@@ -623,30 +649,8 @@ class _CommandMixin:
         if binding is None:
             return
         usage = await self._client.get_session_usage(binding.session_id)
-        await self._send_chunked(adapter, conversation, _format_usage(usage))
-
-    async def _handle_send(
-        self,
-        conversation_key: str,
-        adapter: PlatformAdapter,
-        conversation: ConversationRef,
-        argument: str,
-    ) -> None:
-        if not argument:
-            await self._send_chunked(adapter, conversation, "Usage: /send <path>")
-            return
-        binding = await self._require_binding(conversation_key, adapter, conversation)
-        if binding is None:
-            return
-        try:
-            outbound = _load_outbound_file(Path(binding.workspace), argument)
-        except (OSError, ValueError) as exc:
-            await self._send_chunked(adapter, conversation, str(exc))
-            return
-        try:
-            await adapter.send_file(conversation, outbound)
-        except Exception as exc:
-            await self._send_chunked(adapter, conversation, f"File send failed: {exc}")
+        account = await self._account_quota_text()
+        await self._send_chunked(adapter, conversation, _format_usage(usage) + "\n\n" + account)
 
     async def _handle_render_thinking(
         self,
@@ -737,7 +741,7 @@ class _CommandMixin:
             return
         parts = argument.split()
         explicit_id = len(parts) == 3 and parts[1] == "id"
-        if (len(parts) == 2 or explicit_id) and parts[0] in {"show", "cancel"}:
+        if (len(parts) == 2 or explicit_id) and parts[0] in {"show", "cancel", "background"}:
             task_id = parts[-1]
             if not explicit_id and task_id.isdecimal():
                 choices = self._task_choices.get((conversation_key, conversation))
@@ -761,6 +765,9 @@ class _CommandMixin:
                     output_bytes=TASK_OUTPUT_BYTES,
                 )
                 await self._send_chunked(adapter, conversation, _format_task_detail(task))
+            elif parts[0] == "background":
+                outcome = await self._client.background_task(binding.session_id, task_id)
+                await self._send_chunked(adapter, conversation, f"Task {task_id}: {outcome.replace('_', ' ')}")
             else:
                 await self._client.cancel_task(binding.session_id, task_id)
                 await self._send_chunked(
@@ -770,7 +777,7 @@ class _CommandMixin:
         await self._send_chunked(
             adapter,
             conversation,
-            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id>\n"
+            "Usage: /tasks [all|completed|failed|cancelled] | /tasks show <n|id> | /tasks cancel <n|id> | /tasks background <n|id>\n"
             "Use /tasks show id <id> or /tasks cancel id <id> for an exact ID, including numeric IDs.",
         )
 
@@ -1028,6 +1035,17 @@ class _CommandMixin:
             return
 
         first, separator, remainder = argument.partition(" ")
+        if first == "edit":
+            if not remainder.strip():
+                await self._send_chunked(adapter, conversation, "Usage: /goal edit <objective>")
+                return
+            status = await self._client.get_session_status(binding.session_id)
+            goal = await self._client.edit_goal(binding.session_id, remainder.strip())
+            text = _format_goal(goal)
+            if status.busy:
+                text += "\nThe running turn continues; the objective applies from the next turn."
+            await self._send_chunked(adapter, conversation, text)
+            return
         if first in {"status", "pause", "resume", "cancel"} and separator:
             await self._send_chunked(
                 adapter,
@@ -1092,7 +1110,7 @@ class _CommandMixin:
             await self._send_chunked(
                 adapter,
                 conversation,
-                "A goal already exists. Pause, resume, or cancel it explicitly.",
+                "A goal already exists. Use /goal edit to revise its objective, or pause, resume, or cancel it.",
             )
             return
         status = await self._require_idle(

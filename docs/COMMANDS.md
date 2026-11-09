@@ -1,22 +1,26 @@
 # Commands and interactions
 
-Commands are case-insensitive before the first space; arguments retain their case. Any message not beginning with a recognized slash command is submitted to the bound Kimi session. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt. Path arguments (`/new`, `/send`) treat a standalone fullwidth `～` (U+FF5E, common from mobile IMEs), or one followed by the platform path separator, as `~` when the literal path does not exist; forms such as `～notes` remain literal.
+Commands are case-insensitive before the first space; arguments retain their case. Ordinary messages are submitted to the bound Kimi session; unknown slash commands return a command error. If no session is bound, the bridge creates one in `default_workspace` and uses the message as its first prompt. Local path arguments (`/new`, `/files`) treat a standalone fullwidth `～` (U+FF5E, common from mobile IMEs), or one followed by the platform path separator, as `~` when the literal path does not exist; forms such as `～notes` remain literal.
 
 ## Exact command grammar
 
-`/help` shows the compact index below. Every command also answers `/<command> ?` with detailed usage, including arguments, defaults, side effects, and examples.
+`/help` groups commands by task and keeps options out of the overview. Add `?` for focused instructions and examples: `/workspace ?`, `/workspace primary ?`, `/files send ?`, or `/goal edit ?`. The full grammar is listed below.
 
 | Command | Behavior |
 | --- | --- |
 | `/help` | Show the in-chat command index. |
-| `/new [cwd]` | Create and bind a session. Without `cwd`, use the configured default workspace. |
+| `/new [workspace] [--env <id> [--cwd <environment-path>]]` | Create and bind a session with swarm mode off. The workspace belongs to the bridge host; target cwd belongs to the selected environment. |
+| `/environments` | List native configured local, SSH, Docker, and command targets and their connection state. |
 | `/archive` | Archive the bound session through Kimi, preserve its history, and clear every bridge chat binding to it. |
 | `/sessions` | List recent Kimi sessions and remember their displayed indices for `/switch`. |
 | `/sessions search <keyword>` | Search active sessions by title and workspace path. |
+| `/sessions archived` | List archived sessions and remember their displayed indices for `/restore`. |
 | `/switch <n\|id\|title>` | Bind a displayed index, explicit session ID, or exact title; the confirmation recaps the newest 2 messages. |
+| `/fork` | Fork and bind the current session, preserving its workspace and native settings. Source work continues; its in-progress answer and queued work are excluded. |
+| `/restore <n\|id>` | Restore and bind an archived session by its displayed number or explicit ID. |
 | `/status` | Show session, workspace, busy state, pending interaction, model, effort, plan mode, permission mode, and Kimi Code version. |
 | `/title [text]` | Show the current title or rename the session. |
-| `/usage` | Show live token and context-window values when exposed by Kimi. |
+| `/usage` | Show cumulative session tokens/live context alongside available managed-account quota windows and reset times. |
 | `/compact [instruction]` | Start context compaction; optional instructions tell Kimi what to preserve in the summary. |
 | `/history [count] [full]` | Show the newest visible session messages (default `10`, max `50`); thinking and tool traffic are omitted, attachments become placeholders, and `full` removes the default 500-character per-message limit. `full` may precede or follow the count. |
 | `/undo [count]` | Undo a positive number of history steps; default `1`; the confirmation recaps the newest 2 messages. |
@@ -26,8 +30,14 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/secondary-model set <alias> <description>` | Add a subagent pool entry or replace its description; the description is the remaining text, with no quoting required. |
 | `/effort [effort]` | Show or set an effort advertised for the active model. |
 | `/plan [on\|off]` | Show or explicitly set plan mode. |
+| `/swarm [on\|off]` | Show or set native swarm mode without submitting a prompt. |
+| `/queue` | Show the active prompt and numbered waiting prompts. |
+| `/queue <message>` | Submit a prompt as queued work without steering the active turn. |
+| `/queue cancel <n\|id>` | Cancel the selected prompt; if it has started, Kimi cancels that active prompt. |
+| `/queue steer <n\|id>` | Steer a selected waiting prompt into the active turn at Kimi’s next step boundary. |
 | `/goal` or `/goal status` | Show the public goal state and budgets. |
 | `/goal <objective>` | Create a goal and submit its objective as a normal turn. |
+| `/goal edit <objective>` | Edit the current active, paused, or blocked goal in place, preserving its identity, progress, and budget. Running work continues. |
 | `/goal pause` | Pause the current goal and cancel its active prompt/interaction. |
 | `/goal resume` | Reactivate a paused or blocked goal. |
 | `/goal cancel` | Cancel the current goal and its active prompt/interaction. |
@@ -36,15 +46,55 @@ Commands are case-insensitive before the first space; arguments retain their cas
 | `/tasks [all\|completed\|failed\|cancelled]` | List numbered running tasks. `all` also lists only running tasks; terminal-status filters return no tasks because Kimi omits ended tasks from discovery. |
 | `/tasks show <n\|id>` | Inspect a task by displayed number or explicit ID, including a known ended task, with at most the last 8 KiB of output. |
 | `/tasks cancel <n\|id>` | Cancel a task by displayed number or explicit ID. |
+| `/tasks background <n\|id>` | Release a supported foreground task wait, allowing its work to continue. |
+| `/btw <question>` | Ask a native read-only side question, with a separate labelled answer while main work continues. |
+| `/agents` | Show the main agent and discoverable subagent hierarchy, assignment, model, and state. |
+| `/agents show <n\|id>` | Inspect a live agent without changing where ordinary messages are sent. |
+| `/agents background <n\|id>` | Background the selected agent’s owning task when supported. |
+| `/todos [all]` | Show main-agent todos, or group available checklists by agent; counts show completed/total with ✓ done, → in progress, and ○ pending. |
 | `/skills` | List skills available to the bound session. |
 | `/skills run <name> [args]` | Activate an exact skill name as a normal streamed turn. |
-| `/mcp` | List MCP tools resolved for the session. This is read-only. |
-| `/send <path>` | Send one regular file contained by the bound workspace. |
+| `/plugins [show <name>]` | Inspect installed plugin state, declared contributions, diagnostic counts, and available bound-session tools. |
+| `/mcp` | List MCP tools currently available in the bound session. |
+| `/mcp servers` | Inspect native runtime connection states and bound-session configuration authentication states. |
+| `/mcp show <server>` | Inspect one server by native name or listed tool namespace and show its available bound-session tools. |
+| `/mcp restart <server>` | Request a native connection restart; acknowledgement does not establish connection health. |
+| `/workspace [add\|remove\|primary <path>]` | Inspect or change shared native workspace folders; existing sessions retain their working directories. |
+| `/files [directory]` | List files and folders in the session working directory or a specified approved directory. |
+| `/files search <query>` | Search filenames in the native workspace roots. |
+| `/files show <n\|path>` | Preview up to 8 KiB of a supported text/source format. |
+| `/files send <n\|path>` | Send a workspace file of any format as a platform attachment or native media. |
+| `/files changes` | List the latest finished main turn’s recorded file changes, with addition/deletion counts and binary/oversize indicators. |
+| `/files diff <n\|path>` | Preview a recorded start/end diff, including deleted files. |
 | `/render-thinking [on\|off]` | Show or set separate thinking output where supported. |
 
 Task numbers refer to your latest list in the same chat and bound session, including any status filter. For example, `/tasks all` followed by `/tasks show 2` inspects the second displayed task. Status changes do not renumber that list; another task listing replaces it. Changing the bound session clears your task numbers across chats, including when you later switch back. Explicit IDs remain valid without a prior listing. Bare numbers always select list positions; use `/tasks show id <id>` or `/tasks cancel id <id>` for an exact ID, including numeric IDs such as `/tasks show id 123`.
 
-Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh. Plan usage and quota reset information are not exposed by the public local server.
+Agent numbers follow the same chat/session selection scope as task numbers; use `/agents show id 123` or `/agents background id 123` for a numeric native ID. Discovery shows current native activity rather than a complete task history. Backgrounding reports newly backgrounded, already backgrounded, ended, or unsupported work. Native swarm members cannot be detached individually. Output remains available on demand through `/tasks show`.
+
+Queue numbers refer to the latest `/queue` display in the same chat and session and are cleared on a session change. The active prompt is not numbered. Use `/queue cancel id 123` or `/queue steer id 123` for a numeric native ID, and `/queue -- <message>` to queue text beginning with `cancel` or `steer`. Kimi resolves stale prompt IDs and execution races. Use `/goal -- <objective>` when a new objective begins with a reserved goal action such as `edit`, and `/restore id 123` for a numeric archived session ID. `/switch` requires archived sessions to be restored first. A failed switch keeps the source binding, displayed selections, and event delivery.
+
+Model and effort changes are accepted while busy and affect later native requests; an already sent request keeps its settings.
+
+`/workspace` puts the current folder first, with primary/additional roles beside folder names and full paths underneath. A local folder with several roles appears once. Add/remove/primary commands return a short confirmation; use bare `/workspace` for the full view. Folder changes affect sessions sharing that native workspace. Promoting a folder keeps the old primary as an additional folder; existing live sessions keep their original working directories and access to them even after removal from shared membership. After a native resume, Kimi Code 2.5.2 can base file operations on the promoted primary while still reporting the saved original cwd. Add the original folder back with `/workspace add <path>` if you need that file access. Native root and symlink checks determine which files are accessible.
+
+To work in a different project, start a session with `/new /path/to/project`, or find one with `/sessions search <keyword>` and resume it with `/switch <number>`.
+
+`/files` lists up to 100 entries; `/files search` returns up to 50 matches under native ignore rules. Directory names end in `/`; symlinks are labelled `[symlink]`. Use `/files <directory>` to list a folder; `show` and `send` require a file. A successful list or search installs one current numbered selection for that chat and session. A changes view uses the same list; its entries retain their recorded turn. Ordinary turns and `show`/`send`/`diff` reuse those numbers without consuming them. Another view replaces the list; failed lookups retain the previous choices. Binding or folder changes invalidate it, and remembered numbers are cleared on bridge restart. Use explicit paths with spaces directly, `./123` for a numeric filename, and `/files ./search` for a directory named `search`. Every open/send revalidates native access. Use direct paths without `..` segments; links must resolve within the session's permitted folders.
+
+`/files send` accepts every file extension, including unknown and extensionless filenames. Adapters use supported native image/video messages and generic attachments for other formats. `/files show` previews text only for these extensions, ignoring case: `.txt`, `.md`, `.rst`, `.log`, `.csv`, `.tsv`, `.json`, `.jsonl`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.conf`, `.xml`, `.html`, `.htm`, `.css`, `.scss`, `.py`, `.pyi`, `.js`, `.jsx`, `.ts`, `.tsx`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.sql`, `.c`, `.h`, `.cc`, `.cpp`, `.hpp`, `.go`, `.rs`, `.java`, `.rb`, `.php`, `.lua`, and `.r`; recognized filenames are `README`, `LICENSE`, `COPYING`, `NOTICE`, `Dockerfile`, `Makefile`, `justfile`, `.gitignore`, `.gitattributes`, `.dockerignore`, `.editorconfig`, and `.env`. Other formats and binary content remain sendable, with a download hint instead of a text preview. Text previews are limited to 8 KiB and labelled when truncated.
+
+Recorded changes use the latest finished main turn while a new turn is running. A diff selected from a changes view keeps that turn; an explicit path uses the latest finished turn. Kimi Code 2.5.2 records Edit/Write targets, so a deletion performed only through Bash may have no recorded change. Diff comparisons are limited to 128 Ki characters and 2,000 lines per side, with an 8,192-character output preview. A file absent from the recorded list is distinguished from unavailable before/after content; binary and oversize results are also labelled.
+
+Model aliases and thinking efforts come from the live Kimi catalog. `/secondary-model` updates Kimi Code's global `[secondary_model]` configuration; it affects later subagent spawns in every session without changing existing subagents or primary session models. Pool descriptions guide Kimi's choice of model for a subtask. Adding the first entry sets the default; later additions and description edits keep it. Selecting a default adds that alias to an explicit pool if needed. Pool edits preserve Kimi's `force` setting; when enabled, subagent selection remains forced to the default. To remove entries, reset the pool, or disable `force`, edit Kimi Code's configuration and run `/reload` in the session to refresh.
+
+Use `/new /host/workspace --env target --cwd "/target/project with spaces"` to select an existing Kimi environment. Without flags, `/new` retains its usual workspace behavior and native default target. Target definitions and credentials stay in Kimi. `/status` shows the selected environment and target working directory; resuming a session restores its native target. File browsing, search, preview, delivery, and recorded history address that session’s target. A target failure is reported without a host-filesystem fallback.
+
+`/plugins` shows installed native state; `show` separates declared skills/MCP contributions from tools currently available to the bound session. Diagnostic severity counts are displayed; inspect detailed diagnostics and manage configuration or authentication in Kimi.
+
+MCP runtime inspection and restart follow the native v1 scope: the most recently created session, only if it is live. The bound session may differ. Tool availability and configuration authentication are labelled for the bound session. `/mcp restart` uses the native connection ID/name and confirms the selected native restart request; inspect again with `/mcp show` for connection state. These commands do not install or reconfigure integrations.
+
+`/usage` keeps session counters separate from managed-account limits. Kimi Code 2.5.2 reports placeholder zeros for cumulative session counters; live context and account quota are read separately. Available context and quota ratios show compact bars alongside percentages used. Quota reset times appear in UTC; a timestamp without a supplied time zone is labelled accordingly. An unavailable account/provider or failed quota lookup leaves session statistics visible. Account usage is read on demand through Kimi’s managed account endpoint.
 
 `/reload` refreshes Kimi Code's configuration, plugins, skills, and agent definitions and rebuilds the bound session with its existing history. It preserves the session ID, selected model, and bridge permission mode. Kimi rejects reload during running agent turns or compaction. Global Kimi settings are refreshed, and new sessions use the latest default model; the bridge's own configuration is loaded at bridge startup.
 
@@ -90,15 +140,15 @@ After Feishu login, approve the pre-filled tenant permissions, `im.message.recei
 
 | While a turn is busy | Commands |
 | --- | --- |
-| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, bare `/skills`, `/mcp`, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, `/goal`/`/goal status`, bare `/render-thinking` |
-| Mutations execute immediately | `/new`, `/switch`, `/mode`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, `/goal pause`, `/goal cancel`, `/send`, `/render-thinking on\|off`, `/stop`, `/archive` |
-| Mutations reject instead of queueing | `/model <alias>`, `/effort <effort>`, `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
+| Reads remain available | `/help` and `/<command> ?`, `/sessions`, `/status`, bare `/title`, `/usage`, task list/filter/show, `/agents`/`/agents show`, `/todos [all]`, bare `/skills`, `/plugins`, `/mcp` tool/server/show inspection, bare `/model`, bare `/secondary-model`, bare `/effort`, bare `/plan`, bare `/swarm`, `/queue`, `/workspace`, `/files` list/search/show/changes/diff, `/environments`, `/goal`/`/goal status`, bare `/render-thinking` |
+| Mutations execute immediately | `/new`, `/switch`, `/fork`, `/restore`, `/mode`, `/model <alias>`, `/effort <effort>`, `/swarm on\|off`, `/title <text>`, `/secondary-model <alias>`, `/secondary-model set ...`, `/tasks cancel <n\|id>`, `/tasks background`, `/agents background`, `/btw`, queue submission/cancel/steer, `/goal edit`, `/goal pause`, `/goal cancel`, `/files send`, `/mcp restart`, `/workspace add`, `/workspace remove`, `/workspace primary`, `/render-thinking on\|off`, `/stop`, `/archive` |
+| Mutations reject instead of queueing | `/plan on\|off`, `/skills run ...`, `/compact`, `/undo`, goal creation, `/goal resume`, `/reload` |
 
 A normal non-command message sent during a running turn is submitted and steered into that turn at Kimi's next step boundary. Steering is not an immediate interrupt; an in-flight tool call can finish.
 
 If the turn finishes before steering, the submitted prompt remains under Kimi's normal execution lifecycle. A prompt blocked before execution is reported in chat. If submission or steering cannot be confirmed, check `/status` or `/history` before resending; the bridge does not automatically resubmit. Goal creation submits its initial prompt as separate work and reports when the goal was created but its initial prompt failed or was blocked.
 
-Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` close the relevant interaction as cancelled.
+Changing `/mode` affects later permission checks but does not answer a currently displayed approval or question. `/stop`, `/goal pause`, and `/goal cancel` address the bound session and close its relevant interaction as cancelled. If another session needs input after switching away, one labelled notice asks you to switch back. Its old controls cannot answer from the new session; returning presents the current native request.
 
 ## Permission modes and interactions
 
@@ -106,23 +156,27 @@ Changing `/mode` affects later permission checks but does not answer a currently
 - `auto` approves ordinary tools and skips questions. Plan review still requires a response on Feishu and Telegram.
 - `yolo` auto-approves regular tools but may still ask questions.
 
-Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. An `ExitPlanMode` approval additionally shows a bounded (4,000-character) preview of the plan file — read only from `~/.kimi-code/sessions/**/plans/` — and sends the full plan as a file when the preview truncates. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode, and the bridge automatically approves `ExitPlanMode` requests so `/plan on` can finish without interaction. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
+Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. An `ExitPlanMode` approval additionally shows a bounded (4,000-character) plan preview from the native transcript, scoped to the requesting agent and tool call, and sends the full plan as a file when the preview truncates. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode, and the bridge automatically approves `ExitPlanMode` requests so `/plan on` can finish without interaction. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
 
 Plan mode is enabled explicitly with `/plan on` or Kimi configuration; the agent cannot enter it itself.
 
 ## Streaming and thinking
 
-Answers stream through editable messages where the platform supports edits and are split at the platform text limit. Bridge-generated command, status, validation, and runtime error replies are final messages. A post-submission turn failure is sent after any partial answer, and a retryable failure says that the request can be retried. Kimi session warnings are relayed as independent nonterminal messages without ending an active answer stream. If event delivery terminates after internal recovery is exhausted, the bridge sends a final error reply with retry guidance. Background-task lifecycle events remain available through `/tasks` and do not produce unsolicited chat notices.
+Answers stream through editable messages where the platform supports edits and are split at the platform text limit. Bridge-generated command, status, validation, and runtime error replies are final messages. A post-submission turn failure is sent after any partial answer, and a retryable failure says that the request can be retried. Kimi session warnings are relayed as independent nonterminal messages without ending an active answer stream. If event delivery terminates after internal recovery is exhausted, the bridge sends a final error reply with retry guidance. Task output and ordinary progress remain available on demand through `/tasks`.
 
 `/render-thinking on` creates a separately labelled thinking stream where supported and the preference persists per conversation. WeChat has no edit API and emits complete step-boundary output as immutable messages with a 4,000-character limit.
 
 QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal when necessary. If a stream frame fails after applicable URL correction or transport retries, the bridge buffers subsequent edits and sends the latest text as a regular message at the next idle or segment boundary. After two failed regular-message delivery attempts, it abandons that response and attempts one in-chat warning; failures are logged, and later segments can proceed.
 
+Explicit native goal-complete/blocked updates and background task/subagent outcomes produce short notices. Goal-clear updates stay silent: Kimi Code 2.5.2 exposes the same cleared state after completion and cancellation. Current-session notices show the outcome and detail; notices from other sessions add the session name above them and a `/switch <session-id>` command below. Leaving work running by switching, creating, or forking sessions retains observation and its original allowed delivery route across restarts. A notice leaves the current binding unchanged. Initial/reconnect snapshots establish baselines; absent tasks do not imply a completion. The bridge attempts each notice once, logs failed delivery, and drops it. Adapter transport retry behavior still applies.
+
+`/btw` uses Kimi’s native read-only side agent and returns one answer labelled “Side question”. Main work, thinking output, and queued prompts remain independent; ordinary messages continue targeting main. Another `/btw` replaces the previous side question. Switching sessions, archiving, and shutdown close it; a disconnected subscription resumes its journal without resubmitting the question.
+
 ## Inbound and outbound media
 
-Feishu accepts text, native images and videos, generic files, and voice messages. QQ accepts C2C text and HTTPS attachments; only supported native image/video values take the native-media route. WeChat accepts private-chat text, images, voice, files, and video. Native image/video input depends on the selected model's `image_in`/`video_in` capability; otherwise the bridge saves the item under the workspace inbox. Generic files always use the workspace inbox. Voice messages are transcribed using the configured `[voice.asr]` endpoint first and the platform-native fallback when available.
+Feishu accepts text, native images and videos, generic files, and voice messages. QQ accepts C2C text and HTTPS attachments; only supported native image/video values take the native-media route. WeChat accepts private-chat text, images, voice, files, and video. Native image/video input depends on the selected model's `image_in`/`video_in` capability. Local generic files and capability fallbacks use the configured workspace inbox; remote sessions stage those uploads through Kimi in the selected target. Voice messages are transcribed using the configured `[voice.asr]` endpoint first and the platform-native fallback when available.
 
-`/send <path>` can send one regular file contained by the bound workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and cannot send it proactively.
+`/files send <n|path>` sends one regular file authorized by the native session workspace. Native rendering is platform-specific: Feishu, QQ, and WeChat support native image/video forms where documented; WeChat sends audio as a generic downloadable file and cannot send it proactively.
 
 ## Current operating limits
 

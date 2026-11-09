@@ -499,6 +499,7 @@ async def _session_events(client: KimiServerClient, session_id: str):
 class FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
+        self.headers = {"content-type": "application/json"}
 
     def raise_for_status(self) -> None:
         pass
@@ -659,7 +660,7 @@ class FakeWebSocket:
                     self._incoming.put_nowait(json.dumps(event))
             if self._disconnect_after_events:
                 self._incoming.put_nowait(OSError("connection lost"))
-        elif frame["type"] in ("task.watch", "task.stop"):
+        elif frame["type"] in ("task.watch", "task.stop", "task.background"):
             for extra in getattr(self, "_task_output_frames_before_response", ()):
                 self._incoming.put_nowait(json.dumps(extra))
             if self._task_responses is not None:
@@ -921,6 +922,7 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"default_model": "kimi-code/k3"}),
             _envelope({"id": "session-1"}),
+            _envelope(_profile_payload()),
             _envelope(
                 {
                     "id": "session-1",
@@ -985,6 +987,7 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
         ("GET", "http://127.0.0.1:43123/api/v1/config"),
         ("GET", "http://127.0.0.1:43123/api/v1/config"),
         ("POST", "http://127.0.0.1:43123/api/v1/sessions"),
+        ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1"),
         ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts"),
@@ -997,9 +1000,9 @@ async def test_rest_methods_use_snapshotted_paths_and_shapes(tmp_path: Any) -> N
     assert http.requests[3][2]["json"] == {
         "metadata": {"cwd": str(tmp_path.resolve())},
         "title": "Test session",
-        "agent_config": {"permission_mode": "auto"},
     }
-    assert http.requests[5][2]["json"] == {
+    assert http.requests[4][2]["json"] == {"agent_config": {"permission_mode": "auto"}}
+    assert http.requests[6][2]["json"] == {
         "content": [{"type": "text", "text": "hello"}],
         "model": "kimi-code/k3",
         "permission_mode": "auto",
@@ -1063,7 +1066,7 @@ async def test_snapshot_reads_the_transcript_without_disturbing_the_subscription
     snapshot = await asyncio.wait_for(client.get_snapshot("session-1"), 1)
     assert snapshot["as_of_seq"] == 987
     assert snapshot["messages"]["items"] == []
-    assert client._active_ws is live
+    assert client._active_ws[("session-1", "main")] is live
     assert not live.closed
     assert http.requests[-1][2]["params"] == {"agent_id": "main", "page_size": 100}
     assert len([r for r in http.requests if r[1].endswith("/transcript")]) == 2
@@ -1630,7 +1633,7 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     list_subscribe = next(
         frame for frame in list_socket.sent if frame["type"] == "subscribe_v2"
     )
-    assert list_subscribe["payload"]["transcript"] == {"main": "turn"}
+    assert list_subscribe["payload"]["transcript"] == {"*": "turn"}
     watch_request = next(
         frame for frame in watch_socket.sent if frame["type"] == "task.watch"
     )
@@ -2543,7 +2546,7 @@ async def test_subscribe_v2_resumes_the_session_without_a_status_call() -> None:
     subscribe = next(
         frame for frame in socket.sent if frame["type"] == "subscribe_v2"
     )
-    assert subscribe["payload"]["transcript"] == {"main": "delta"}
+    assert subscribe["payload"]["transcript"] == {"main": "delta", "*": "turn"}
     assert "transcript_since" not in subscribe["payload"]
 
 
@@ -3082,7 +3085,7 @@ async def test_document_fetch_and_probe_subscription_stay_inside_client_boundary
         subscribe = next(
             frame for frame in socket.sent if frame["type"] == "subscribe_v2"
         )
-        assert subscribe["payload"]["transcript"] == {"main": "delta"}
+        assert subscribe["payload"]["transcript"] == {"main": "delta", "*": "turn"}
         assert subscribe["payload"]["session_id"] == "session-1"
     assert "transcript_since" not in sockets[0].sent[1]["payload"]
     assert sockets[1].sent[1]["payload"]["transcript_since"] == {"main": 1}

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 8
+KIMI_SEMANTIC_CONTRACT_VERSION = 15
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -42,7 +42,9 @@ class RestOperationContract:
     request_fields: tuple[SchemaFieldContract, ...] = ()
     query_examples: tuple[Mapping[str, Any], ...] = ()
     response_fields: tuple[SchemaFieldContract, ...] = ()
+    response_media_type: str = "application/json"
     schema_alias_note: str | None = None
+    api_version: Literal["v1", "v2"] = "v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +188,10 @@ _TASK_FRAME_FIELDS = (
         values=("completed", "failed", "timed_out", "killed", "lost"),
     ),
     _field("detached", "boolean"),
+    _field("child_agent_id", "string", required=False),
+    _field("swarm_index", "integer", required=False),
+    _field("phase", "string", required=False, values=("working", "suspended")),
+    _field("model", "string", required=False),
     _field("description", "string", required=False),
     _field("command", "string", required=False),
     _field("started_at", "string", required=False),
@@ -211,6 +217,33 @@ _TASK_RESPONSE_FIELDS = tuple(
         required_if_parent_present=item.required,
     )
     for item in _TASK_FRAME_FIELDS
+)
+
+
+_GOAL_FIELDS = (
+    _field("goalId", "string"),
+    _field("objective", "string"),
+    _field("completionCriterion", "string", required=False),
+    _field(
+        "status",
+        "string",
+        values=("active", "paused", "blocked", "complete"),
+    ),
+    _field("turnsUsed", "number", "integer"),
+    _field("tokensUsed", "number", "integer"),
+    _field("wallClockMs", "number", "integer"),
+    _field("budget", "object"),
+    _field("budget.tokenBudget", "number", "integer"),
+    _field("budget.turnBudget", "number", "integer"),
+    _field("budget.wallClockBudgetMs", "number", "integer"),
+    _field("budget.remainingTokens", "number", "integer"),
+    _field("budget.remainingTurns", "number", "integer"),
+    _field("budget.remainingWallClockMs", "number", "integer"),
+    _field("budget.tokenBudgetReached", "boolean"),
+    _field("budget.turnBudgetReached", "boolean"),
+    _field("budget.wallClockBudgetReached", "boolean"),
+    _field("budget.overBudget", "boolean"),
+    _field("terminalReason", "string", required=False),
 )
 
 
@@ -292,15 +325,10 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions",
             "/api/v1/sessions",
             request_examples=(
+                {"metadata": {"cwd": "/workspace"}, "environment_id": "remote-fixture", "environment_cwd": "/target/workspace"},
                 {
                     "metadata": {"cwd": "/tmp/workspace"},
                     "title": "Compatibility probe",
-                    "agent_config": {
-                        "model": "kimi-code/k3",
-                        "thinking": "high",
-                        "permission_mode": "manual",
-                        "plan_mode": False,
-                    },
                 },
             ),
             response_fields=(_field("id", "string"),),
@@ -320,6 +348,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     "page_size": 10,
                     "before_id": "session_before",
                     "after_id": "session_after",
+                    "workspace_id": "wd_workspace_0123456789ab",
                 },
             ),
             response_fields=(
@@ -355,6 +384,51 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/api/v1/sessions/{session_id}:reload",
             request_examples=({},),
         ),
+        RestOperationContract("session_environment", "WorkspaceOperations.get_file_context", "GET", "/sessions/{session_id}/environment", "/api/v1/sessions/{session_id}/environment", response_fields=(_field("workspace_id", "string"), _field("environment_id", "string"), _field("cwd", "string", required=False))),
+        RestOperationContract("list_workspaces", "WorkspaceOperations.get_file_context", "GET", "/workspaces", "/api/v1/workspaces", response_fields=(_field("items", "array"), _field("items.[].id", "string"), _field("items.[].root", "string"), _field("items.[].additional_dirs", "array"))),
+        RestOperationContract("update_workspace", "WorkspaceOperations.change_workspace", "PATCH", "/workspaces/{workspace_id}", "/api/v1/workspaces/{workspace_id}", request_examples=({"additional_dirs": ["/workspace/additional"]},), response_fields=(_field("id", "string"), _field("root", "string"), _field("additional_dirs", "array"))),
+        RestOperationContract("workspace_primary", "WorkspaceOperations.change_workspace", "POST", "/workspaces/{workspace_id}/primary", "/api/v1/workspaces/{workspace_id}/primary", request_examples=({"path": "/workspace/additional"},), response_fields=(_field("id", "string"), _field("root", "string"), _field("additional_dirs", "array"))),
+        RestOperationContract("list_files", "WorkspaceOperations.list_workspace_files", "POST", "/sessions/{session_id}/fs:list", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": ".", "depth": 1, "limit": 100, "allow_external_symlinks": False},), response_fields=(_field("items", "array"), _field("items.[].path", "string"), _field("items.[].name", "string"), _field("items.[].kind", "string"), _field("items.[].size", "integer", required=False), _field("truncated", "boolean"))),
+        RestOperationContract("search_files", "WorkspaceOperations.list_workspace_files", "POST", "/sessions/{session_id}/fs:search", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"query": "fixture", "limit": 50},), response_fields=(_field("items", "array"), _field("items.[].path", "string"), _field("items.[].name", "string"), _field("items.[].kind", "string"), _field("truncated", "boolean"))),
+        RestOperationContract("read_file", "WorkspaceOperations.preview_workspace_file", "POST", "/sessions/{session_id}/fs:read", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": "fixture.txt", "length": 8192, "encoding": "auto", "allow_external_symlinks": False},), response_fields=(_field("path", "string"), _field("content", "string"), _field("encoding", "string", values=("utf-8", "base64")), _field("size", "integer"), _field("is_binary", "boolean"), _field("truncated", "boolean"))),
+        RestOperationContract("download_file", "WorkspaceOperations.download_workspace_file", "GET", "/sessions/{session_id}/fs/{path}:download", "/api/v1/sessions/{session_id}/fs/{*}", response_media_type="application/octet-stream"),
+        RestOperationContract("session_environments", "WorkspaceOperations.list_environments", "GET", "/sessions/{session_id}/environments", "/api/v1/sessions/{session_id}/environments", response_fields=(_field("environments", "array"), _field("environments.[].environment_id", "string"), _field("environments.[].type", "string", values=("local", "ssh", "docker", "command")), _field("environments.[].status", "string", values=("pending", "connecting", "ready", "disconnected", "disposed")))),
+        RestOperationContract("session_plan", "WorkspaceOperations.get_plan_document", "GET", "/sessions/{session_id}/transcript/plan", "/api/v1/sessions/{session_id}/transcript/plan", query_examples=({"agent_id": "main", "tool_call_id": "plan-review"},), response_fields=(_field("plans", "array"), _field("plans.[].tool_call_id", "string"), _field("plans.[].plan", "string"), _field("plans.[].path", "string", required=False))),
+        RestOperationContract("file_changes", "FileHistoryOperations.get_file_changes", "GET", "/sessions/{session_id}/file-history/changes", "/api/v1/sessions/{session_id}/file-history/changes", query_examples=({"turn_id": 0},), response_fields=(_field("recorded", "boolean"), _field("changes", "array"), _field("changes.[].path", "string"), _field("changes.[].status", "string", values=("added", "modified", "deleted")), _field("changes.[].additions", "integer", "number"), _field("changes.[].deletions", "integer", "number"), _field("changes.[].binary", "boolean", required=False), _field("changes.[].oversize", "boolean", required=False))),
+        RestOperationContract("file_change_content", "FileHistoryOperations.get_file_diff", "GET", "/sessions/{session_id}/file-history/content", "/api/v1/sessions/{session_id}/file-history/content", query_examples=({"turn_id": 0, "path": "fixture.txt", "phase": "start"}, {"turn_id": 0, "path": "fixture.txt", "phase": "end"}), response_fields=(_field("content", "object", required=False), _field("content.content", "string", required=False), _field("content.binary", "boolean", required=False))),
+        RestOperationContract("list_plugins", "IntegrationOperations.list_plugins", "GET", "/plugins", "/api/v1/plugins", response_fields=(_field("plugins", "array"), _field("plugins.[].id", "string"), _field("plugins.[].displayName", "string"), _field("plugins.[].enabled", "boolean"), _field("plugins.[].state", "string", values=("ok", "error")), _field("plugins.[].version", "string", required=False), _field("plugins.[].skillCount", "number", "integer"), _field("plugins.[].mcpServerCount", "number", "integer"))),
+        RestOperationContract("plugin_details", "IntegrationOperations.get_plugin_details", "GET", "/plugins/{plugin_id}", "/api/v1/plugins/{tail}", response_fields=(_field("id", "string"), _field("displayName", "string"), _field("enabled", "boolean"), _field("state", "string"), _field("skillCount", "number", "integer"), _field("mcpServerCount", "number", "integer"), _field("skills", "array"), _field("skills.[].name", "string"), _field("mcpServers", "array"), _field("mcpServers.[].name", "string"), _field("mcpServers.[].runtimeName", "string"), _field("mcpServers.[].enabled", "boolean"), _field("mcpServers.[].transport", "string"), _field("diagnostics", "array"), _field("diagnostics.[].severity", "string", values=("error", "warn", "info")))),
+        RestOperationContract("mcp_servers", "IntegrationOperations.list_mcp_servers", "GET", "/mcp/servers", "/api/v1/mcp/servers", response_fields=(_field("servers", "array"), _field("servers.[].id", "string"), _field("servers.[].name", "string"), _field("servers.[].transport", "string", values=("stdio", "http", "sse")), _field("servers.[].status", "string", values=("connected", "connecting", "disconnected", "error")), _field("servers.[].tool_count", "integer"))),
+        RestOperationContract("restart_mcp", "IntegrationOperations.restart_mcp_server", "POST", "/mcp/servers/{server_id}:restart", "/api/v1/mcp/servers/{tail}", response_fields=(_field("restarting", "boolean", values=(True,)),)),
+        RestOperationContract("mcp_auth_statuses", "IntegrationOperations.inspect_mcp", "GET", "/mcp/auth-statuses", "/api/v2/mcp/auth-statuses", query_examples=({"cwd": "/workspace", "verify": "false"},), response_fields=(_field("[]", "object"), _field("[].name", "string"), _field("[].authStatus", "string", values=("not-applicable", "bearer-token", "oauth-required", "oauth-authorized", "oauth-expired", "unavailable"))), api_version="v2"),
+        RestOperationContract("account_quota", "IntegrationOperations.get_account_quota", "GET", "/oauth/usage", "/api/v1/oauth/usage", response_fields=(_field("kind", "string", values=("ok", "error")), _field("quota", "object", required=False), _field("quota.usages", "object", required=False), *tuple(field for window in ("limit5h", "limit7d", "monthTotal", "monthCode") for field in (_field(f"quota.usages.{window}", "object", required=False), _field(f"quota.usages.{window}.usedRatio", "number", required=False), _field(f"quota.usages.{window}.resetAt", "string", required=False))))),
+        RestOperationContract(
+            "side_question",
+            "KimiServerClient.side_question",
+            "POST",
+            "/sessions/{session_id}:btw",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the side-agent response; side-question creation validates the returned agent ID",
+        ),
+        RestOperationContract(
+            "fork_session",
+            "KimiServerClient.fork_session",
+            "POST",
+            "/sessions/{session_id}:fork",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the fork session response; the lifecycle probe checks that response",
+        ),
+        RestOperationContract(
+            "restore_session",
+            "KimiServerClient.restore_session",
+            "POST",
+            "/sessions/{session_id}:restore",
+            "/api/v1/sessions/{session_id}:archive",
+            request_examples=({},),
+            schema_alias_note="The archive path exposes action requests but not the restore session response; the lifecycle probe checks that response",
+        ),
         RestOperationContract(
             "get_profile",
             "KimiServerClient.get_session_profile",
@@ -377,6 +451,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                         "thinking": "high",
                         "permission_mode": "yolo",
                         "plan_mode": True,
+                        "swarm_mode": False,
                         "goal_objective": "Finish the task",
                         "goal_control": "pause",
                     },
@@ -427,31 +502,16 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "GET",
             "/sessions/{session_id}/goal",
             "/api/v1/sessions/{session_id}/goal",
-            response_fields=(
-                _field("goalId", "string"),
-                _field("objective", "string"),
-                _field("completionCriterion", "string", required=False),
-                _field(
-                    "status",
-                    "string",
-                    values=("active", "paused", "blocked", "complete"),
-                ),
-                _field("turnsUsed", "number", "integer"),
-                _field("tokensUsed", "number", "integer"),
-                _field("wallClockMs", "number", "integer"),
-                _field("budget", "object"),
-                _field("budget.tokenBudget", "number", "integer"),
-                _field("budget.turnBudget", "number", "integer"),
-                _field("budget.wallClockBudgetMs", "number", "integer"),
-                _field("budget.remainingTokens", "number", "integer"),
-                _field("budget.remainingTurns", "number", "integer"),
-                _field("budget.remainingWallClockMs", "number", "integer"),
-                _field("budget.tokenBudgetReached", "boolean"),
-                _field("budget.turnBudgetReached", "boolean"),
-                _field("budget.wallClockBudgetReached", "boolean"),
-                _field("budget.overBudget", "boolean"),
-                _field("terminalReason", "string", required=False),
-            ),
+            response_fields=_GOAL_FIELDS,
+        ),
+        RestOperationContract(
+            "edit_goal",
+            "KimiServerClient.edit_goal",
+            "PATCH",
+            "/sessions/{session_id}/goal",
+            "/api/v1/sessions/{session_id}/goal",
+            request_examples=({"objective": "Revise the objective"},),
+            response_fields=_GOAL_FIELDS,
         ),
         RestOperationContract(
             "submit_prompt",
@@ -460,6 +520,8 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
             request_examples=(
+                {"agent_id": "side-agent", "content": [{"type": "text", "text": "Side question"}]},
+                {"content": [{"type": "file", "file_id": "uploaded-fixture", "name": "fixture.txt", "media_type": "text/plain", "size": 7}]},
                 {
                     "content": [{"type": "text", "text": "hello"}],
                     "model": "kimi-code/k3",
@@ -558,6 +620,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     values=("builtin", "skill", "mcp"),
                 ),
                 _field("tools.[].mcp_server_id", "string", required=False),
+                _field("tools.[].active", "boolean", required=False),
             ),
         ),
         RestOperationContract(
@@ -617,15 +680,19 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         ),
         RestOperationContract(
             "list_prompts",
-            "KimiServerClient.abort_prompt/abort_session",
+            "KimiServerClient.get_prompt_queue/abort_prompt/abort_session",
             "GET",
             "/sessions/{session_id}/prompts",
             "/api/v1/sessions/{session_id}/prompts",
             response_fields=(
-                _field("active", "object", required=False),
-                _field("active.prompt_id", "string", required=False),
+                _field("active", "object"),
+                _field("active.prompt_id", "string", required=False, required_if_parent_present=True),
+                _field("active.status", "string", required=False, required_if_parent_present=True, values=("running", "queued", "blocked")),
+                _field("active.content", "array", required=False, required_if_parent_present=True),
                 _field("queued", "array"),
                 _field("queued.[].prompt_id", "string"),
+                _field("queued.[].status", "string", values=("running", "queued", "blocked")),
+                _field("queued.[].content", "array"),
             ),
         ),
         RestOperationContract(
@@ -696,6 +763,7 @@ _INTERACTION_FIELDS = (
     _field("session_id", "string"),
     _field("agent_id", "string"),
     _field("interaction_id", "string"),
+    _field("tool_call_id", "string", required=False),
     _field("status", "string", values=("pending", "ended")),
     _field("request", "object"),
 )
@@ -900,6 +968,9 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("type", "string", values=("goal",)),
             _field("session_id", "string"),
             _field("agent_id", "string"),
+            _field("goal", "object", required=False),
+            _field("goal.objective", "string", required=False),
+            _field("goal.status", "string", required=False, values=("active", "paused", "blocked", "complete")),
         ),
     ),
     WebSocketMessageContract(
@@ -910,6 +981,8 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("session_id", "string"),
             _field("agent_id", "string"),
             _field("items", "array"),
+            _field("items.[].title", "string"),
+            _field("items.[].status", "string", values=("pending", "in_progress", "done")),
         ),
     ),
     WebSocketMessageContract(
@@ -981,6 +1054,26 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             {
                 "type": "task.stop",
                 "request_id": "request-4",
+                "session_id": "session-1",
+                "agent_id": "main",
+                "task_id": "bash-1",
+            },
+        ),
+    ),
+    WebSocketMessageContract(
+        "task_background",
+        "KimiServerClient.background_task",
+        (
+            _field("type", "string", values=("task.background",)),
+            _field("request_id", "string"),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("task_id", "string"),
+        ),
+        (
+            {
+                "type": "task.background",
+                "request_id": "request-background",
                 "session_id": "session-1",
                 "agent_id": "main",
                 "task_id": "bash-1",
@@ -1272,6 +1365,8 @@ def kimi_semantic_contract() -> dict[str, Any]:
                 "runtime_path": item.runtime_path,
                 "spec_path": item.spec_path,
                 "request_media_type": item.request_media_type,
+                "response_media_type": item.response_media_type,
+                "api_version": item.api_version,
                 "request_examples": list(item.request_examples),
                 "request_fields": [
                     field_payload(field) for field in item.request_fields

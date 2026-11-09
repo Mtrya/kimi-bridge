@@ -39,7 +39,7 @@ def test_state_round_trip_uses_versioned_atomic_file(tmp_path: Path) -> None:
 
     assert store.load() == state
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["version"] == 3
+    assert payload["version"] == 4
     assert payload["active_conversation"] == "feishu:cli_bot:ou_user"
     binding_payload = payload["bindings"]["feishu:cli_bot:ou_user"]
     assert binding_payload["render_thinking"] is False
@@ -110,7 +110,7 @@ def test_version_one_state_migrates_without_losing_bindings(tmp_path: Path) -> N
     assert migrated.active_conversation is None
     store.save(migrated)
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["version"] == 3
+    assert saved["version"] == 4
     assert saved["bindings"]["key"]["render_thinking"] is False
     assert saved["bindings"]["key"]["delivery"] is None
     assert saved["active_conversation"] is None
@@ -166,7 +166,7 @@ def test_render_thinking_round_trips(tmp_path: Path) -> None:
 
 def test_unknown_future_state_version_fails_loudly(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
-    path.write_text('{"version": 4, "bindings": {}}', encoding="utf-8")
+    path.write_text('{"version": 5, "bindings": {}}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="unsupported bridge state format"):
         StateStore(path).load()

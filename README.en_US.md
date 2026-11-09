@@ -59,20 +59,22 @@ For more detailed installation steps, platform-side setup, or customization, see
 
 ## Features
 
-- Durable Kimi session management: create, list, switch, rename, inspect, compact, and undo.
+- Durable Kimi sessions: create, switch, fork, archive, restore, inspect history, compact, and undo.
 - Edit-in-place streaming replies with router-side chunking; a separate thinking stream, interactive approvals, and questions where the platform supports them.
-- Prompt steering and cancellation during busy turns, plus permission mode, model, effort, plan, goal, task, skill, and MCP inspection.
-- Inbound images, videos, files, and transcribed voice, plus `/send` for outbound files.
+- Native prompt queues, goal editing, busy model/effort changes, swarm controls, and agent/todo inspection; background work can report outcomes after you switch sessions.
+- Read-only side questions through `/btw`, with answers separate from the main turn.
+- Shared workspace folders, file browsing/search/preview/delivery, recorded changes and diffs, and selection of Kimi-configured execution environments.
+- Inbound images, videos, files, and transcribed voice; plugin/MCP inspection, MCP restart requests, and available managed-account quota.
 - Private-chat allowlists, loopback-only Kimi server supervision, and a local `doctor` diagnostic.
 
 ## Commands
 
 Chat commands include:
 
-- sessions: `/new`, `/archive`, `/sessions`, `/switch`, `/status`, `/title`, `/usage`, `/compact`, `/undo`;
-- control: `/mode`, `/model`, `/secondary-model`, `/effort`, `/plan`, `/goal`, `/stop`, `/reload`;
-- tasks and tools: `/tasks`, `/skills`, `/mcp`;
-- output: `/send`, `/render-thinking`.
+- sessions: `/new`, `/archive`, `/sessions`, `/switch`, `/fork`, `/restore`, `/status`, `/title`, `/history`, `/usage`, `/compact`, `/undo`;
+- control: `/mode`, `/model`, `/secondary-model`, `/effort`, `/plan`, `/swarm`, `/queue`, `/goal`, `/stop`, `/reload`;
+- activity and tools: `/agents`, `/todos`, `/tasks`, `/btw`, `/skills`, `/plugins`, `/mcp`;
+- workspace and output: `/workspace`, `/files`, `/environments`, `/render-thinking`.
 
 Type `/help` in chat or `/<command> ?` for usage; see the [command reference](docs/COMMANDS.md) for exact syntax and platform limits.
 

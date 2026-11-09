@@ -4,20 +4,20 @@ kimi-bridge is a single-operator bridge between one instant-messaging adapter an
 
 ```text
 ┌──────────────────────────────────────────────┐
-│ One selected Feishu, QQ, WeChat, or Telegram  │
-│ adapter: native messages and platform auth    │
+│ One selected Feishu, QQ, WeChat, or Telegram │
+│ adapter: native messages and platform auth   │
 └──────────────────────┬───────────────────────┘
                        │ semantic platform values
 ┌──────────────────────▼───────────────────────┐
-│ ChatRouter                                    │
+│ ChatRouter                                   │
 │ bindings, commands, interactions, streams,   │
-│ workspace-contained outbound authorization    │
+│ native workspace file access                 │
 └──────────────────────┬───────────────────────┘
                        │ typed Kimi operations/events
 ┌──────────────────────▼───────────────────────┐
-│ KimiServerClient + KimiServerSupervisor       │
-│ REST, WebSocket, contract/version checks,     │
-│ foreground `kimi web` lifecycle               │
+│ KimiServerClient + KimiServerSupervisor      │
+│ REST, WebSocket, contract/version checks,    │
+│ foreground `kimi web` lifecycle              │
 └──────────────────────┬───────────────────────┘
                        │ loopback + bearer token
                  local Kimi Code
@@ -35,17 +35,17 @@ Interaction discovery uses Kimi’s flat WebSocket `interaction` frames, decoded
 
 History and stream recovery use the main agent’s transcript journal. Each new subscription owns a transcript tree and starts with a baseline; transport reconnects resume from that subscription’s last applied sequence. The server replays `transcript.ops` frames or sends a reset snapshot when the journal no longer reaches back. `kimi_server` reduces both reset forms, upserts, appends, and removals into the same tree, then emits semantic deltas or authoritative correction snapshots. Sequence deduplication prevents duplicate delivery. An initial running turn restores its current step, answer, and thinking; undo removes deleted turn buffers. Compaction notices and turn failures use the same journal.
 
-Session usage totals come from Kimi’s stored cumulative counters. Live `agent` and `usage` frames supply effective settings and context-window values while the subscription is connected; those cached frames are discarded on disconnect. Task discovery uses a short subscription at the lowest enabled transcript grade because disabling agent delivery also suppresses `task.list`. Task watch and stop commands use direct request/response sockets without subscribing. Inspection collects the initial matching output chunk, reconciles UTF-8 byte offsets, and bounds the retained tail; an acknowledged task with no output returns after a bounded wait.
+Session usage totals come from Kimi’s stored cumulative counters. Managed-account quota is a separate native projection; account-only failures preserve valid session statistics. Plugin/MCP projections expose public identity, contribution, state and authentication fields while excluding raw configuration and diagnostic messages. Native MCP runtime scope and bound-session tool/configuration scope remain distinct. Live `agent` and `usage` frames supply effective settings and context-window values while the subscription is connected; those cached frames are discarded on disconnect. Agent, todo, and task inspection uses per-agent replacement state from the connected stream, or a short wildcard subscription at the lowest enabled transcript grade. Disabling agent delivery also suppresses `task.list`. The client resolves nested task ownership and targets native watch, stop, and background controls at the owning agent; the router receives semantic activity values. Task watch and stop commands use direct request/response sockets without subscribing. Inspection collects the initial matching output chunk, reconciles UTF-8 byte offsets, and bounds the retained tail; an acknowledged task with no output returns after a bounded wait.
 
 ## Router boundary
 
-`src/kimi_bridge/router/` exposes the `ChatRouter` facade and owns platform-neutral command orchestration, session and stream lifecycle, interaction lifecycle, answer/thinking rendering, outbound-file authorization, formatting, and private runtime state. Model output, nonterminal notices, and final bridge replies use separate semantic sends so an adapter can preserve an active rendering lifecycle. The router maps an IM conversation to a Kimi session and persists bridge-owned bindings, preferences, and the delivery route used for autonomous replies. Inbound operations are serialized across chats because bindings, session listings, and the active event stream are shared. Long-running compaction completion is tracked in the background so serial platform dispatchers can deliver later commands; router shutdown cancels and joins those completion tasks.
+`src/kimi_bridge/router/` exposes the `ChatRouter` facade and owns platform-neutral command orchestration, session and stream lifecycle, interaction lifecycle, answer/thinking rendering, semantic workspace/file operations, formatting, and private runtime state. Model output, nonterminal notices, and final bridge replies use separate semantic sends so an adapter can preserve an active rendering lifecycle. The router maps an IM conversation to a Kimi session and persists bridge-owned bindings, preferences, and the delivery route used for autonomous replies. Inbound operations are serialized across chats because bindings and displayed selections are shared. Each observed native session owns its subscription, activity baseline, interaction state, and render buffers. The destination subscription or snapshot is prepared before committing a new binding and changing delivery roles; its initial events wait for that transition. Rebinding retains observation only while work remains; foreground output and off-session notices have separate delivery paths. Long-running compaction completion is tracked in the background so serial platform dispatchers can deliver later commands; router shutdown cancels and joins those completion tasks.
 
-The router does not construct Feishu cards, QQ message payloads, WeChat item payloads, Telegram dictionaries, or multipart bodies. Adapters classify native media and expose semantic values; the router uses the selected model's capabilities to decide whether native image/video input becomes a Kimi file-backed prompt part or a workspace-inbox path. Generic files always use the workspace inbox. Voice messages resolve through the optional `[voice.asr]` endpoint and then the selected adapter's native transcription path when available.
+The router does not construct Feishu cards, QQ message payloads, WeChat item payloads, Telegram dictionaries, or multipart bodies. Adapters classify native media and expose semantic values; the router uses the selected model's capabilities to decide whether native image/video input becomes a Kimi file-backed prompt part or a workspace-inbox path. Generic files use the configured inbox for local sessions and native uploaded-file materialization in the selected target for remote sessions. Native image/video uploads and capability fallbacks follow the same target binding. Voice messages resolve through the optional `[voice.asr]` endpoint and then the selected adapter's native transcription path when available.
 
 Inbound messages and interaction responses have operation-level error boundaries. Recoverable server failures are logged with their causes and reported to the originating conversation; failed interaction responses retain their pending controls. Session creation is covered by the message boundary. Protocol violations and programming errors propagate instead of being treated as successful delivery or expired interactions.
 
-Session setup accepts a successful permission-mode update when status omits the mode, while an explicit mismatch remains a protocol error. Every prompt carries the binding's permission mode.
+New sessions apply model, permission, and swarm settings through Kimi's profile operation. Binding an existing session inspects the native agent's effective settings before applying bridge requirements, preserving that session's selected model. Session setup accepts a successful permission-mode update when status omits the mode, while an explicit mismatch remains a protocol error. Every prompt carries the binding's permission mode.
 
 ## Platform boundaries
 
@@ -90,7 +90,7 @@ This section records the authoritative credential flows behind the QR controls. 
 
 ## Runtime lifecycle
 
-The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, starts that adapter, and then restores event delivery for the conversation that was active before shutdown. The adapter checks the saved route against its current bot identity and allowlist before the router re-subscribes to the bound session and resumes its transcript. Autonomous turns then reach chat without a new prompt or session switch. Only one event stream is active at a time. The Kimi client reconnects transient WebSocket failures by resuming from the last accepted transcript sequence; persistent protocol failures remain terminal. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path` and carry the platform delivery route; Kimi owns its own sessions and model/profile state.
+The foreground runtime loads the selected configuration, builds one adapter, creates the default workspace when needed, starts the supervised loopback Kimi server, starts that adapter, and then restores event delivery for the conversation that was active before shutdown and saved background observation routes. The adapter checks the saved route against its current bot identity and allowlist before the router re-subscribes to the bound session and resumes its transcript. Autonomous turns then reach chat without a new prompt or session switch. Sessions left with running work retain their allowed delivery routes and subscriptions; idle observations are retired. Each session/agent journal reconnects independently, and the native side-question operation uses a separate agent subscription. The Kimi client reconnects transient WebSocket failures by resuming from the last accepted transcript sequence; persistent protocol failures remain terminal. Shutdown stops the adapter, router tasks, client, and child process. Persisted conversation bindings live in `state_path` and carry the platform delivery route; Kimi owns its own sessions and model/profile state.
 
 Bindings from older releases learn their delivery route from the next allowlisted message. Send `/status` once after upgrading to resume delivery for an existing binding.
 
@@ -101,8 +101,8 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 - The managed Kimi server binds only to `127.0.0.1` and requires its generated bearer token.
 - Feishu authorizes stable `open_id`/`user_id` values, QQ authorizes app-scoped C2C `user_openid` values, and WeChat authorizes stable QR-scanner identities. None is a display-name or nickname substitute.
 - Platform secrets remain in protected configuration or adapter-owned managed storage. `state.json` never contains adapter credentials.
-- `/send` accepts only files within the bound workspace, including symlink containment checks.
-- `ExitPlanMode` plan previews read only regular files under `~/.kimi-code/sessions/**/plans/`; any other wire-supplied path is ignored.
+- Workspace file browsing, previews, and downloads use Kimi’s session filesystem operations and their native root/symlink checks. Shared folder membership and the session’s original working directory are distinct native values. Workspace aliases are resolved through Kimi’s workspace-scoped session membership.
+- `ExitPlanMode` plan previews use the native transcript plan projection scoped to the requesting agent and tool call. Wire-supplied paths never trigger host file reads.
 - The deployment model is one trusted host account and trusted operator, not tenant isolation. Kimi Code and its tools retain the host account's filesystem, process, and network authority.
 
 ## Compatibility policy

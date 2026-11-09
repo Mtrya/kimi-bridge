@@ -11,8 +11,8 @@ from typing import Any
 
 
 DEFAULT_STATE_PATH = Path.home() / ".kimi-bridge" / "state.json"
-STATE_VERSION = 3
-MIGRATABLE_STATE_VERSIONS = frozenset({1, 2, STATE_VERSION})
+STATE_VERSION = 4
+MIGRATABLE_STATE_VERSIONS = frozenset({1, 2, 3, STATE_VERSION})
 PERMISSION_MODES = frozenset({"manual", "auto", "yolo"})
 
 
@@ -39,11 +39,18 @@ class ConversationBinding:
 
 
 @dataclass(slots=True)
+class ObservationRoute:
+    conversation_key: str
+    delivery: DeliveryRoute
+
+
+@dataclass(slots=True)
 class BridgeState:
     """All durable bridge state."""
 
     bindings: dict[str, ConversationBinding] = field(default_factory=dict)
     active_conversation: str | None = None
+    observations: dict[str, ObservationRoute] = field(default_factory=dict)
 
 
 def _delivery_from_raw(value: object) -> DeliveryRoute | None:
@@ -55,15 +62,15 @@ def _delivery_from_raw(value: object) -> DeliveryRoute | None:
     for name in ("platform", "bot_id", "conversation_id", "actor_id"):
         field_value = value.get(name)
         if not isinstance(field_value, str) or not field_value:
-            raise TypeError(
-                f"binding delivery {name} must be a non-empty string"
-            )
+            raise TypeError(f"binding delivery {name} must be a non-empty string")
         fields[name] = field_value
     aliases = value.get("actor_aliases", [])
     if not isinstance(aliases, list) or any(
         not isinstance(alias, str) or not alias for alias in aliases
     ):
-        raise TypeError("binding delivery actor_aliases must be a list of non-empty strings")
+        raise TypeError(
+            "binding delivery actor_aliases must be a list of non-empty strings"
+        )
     return DeliveryRoute(**fields, actor_aliases=tuple(aliases))
 
 
@@ -88,15 +95,11 @@ class StateStore:
             or version not in MIGRATABLE_STATE_VERSIONS
         ):
             raise ValueError("unsupported bridge state format")
-        active_conversation = (
-            raw.get("active_conversation") if version >= 3 else None
-        )
+        active_conversation = raw.get("active_conversation") if version >= 3 else None
         if active_conversation is not None and (
             not isinstance(active_conversation, str) or not active_conversation
         ):
-            raise TypeError(
-                "active_conversation must be a non-empty string or null"
-            )
+            raise TypeError("active_conversation must be a non-empty string or null")
         bindings_raw = raw.get("bindings")
         if not isinstance(bindings_raw, dict):
             raise TypeError("state bindings must be an object")
@@ -131,8 +134,27 @@ class StateStore:
                 render_thinking=render_thinking,
                 delivery=delivery,
             )
+        observations: dict[str, ObservationRoute] = {}
+        for session_id, value in (
+            raw.get("observations", {}) if version >= 4 else {}
+        ).items():
+            if (
+                not isinstance(session_id, str)
+                or not session_id
+                or not isinstance(value, dict)
+            ):
+                raise TypeError("invalid observation route")
+            key = value.get("conversation_key")
+            delivery = _delivery_from_raw(value.get("delivery"))
+            if not isinstance(key, str) or not key or delivery is None:
+                raise TypeError(
+                    "observation requires a conversation and delivery route"
+                )
+            observations[session_id] = ObservationRoute(key, delivery)
         return BridgeState(
-            bindings=bindings, active_conversation=active_conversation
+            bindings=bindings,
+            active_conversation=active_conversation,
+            observations=observations,
         )
 
     def save(self, state: BridgeState) -> None:
@@ -140,6 +162,19 @@ class StateStore:
         payload: dict[str, Any] = {
             "version": STATE_VERSION,
             "active_conversation": state.active_conversation,
+            "observations": {
+                session_id: {
+                    "conversation_key": route.conversation_key,
+                    "delivery": {
+                        "platform": route.delivery.platform,
+                        "bot_id": route.delivery.bot_id,
+                        "conversation_id": route.delivery.conversation_id,
+                        "actor_id": route.delivery.actor_id,
+                        "actor_aliases": list(route.delivery.actor_aliases),
+                    },
+                }
+                for session_id, route in sorted(state.observations.items())
+            },
             "bindings": {
                 key: {
                     "session_id": binding.session_id,

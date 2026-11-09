@@ -143,6 +143,23 @@ def _minimal_documents() -> tuple[dict[str, Any], dict[str, Any]]:
     return openapi, asyncapi
 
 
+def test_binary_download_contract_checks_native_media_type_and_shape(monkeypatch):
+    operation = kimi_contract.RestOperationContract(
+        "download", "WorkspaceOperations.download_workspace_file", "GET", "/download", "/api/v1/example",
+        response_media_type="application/octet-stream",
+    )
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {"download": operation})
+    openapi, asyncapi = _minimal_documents()
+    content = openapi["paths"]["/api/v1/example"]["get"]["responses"]["200"]["content"]
+    content.clear()
+    content["application/octet-stream"] = {"schema": {"type": "string", "format": "binary"}}
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert next(check for check in checks if check.id == "rest.download.binary").status == "pass"
+    content["application/octet-stream"]["schema"]["format"] = "text"
+    checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+    assert next(check for check in checks if check.id == "rest.download.binary").status == "fail"
+
+
 @pytest.fixture
 def interaction_contract_documents(monkeypatch):
     contracts = tuple(
@@ -297,6 +314,19 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
             self.created_profiles.append(profile)
             return "session-1"
 
+        async def fork_session(self, session_id: str) -> str:
+            return "forked-session"
+
+        async def archive_session(self, session_id: str) -> None:
+            self.archived_session = session_id
+
+        async def restore_session(self, session_id: str) -> str:
+            self.archived_session = None
+            return session_id
+
+        async def is_session_archived(self, session_id: str) -> bool:
+            return self.archived_session == session_id
+
         async def probe_subscription(
             self, _session_id: str, *, since: int | None = None
         ) -> int:
@@ -338,6 +368,7 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         "runtime.lifecycle.websocket.transcript_seq_resume",
         "runtime.behavior.task.direct_commands",
         "runtime.behavior.session.profile_binding",
+        "runtime.behavior.session.fork_restore",
     ):
         assert any(
             item.id == identifier and item.status == "pass" for item in result.checks
@@ -1905,3 +1936,42 @@ def test_summarize_reports_rejects_duplicate_platforms() -> None:
 
     with pytest.raises(ValueError, match="distinct platform"):
         summarize_reports(duplicated)
+
+
+@pytest.mark.parametrize("field", ["active", "prompt_id", "status", "content"])
+def test_queue_contract_rejects_optional_decoded_fields(field):
+    from kimi_bridge.kimi_server import evaluate_kimi_semantic_contract
+
+    openapi, asyncapi = _minimal_documents()
+    operation = openapi["paths"].pop("/api/v1/example")["get"]
+    openapi["paths"]["/api/v1/sessions/{session_id}/prompts"] = {"get": operation}
+    data = operation["responses"]["200"]["content"]["application/json"]["schema"][
+        "properties"
+    ]["data"]
+    prompt = {
+        "type": "object",
+        "required": ["prompt_id", "status", "content"],
+        "properties": {
+            "prompt_id": {"type": "string"},
+            "status": {"type": "string", "enum": ["running", "queued", "blocked"]},
+            "content": {"type": "array", "items": {"type": "object"}},
+        },
+    }
+    data["properties"] = {
+        "active": {"anyOf": [prompt, {"type": "null"}]},
+        "queued": {"type": "array", "items": prompt},
+    }
+    data["required"] = ["active", "queued"]
+
+    def result():
+        return {
+            check.id: check.status
+            for check in evaluate_kimi_semantic_contract(openapi, asyncapi)
+        }
+
+    identifier = "rest.list_prompts.response." + (
+        "active" if field == "active" else "active." + field
+    )
+    assert result()[identifier] == "pass"
+    (data if field == "active" else prompt)["required"].remove(field)
+    assert result()[identifier] == "fail"

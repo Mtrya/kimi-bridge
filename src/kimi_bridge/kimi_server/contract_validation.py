@@ -130,6 +130,14 @@ def _evaluate_openapi_contract(
         checks.append(_check_request_contract(contract, method_spec))
         checks.append(_check_query_contract(contract, method_spec))
 
+        if contract.response_media_type != "application/json":
+            schema = _content_schema(method_spec.get("responses", {}).get("200"), contract.response_media_type)
+            checks.append(_contract_check(
+                f"rest.{contract.name}.binary", "rest",
+                isinstance(schema, dict) and schema.get("type") == "string" and schema.get("format") == "binary",
+                "success response carries binary content", contract.source,
+            ))
+            continue
         response_schemas = _success_response_schemas(method_spec)
         envelope_ok = bool(response_schemas) and all(
             all(

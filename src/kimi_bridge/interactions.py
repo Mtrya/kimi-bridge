@@ -16,6 +16,8 @@ class ApprovalRequest:
     tool_name: str
     action: str
     input_display: object | None = None
+    agent_id: str = "main"
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

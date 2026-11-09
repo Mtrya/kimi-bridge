@@ -59,20 +59,24 @@ kimi-bridge
 
 ## 功能特性
 
-- 持久的 Kimi 会话管理：创建、列表、切换、重命名、查看、压缩和撤销。
+- 持久的 Kimi 会话管理：创建、切换、分叉、归档与恢复，以及历史查看、重命名、压缩和撤销。
 - 原地编辑的流式回复与路由侧分块；平台支持时另有独立思考流、交互式审批与提问。
-- 忙碌回合中的提示引导、取消、权限模式、模型、推理强度、计划、目标、任务、技能和 MCP 查看。
-- 接收图片、视频、文件和语音转写，以及 `/send` 文件外发。
+- 提示排队、引导与取消，目标原地编辑，以及权限、计划、swarm 模式和忙碌时的模型、推理强度调整。
+- 查看智能体、待办和任务，控制后台运行；切换会话后接收工作状态通知，通过 `/btw` 单独提出只读问题。
+- 管理共享工作区目录，浏览、搜索、预览和发送文件，查看原生记录的更改与差异；可选择 Kimi 已配置的远程执行环境。
+- 接收图片、视频、文件和语音转写，查看技能、插件、MCP 状态及可用的托管账户额度。
 - 私聊白名单、仅监听回环地址的 Kimi 服务器监管，以及本地 `doctor` 诊断。
 
 ## 命令
 
 聊天命令包括：
 
-- 会话：`/new`、`/archive`、`/sessions`、`/switch`、`/status`、`/title`、`/usage`、`/compact`、`/undo`；
-- 控制：`/mode`、`/model`、`/secondary-model`、`/effort`、`/plan`、`/goal`、`/stop`、`/reload`；
-- 任务与工具：`/tasks`、`/skills`、`/mcp`；
-- 输出：`/send`、`/render-thinking`。
+- 会话：`/new`、`/archive`、`/sessions`、`/switch`、`/fork`、`/restore`、`/status`、`/title`、`/history`、`/compact`、`/undo`；
+- 控制：`/mode`、`/model`、`/secondary-model`、`/effort`、`/plan`、`/swarm`、`/queue`、`/goal`、`/stop`、`/reload`；
+- 智能体与任务：`/agents`、`/todos`、`/tasks`、`/btw`；
+- 工作区与文件：`/workspace`、`/files`、`/environments`；
+- 集成与用量：`/skills`、`/plugins`、`/mcp`、`/usage`；
+- 输出：`/render-thinking`。
 
 在聊天中输入 `/help` 或 `/<command> ?` 查看用法；确切语法和平台限制见[命令参考](docs/COMMANDS.md)。
 

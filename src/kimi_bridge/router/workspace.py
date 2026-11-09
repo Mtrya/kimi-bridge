@@ -1,0 +1,311 @@
+"""Workspace commands and one current file selection per chat/session."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from ..kimi_server import FileAccessError, FileContext, RecordedTurn, WorkspaceFile
+from ..platforms.base import ConversationRef, OutboundFile, PlatformAdapter
+
+
+_TEXT_PREVIEW_EXTENSIONS = frozenset({
+    "txt", "md", "rst", "log", "csv", "tsv", "json", "jsonl", "yaml", "yml",
+    "toml", "ini", "cfg", "conf", "xml", "html", "htm", "css", "scss",
+    "py", "pyi", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh", "ps1", "sql",
+    "c", "h", "cc", "cpp", "hpp", "go", "rs", "java", "rb", "php", "lua", "r",
+})
+_TEXT_PREVIEW_NAMES = frozenset({
+    "readme", "license", "copying", "notice", "dockerfile", "makefile", "justfile",
+    ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".env",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class _FileChoice:
+    path: str
+    turn: RecordedTurn | None = None
+
+
+class _WorkspaceMixin:
+    async def _handle_workspace(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(conversation_key, adapter, conversation)
+        if binding is None:
+            return
+        if argument:
+            action, _, path = argument.partition(" ")
+            if action not in {"add", "remove", "primary"} or not path.strip():
+                await self._send_chunked(
+                    adapter,
+                    conversation,
+                    "Usage: /workspace [add|remove|primary <path>]",
+                )
+                return
+            info = await self._client.change_workspace(
+                binding.session_id, action, path.strip()
+            )
+            for choice_key, (_, current, _) in tuple(self._file_choices.items()):
+                if current.workspace.id == info.id:
+                    self._file_choices.pop(choice_key)
+            selected = info.primary if action == "primary" else path.strip()
+            label = {"add": "Added", "remove": "Removed from workspace", "primary": "Primary folder"}[action]
+            await self._send_chunked(
+                adapter,
+                conversation,
+                f"✓ {label}: **{_folder_name(selected)}**\n`{selected}`",
+            )
+            return
+        context = await self._client.get_file_context(binding.session_id)
+        await self._send_chunked(adapter, conversation, _workspace_text(context))
+
+    async def _handle_files(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        try:
+            await self._dispatch_files(conversation_key, adapter, conversation, argument)
+        except FileAccessError as exc:
+            text = (
+                "This path is a directory. Use /files <directory> to list it; show and send require a file."
+                if exc.reason == "directory"
+                else "Kimi rejected this path. Use a direct path within the session working directory or shared workspace folders; symlinks must stay within those folders."
+            )
+            await self._send_chunked(adapter, conversation, text)
+
+    async def _dispatch_files(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        binding = await self._require_binding(conversation_key, adapter, conversation)
+        if binding is None:
+            return
+        context = await self._client.get_file_context(binding.session_id)
+        key = (conversation_key, conversation)
+        verb, _, rest = argument.partition(" ")
+        if verb == "changes":
+            if rest.strip():
+                await self._send_chunked(adapter, conversation, "Usage: /files changes")
+                return
+            changes = await self._client.get_file_changes(binding.session_id)
+            self._file_choices.pop(key, None)
+            if changes.turn is None:
+                text = "No completed turn is available."
+            elif not changes.recorded:
+                text = "File history was not recorded for the latest completed turn."
+            else:
+                lines = [f"Recorded changes · turn {changes.turn.number}"]
+                for number, change in enumerate(changes.changes, 1):
+                    flags = (
+                        " · binary"
+                        if change.binary
+                        else " · oversize"
+                        if change.oversize
+                        else ""
+                    )
+                    lines.append(
+                        f"{number}. {change.path} · {change.status} · +{change.additions}/−{change.deletions}{flags}"
+                    )
+                text = (
+                    "\n".join(lines)
+                    if changes.changes
+                    else "No recorded file changes in the latest completed turn."
+                )
+            await self._send_chunked(adapter, conversation, text)
+            if changes.recorded:
+                self._file_choices[key] = (
+                    binding.session_id,
+                    context,
+                    tuple(
+                        _FileChoice(change.path, changes.turn)
+                        for change in changes.changes
+                    ),
+                )
+            return
+        if verb in {"show", "send", "diff"}:
+            selected = rest.strip()
+            if not selected:
+                await self._send_chunked(
+                    adapter, conversation, f"Usage: /files {verb} <n|path>"
+                )
+                return
+            selected_turn = None
+            if selected.isdecimal():
+                choices = self._file_choices.get(key)
+                if (
+                    choices is None
+                    or choices[0] != binding.session_id
+                    or choices[1] != context
+                    or len(selected) > len(str(len(choices[2])))
+                    or not 1 <= int(selected) <= len(choices[2])
+                ):
+                    await self._send_chunked(
+                        adapter,
+                        conversation,
+                        "File number unavailable. Run /files again, or use an explicit path such as ./123.",
+                    )
+                    return
+                choice = choices[2][int(selected) - 1]
+                selected, selected_turn = choice.path, choice.turn
+            if verb == "diff":
+                diff = await self._client.get_file_diff(
+                    binding.session_id, selected, turn=selected_turn
+                )
+                if diff.unavailable:
+                    text = {
+                        "unrecorded": "**No recorded history**\nKimi did not record file history for this turn.",
+                        "not_recorded": "**No recorded change**\nThis file is not in Kimi's recorded changes for the selected turn.",
+                        "missing": "**Recorded content unavailable**\nKimi has a change entry, but its before/after content is unavailable.",
+                        "binary": "**Binary change**\nA text diff is not available for binary content.",
+                        "oversize": "**Diff too large**\nThis change exceeds the text preview limits.",
+                    }[diff.unavailable]
+                else:
+                    text = f"{selected}\n{_code_block(diff.text or 'No textual difference.')}"
+                if diff.truncated:
+                    text += "\nDiff truncated."
+                await self._send_chunked(adapter, conversation, text)
+            elif verb == "show":
+                preview = await self._client.preview_workspace_file(
+                    binding.session_id, selected
+                )
+                if preview.binary:
+                    text = f"{selected} · binary · {preview.size} bytes\nUse /files send to download it."
+                elif not _supports_text_preview(preview.path):
+                    text = f"{selected} · {preview.size} bytes\nNo text preview for this file format. Use /files send <n|path> to download it."
+                else:
+                    body = preview.text or ""
+                    text = f"{selected} · {preview.size} bytes\n{_code_block(body)}"
+                    if preview.truncated:
+                        text += "\nPreview truncated."
+                await self._send_chunked(adapter, conversation, text)
+            else:
+                download = await self._client.download_workspace_file(
+                    binding.session_id, selected
+                )
+                try:
+                    await adapter.send_file(
+                        conversation,
+                        OutboundFile(download.name, download.data, download.media_type),
+                    )
+                except Exception as exc:
+                    await self._send_chunked(
+                        adapter, conversation, f"File send failed: {exc}"
+                    )
+            return
+        if verb == "search" and not rest.strip():
+            await self._send_chunked(
+                adapter, conversation, "Usage: /files search <query>"
+            )
+            return
+        directory = rest.strip() if verb == "--" else (argument or ".")
+        listing = await self._client.list_workspace_files(
+            binding.session_id,
+            directory,
+            query=rest.strip() if verb == "search" else None,
+        )
+        self._file_choices.pop(key, None)
+        await self._send_chunked(
+            adapter,
+            conversation,
+            _file_listing_text(listing.entries, listing.truncated),
+        )
+        self._file_choices[key] = (
+            binding.session_id,
+            context,
+            tuple(_FileChoice(entry.path) for entry in listing.entries),
+        )
+
+
+def _folder_name(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or "/"
+
+
+def _workspace_text(context: FileContext) -> str:
+    info = context.workspace
+    local = context.environment_id == "local"
+    roles = ["current"]
+    if not local:
+        roles.append("target")
+    elif context.cwd == info.primary:
+        roles.append("primary")
+    elif context.cwd in info.additional:
+        roles.append("additional")
+    sections = [
+        f"› **{_folder_name(context.cwd)}** · {' · '.join(roles)}\n`{context.cwd}`"
+    ]
+    folders = [(info.primary, "primary"), *((path, "additional") for path in info.additional)]
+    for path, role in folders:
+        if local and path == context.cwd:
+            continue
+        label = role if local else f"{role} · host"
+        sections.append(f"· **{_folder_name(path)}** · {label}\n`{path}`")
+    return "\n\n".join(sections)
+
+
+def _file_listing_text(entries: tuple[WorkspaceFile, ...], truncated: bool) -> str:
+    lines = [f"Files · {len(entries)}"]
+    lines.extend(
+        f"{number}. {entry.path}{'/' if entry.kind == 'directory' else ' [symlink]' if entry.kind == 'symlink' else ''}"
+        for number, entry in enumerate(entries, 1)
+    )
+    if truncated:
+        lines.append("Listing truncated. Choose a narrower directory or search.")
+    return "\n".join(lines)
+
+
+def _supports_text_preview(path: str) -> bool:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in _TEXT_PREVIEW_NAMES or (
+        "." in name and name.rsplit(".", 1)[-1] in _TEXT_PREVIEW_EXTENSIONS
+    )
+
+
+def _code_block(text: str) -> str:
+    fence = chr(96) * max(
+        3, max((len(run) + 1 for run in re.findall(chr(96) + "+", text)), default=3)
+    )
+    return f"{fence}\n{text}\n{fence}"
+
+
+def _parse_new_options(argument: str) -> tuple[str, str | None, str | None]:
+    tokens = list(re.finditer(r'"[^"\n]*"|\'[^\'\n]*\'|\S+', argument))
+    flags = [
+        (match.start(), match.end(), match.group()[2:])
+        for match in tokens
+        if match.group() in {"--env", "--cwd"}
+    ]
+    if not flags:
+        return argument, None, None
+
+    def unquote(value: str) -> str:
+        if len(value) >= 2 and value[0] in {"'", chr(34)} and value[-1] == value[0]:
+            return value[1:-1]
+        return value
+
+    workspace = unquote(argument[: flags[0][0]].strip())
+    options = {}
+    for index, (_, end, flag) in enumerate(flags):
+        value = unquote(
+            argument[
+                end : flags[index + 1][0] if index + 1 < len(flags) else len(argument)
+            ].strip()
+        )
+        if not value or flag in options:
+            raise ValueError(
+                "Usage: /new [workspace] --env <id> [--cwd <environment-path>]"
+            )
+        options[flag] = value
+    if "cwd" in options and "env" not in options:
+        raise ValueError("--cwd requires --env")
+    return workspace, options.get("env"), options.get("cwd")

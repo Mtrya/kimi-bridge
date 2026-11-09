@@ -30,11 +30,18 @@ from kimi_bridge.interactions import (
 from kimi_bridge.kimi_server import (
     GoalBudget,
     GoalInfo,
+    GoalActivity,
+    SessionActivity,
+    AgentActivity,
     GoalStatus,
     InteractionResolution,
     InteractionUpdate,
     InteractionSnapshot,
     KimiServerAPIError,
+    AccountQuota,
+    FileContext,
+    WorkspaceInfo,
+    PlanDocument,
     KimiServerError,
     KimiServerOperationError,
     KimiServerProtocolError,
@@ -43,6 +50,7 @@ from kimi_bridge.kimi_server import (
     PromptContent,
     PromptDelivery,
     PromptOutcome,
+    PromptQueue,
     PromptSteeringError,
     PromptSubmission,
     PromptSubmissionUncertain,
@@ -108,6 +116,8 @@ class FakeKimiClient:
         self.undo_calls: list[tuple[str, int]] = []
         self.undo_error: KimiServerAPIError | None = None
         self.goals: dict[str, GoalInfo] = {}
+        self.file_contexts: dict[str, FileContext] = {}
+        self.plan_documents: dict[str, PlanDocument] = {}
         self.goal_subscription_ready: list[bool] = []
         self.models = [
             ModelInfo(
@@ -146,6 +156,13 @@ class FakeKimiClient:
         self.model_updates_persist = True
         self.status_models: dict[str, str | None] = {}
         self.status_permission_modes: dict[str, str | None] = {}
+        self.prompt_queues: dict[str, PromptQueue] = {}
+        self.cancelled_prompts: list[tuple[str, str]] = []
+        self.steered_prompts: list[tuple[str, str]] = []
+        self.goal_edits: list[tuple[str, str]] = []
+        self.restored: list[str] = []
+        self.forks: list[str] = []
+        self.restore_error: KimiServerError | None = None
         self.list_calls: list[dict[str, Any]] = []
         self.list_page_size = 50
         self.subscriptions: list[str] = []
@@ -295,13 +312,69 @@ class FakeKimiClient:
                 else (profile.permission_mode or "manual")
             ),
             plan_mode=bool(profile.plan_mode),
-            swarm_mode=False,
+            swarm_mode=bool((await self.get_session(session_id)).get("agent_config", {}).get("swarm_mode", False)),
             context_tokens=context_tokens,
             context_limit=context_limit,
         )
 
+    async def inspect_activity(self, session_id: str) -> SessionActivity:
+        goal = await self.get_goal(session_id)
+        return SessionActivity(
+            session_id,
+            (AgentActivity("main", "idle"),),
+            tuple(self.tasks.get(session_id, ())),
+            GoalActivity(goal.objective, goal.status) if goal is not None else None,
+        )
+
+    async def get_file_context(self, session_id: str) -> FileContext:
+        if session_id in self.file_contexts:
+            return self.file_contexts[session_id]
+        cwd = (await self.get_session(session_id))["metadata"]["cwd"]
+        return FileContext(WorkspaceInfo("workspace:" + cwd, cwd, ()), cwd)
+
+    async def get_plan_document(self, request: ApprovalRequest) -> PlanDocument | None:
+        return self.plan_documents.get(request.id)
+
+    async def get_account_quota(self) -> AccountQuota:
+        return AccountQuota(False)
+
     async def get_session_usage(self, session_id: str) -> SessionUsage:
         return (await self.get_session_profile(session_id)).usage
+
+    async def inspect_session(self, session_id: str) -> SessionStatus:
+        return await self.get_session_status(session_id)
+
+    async def get_prompt_queue(self, session_id: str) -> PromptQueue:
+        return self.prompt_queues.get(session_id, PromptQueue(None, ()))
+
+    async def cancel_prompt(self, session_id: str, prompt_id: str) -> bool:
+        self.cancelled_prompts.append((session_id, prompt_id))
+        return True
+
+    async def steer_prompt(self, session_id: str, prompt_id: str) -> None:
+        self.steered_prompts.append((session_id, prompt_id))
+
+    async def edit_goal(self, session_id: str, objective: str) -> GoalInfo:
+        self.goal_edits.append((session_id, objective))
+        self.goals[session_id] = replace(self.goals[session_id], objective=objective)
+        return self.goals[session_id]
+
+    async def fork_session(self, session_id: str) -> str:
+        from copy import deepcopy
+        self.forks.append(session_id)
+        session = deepcopy(await self.get_session(session_id))
+        session["id"] = "forked-session"
+        session["busy"] = False
+        self.sessions.append(session)
+        return session["id"]
+
+    async def restore_session(self, session_id: str) -> str:
+        self.restored.append(session_id)
+        if self.restore_error is not None:
+            raise self.restore_error
+        session = await self.get_session(session_id)
+        session["archived"] = False
+        return session_id
 
     async def compact_session(
         self, session_id: str, *, instruction: str | None = None,
@@ -327,6 +400,7 @@ class FakeKimiClient:
         thinking: str | None = None,
         permission_mode: str | None = None,
         plan_mode: bool | None = None,
+        swarm_mode: bool | None = None,
         goal_objective: str | None = None,
         goal_control: str | None = None,
     ) -> SessionProfile:
@@ -338,6 +412,7 @@ class FakeKimiClient:
                 "thinking": thinking,
                 "permission_mode": permission_mode,
                 "plan_mode": plan_mode,
+                "swarm_mode": swarm_mode,
                 "goal_objective": goal_objective,
                 "goal_control": goal_control,
             }.items()
@@ -423,6 +498,10 @@ class FakeKimiClient:
             for session in self.sessions
             if bool(session.get("busy")) is params["busy"]
         ]
+        if params.get("archived_only"):
+            sessions = [session for session in sessions if session.get("archived")]
+        elif not params.get("include_archive"):
+            sessions = [session for session in sessions if not session.get("archived")]
         ids = [str(session["id"]) for session in sessions]
         # The list is newest-first: after_id selects newer records,
         # before_id selects older ones.
@@ -540,7 +619,7 @@ class FakeKimiClient:
         ready = self._ready.setdefault(session_id, asyncio.Event())
         await asyncio.wait_for(ready.wait(), timeout)
 
-    async def subscribe_events(self, session_id: str):
+    async def subscribe_events(self, session_id: str, *, include_activity: bool = False):
         self.subscriptions.append(session_id)
         self.stream_actions.append(("subscribe", session_id))
         error = self.stream_errors.get(session_id)
@@ -854,7 +933,7 @@ async def test_first_message_creates_manual_session_and_persists_binding(
         (
             str(workspace.resolve()),
             "hello from Feishu",
-            {"model": "kimi-code/k3", "permission_mode": "manual"},
+                {"model": "kimi-code/k3", "permission_mode": "manual", "swarm_mode": False},
         )
     ]
     assert client.prompts == [
@@ -1386,7 +1465,7 @@ async def test_persisted_selected_model_is_not_replaced_by_startup_default(
     ]
 
 
-async def test_cross_conversation_prompt_is_rejected_without_stopping_active_stream(
+async def test_cross_conversation_prompts_keep_independent_active_streams(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -1400,6 +1479,7 @@ async def test_cross_conversation_prompt_is_rejected_without_stopping_active_str
     )
     try:
         await router.handle_inbound(adapter_a, _message("start A"))
+        client.sessions[0]["busy"] = True
         active = router._active
         assert active is not None
         active_task = active.task
@@ -1411,17 +1491,10 @@ async def test_cross_conversation_prompt_is_rejected_without_stopping_active_str
             _message("start B", user_id="ou_other", conversation_id="oc_other"),
         )
 
-        assert len(adapter_b.final_texts) == 1
-        assert adapter_b.final_texts[0][2].startswith("Prompt failed:")
-        assert client.prompts == [
-            (
-                "session-1",
-                PromptContent(text="start A"),
-                {"permission_mode": "manual"},
-            )
-        ]
-        assert client.stream_actions == [("subscribe", "session-1")]
-        assert router._active is active
+        assert adapter_b.final_texts == []
+        assert [prompt[0] for prompt in client.prompts] == ["session-1", "session-2"]
+        assert client.stream_actions == [("subscribe", "session-1"), ("subscribe", "session-2")]
+        assert set(router._observers) == {"session-1", "session-2"}
         assert active.task is active_task
         assert not active_task.done()
     finally:
@@ -1528,27 +1601,27 @@ async def test_bridge_commands_switch_stop_and_mode(
 
     texts = [text for _message, _conversation, text in adapter.sent]
     help_text = next(text for text in texts if text.startswith("**Commands**"))
-    for grammar in (
-        "/mode <manual|auto|yolo>",
-        "/model [alias]",
-        "/secondary-model [alias] | set <alias> <description>",
-        "/effort [effort]",
-        "/plan [on|off]",
+    for command in (
+        "/mode",
+        "/model",
+        "/secondary-model",
+        "/effort",
+        "/plan",
         "/status",
-        "/title [text]",
+        "/title",
         "/usage",
-        "/tasks [all|completed|failed|cancelled]",
-        "/skills run <name> [args]",
+        "/tasks",
+        "/skills",
         "/mcp",
-        "/compact [instruction]",
-        "/undo [count]",
-        "/goal [status|pause|resume|cancel|-- <objective>|<objective>]",
-        "/send <path>",
-        "/render-thinking [on|off]",
+        "/compact",
+        "/undo",
+        "/goal",
+        "/files",
+        "/render-thinking",
         "/reload",
     ):
-        assert f"**{grammar}**" in help_text
-    assert any("Alpha [idle]" in text and "Beta [busy]" in text for text in texts)
+        assert f"**{command}**" in help_text
+    assert any(all(value in text for value in ("Alpha", "idle", "Beta", "busy")) for text in texts)
     assert any("Switched to session-b" in text for text in texts)
     assert any("Permission mode: yolo" in text for text in texts)
     assert any(text == "Stopped." for text in texts)
@@ -1731,11 +1804,11 @@ async def test_model_and_effort_commands_use_exact_catalog_and_profile_inheritan
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    catalog = next(text for text in texts if "Available models:" in text)
-    assert "kimi-code/k3 — K3" in catalog
-    assert "kimi-code/other — Other" in catalog
-    assert "kimi-code/legacy — Legacy — thinking efforts: on" in catalog
-    assert "kimi-code/fast — Fast" in catalog
+    catalog = next(text for text in texts if "Available models" in text)
+    for model in client.models:
+        assert any(model.alias in line and model.display_name in line for line in catalog.splitlines())
+    legacy = catalog.split("kimi-code/legacy", 1)[1].split("kimi-code/fast", 1)[0]
+    assert "on" in legacy
     assert any("Unknown model alias: K3" in text for text in texts)
     assert any("Valid choices: low, high, max" in text for text in texts)
     assert any(
@@ -1808,10 +1881,12 @@ async def test_secondary_model_command_updates_global_pool_without_a_session(
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    listings = [text for text in texts if "Available models:" in text]
-    assert "kimi-code/k3 [default, pool]" in listings[0]
+    listings = [text for text in texts if "**Available models**" in text]
+    default_row = next(line for line in listings[0].splitlines() if "kimi-code/k3" in line and "pool" in line)
+    assert "default" in default_row
     assert "hard tasks" in listings[0]
-    assert "kimi-code/fast [default, pool]" in listings[1]
+    default_row = next(line for line in listings[1].splitlines() if "kimi-code/fast" in line and "pool" in line)
+    assert "default" in default_row
     assert any("Unknown model alias: K3" in text for text in texts)
     assert client.secondary_model_updates == ["kimi-code/fast"]
     assert client.sessions == []
@@ -1943,17 +2018,14 @@ async def test_status_title_and_usage_report_session_owned_values(
     texts = [text for _message_ref, _conversation, text in adapter.sent]
     assert "Title: Control session" in texts
     assert "Title: Exact  Title" in texts
-    status_text = next(text for text in texts if text.startswith("Session:"))
-    assert "Session: Exact  Title" in status_text
-    assert "State: busy" in status_text
-    assert "Pending interaction: question" in status_text
-    assert "Thinking effort: max" in status_text
-    assert "Plan mode: on" in status_text
-    assert "Permission mode: manual" in status_text
-    assert "Kimi-code: 0.28.1" in status_text
+    status_text = next(text for text in texts if "session-control" in text and "Exact  Title" in text)
+    assert all(value in status_text for value in ("busy", "question", "max", "manual", "0.28.1"))
+    assert "Plan: on" in status_text
     usage_text = next(text for text in texts if "Input tokens: 100" in text)
     assert "Cache-read tokens: 25" in usage_text
-    assert "Context: 300/1200 (25.0%)" in usage_text
+    context_line = next(line for line in usage_text.splitlines() if line.startswith("Context:"))
+    assert "300/1200" in context_line and "25.0%" in context_line
+    assert "█" in context_line and "░" in context_line
     assert "Turns:" not in usage_text
     assert "Cost:" not in usage_text
     assert texts[-1].count("unknown") >= 5
@@ -1985,7 +2057,7 @@ async def test_empty_session_uses_configured_default_as_effective_model(
         await router.close()
 
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    assert "Current model: kimi-code/k3" in texts[0]
+    assert "kimi-code/k3" in texts[0].split("Available models", 1)[0]
     assert "Valid choices: low, high, max" in texts[1]
     assert "Model: kimi-code/k3" in texts[2]
     assert client.profile_updates == [
@@ -2066,7 +2138,7 @@ async def test_task_commands_filter_bound_output_and_cancel_while_busy(
     assert "`task-complete`" not in task_list
     all_tasks = texts[1]
     assert "**Tasks · 2**" in all_tasks
-    assert all_tasks.index("🟡 **Running**") < all_tasks.index("✅ **Completed**")
+    assert all_tasks.index("Running") < all_tasks.index("Completed")
     assert "**Completed tasks · 1**" in texts[2]
     detail = texts[4]
     assert "**Command**\n`sleep 60`" in detail
@@ -2446,7 +2518,7 @@ async def test_task_detail_humanizes_duration_and_blank_output(
         await router.close()
 
     detail = adapter.sent[0][2]
-    assert "✅ **Completed** · bash" in detail
+    assert "Completed" in detail and "bash" in detail
     assert "Ran 1 min · finished 2026-07-23 10:56:54 UTC" in detail
     assert "**Output tail · 1 B**\nNo visible output." in detail
     assert task.description not in detail
@@ -2519,17 +2591,17 @@ async def test_skills_activate_after_subscription_and_mcp_is_session_scoped(
     ]
     assert client.activation_subscription_ready == [True]
     texts = [text for _message_ref, _conversation, text in adapter.sent]
-    assert any("harmless [user]" in text for text in texts)
+    assert any("harmless" in text and "user" in text for text in texts)
     assert any("Unknown skill: missing" in text for text in texts)
     assert texts.count("SKILL_OK") == 1
-    mcp_text = next(text for text in texts if text.startswith("MCP servers:"))
+    mcp_text = next(text for text in texts if text.startswith("MCP servers:")).replace("**", "")
     assert "docs\n- search — Search docs" in mcp_text
     assert "records\n- lookup — Look up records" in mcp_text
     assert "builtin" not in mcp_text
     assert "orphan" not in mcp_text
 
 
-async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
+async def test_busy_state_matrix_allows_native_settings_and_task_controls(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -2587,10 +2659,11 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
         "/title Busy Rename",
         "/secondary-model kimi-code/fast",
         "/secondary-model set kimi-code/fast Low latency tasks",
-    )
-    rejected_mutations = (
+        "/effort max",
         "/model kimi-code/fast",
         "/effort off",
+    )
+    rejected_mutations = (
         "/plan on",
         "/skills run harmless",
         "/reload",
@@ -2604,7 +2677,9 @@ async def test_busy_state_matrix_allows_reads_title_and_task_cancel_only(
         await router.close()
 
     assert client.profile_updates == [
-        ("session-control", {"title": "Busy Rename"})
+        ("session-control", {"title": "Busy Rename"}),
+        ("session-control", {"thinking": "max"}),
+        ("session-control", {"model": "kimi-code/fast", "thinking": "off"}),
     ]
     assert client.cancelled_tasks == [("session-control", "task-1")]
     assert client.activated_skills == []
@@ -3235,18 +3310,14 @@ async def test_goal_status_reports_none_and_all_public_fields_while_busy(
     texts = [text for _ref, _conversation, text in adapter.sent]
     assert texts[0] == "No active goal."
     status = texts[1]
-    for fragment in (
-        "Goal: Ship the bridge",
-        "Status: active",
-        "Completion criterion: All checks pass",
-        "Used: 3 turns; 4200 tokens; 1 min 5 s",
-        "Tokens: limit 10000; remaining 5800; reached no",
-        "Turns: limit 8; remaining 5; reached no",
-        "Time: limit 2 min; remaining 55 s; reached no",
-        "Over budget: no",
-        "Terminal reason: Waiting for review",
-    ):
-        assert fragment in status
+    goal = client.goals["session-control"]
+    for value in (goal.objective, goal.status, goal.completion_criterion, goal.terminal_reason):
+        assert value in status
+    for value in ("3 turns", "4200 tokens", "1 min 5 s"):
+        assert value in status
+    for label, values in (("Tokens", ("10000", "5800")), ("Turns", ("8", "5")), ("Time", ("2 min", "55 s"))):
+        row = next(line for line in status.splitlines() if line.startswith(f"- {label}:"))
+        assert all(value in row for value in values)
 
 
 async def test_goal_creation_orders_public_profile_then_normal_manual_turn(
@@ -3435,10 +3506,10 @@ async def test_goal_pause_aborts_busy_turn_and_cancels_pending_interaction(
         "stale",
     ]
     texts = [text for _ref, _conversation, text in adapter.sent]
-    assert any("Status: paused" in text for text in texts)
+    assert any(client.goals["session-1"].objective in text and "paused" in text for text in texts)
 
 
-async def test_goal_cancel_cleans_origin_interaction_after_session_switch(
+async def test_goal_cancel_keeps_origin_interaction_after_session_switch(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -3481,10 +3552,10 @@ async def test_goal_cancel_cleans_origin_interaction_after_session_switch(
     finally:
         await router.close()
 
-    assert client.aborted == ["session-1", "session-2"]
+    assert client.aborted == ["session-2"]
     assert "session-2" not in client.goals
     assert [outcome.state for _ref, outcome in origin_adapter.outcomes] == [
-        "cancelled",
+        "stale",
         "stale",
     ]
     assert current_adapter.outcomes == []
@@ -3583,7 +3654,7 @@ async def test_control_command_grammars_reject_extra_or_incomplete_arguments(
     texts = [text for _ref, _conversation, text in adapter.sent]
     assert any(text == "Usage: /status" for text in texts)
     assert any(text == "Usage: /usage" for text in texts)
-    assert any(text == "Usage: /mcp" for text in texts)
+    assert any(text == "Usage: /mcp [servers|show <server>|restart <server>]" for text in texts)
     assert sum("Usage: /skills run" in text for text in texts) == 2
     assert sum("Usage: /tasks" in text for text in texts) == 2
     assert any("Usage: /plan" in text for text in texts)
@@ -3718,6 +3789,7 @@ async def test_new_command_uses_requested_workspace_without_forwarding(
     assert client.created[0][2] == {
         "model": "kimi-code/k3",
         "permission_mode": "manual",
+        "swarm_mode": False,
     }
     assert client.prompts == []
 
@@ -4325,6 +4397,7 @@ async def test_exit_plan_approval_includes_plan_preview(
     monkeypatch.setenv("USERPROFILE", str(home))
     plan = _write_plan(home, "# Plan\n\nDo the thing.\n")
     client = FakeKimiClient()
+    client.plan_documents["approval-1"] = PlanDocument("plan.md", "# Plan\n\nDo the thing.\n")
     client.approvals["session-1"] = [_exit_plan_approval(plan)]
     adapter = FakeAdapter()
     router = ChatRouter(
@@ -4355,6 +4428,7 @@ async def test_exit_plan_approval_truncated_preview_sends_full_file(
     content = "x" * 5000
     plan = _write_plan(home, content)
     client = FakeKimiClient()
+    client.plan_documents["approval-1"] = PlanDocument("plan.md", content)
     client.approvals["session-1"] = [_exit_plan_approval(plan)]
     adapter = FakeAdapter()
     router = ChatRouter(
@@ -4803,7 +4877,7 @@ async def test_unsuccessful_abort_preserves_pending_and_queued_interactions(
     assert adapter.interactions[-1][2].request == second
 
 
-async def test_stop_aborts_pending_interaction_after_binding_changes(
+async def test_stop_keeps_off_session_pending_interaction_after_binding_changes(
     tmp_path: Path,
 ) -> None:
     client = FakeKimiClient()
@@ -4833,8 +4907,8 @@ async def test_stop_aborts_pending_interaction_after_binding_changes(
     finally:
         await router.close()
 
-    assert client.stopped == ["session-1", "session-2"]
-    assert adapter.outcomes[-1][1].state == "cancelled"
+    assert client.stopped == ["session-2"]
+    assert adapter.outcomes[-1][1].state == "stale"
 
 
 async def test_approval_timeout_auto_rejects_and_finishes_interaction(
@@ -5060,16 +5134,18 @@ async def test_prompt_upload_transport_failure_is_reported_without_escaping(
     assert "POST /files failed: ReadError" in adapter.sent[0][2]
 
 
-async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
+async def test_files_send_dispatches_one_file_with_workspace_resolution_and_mime(
     tmp_path: Path,
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     text_file = workspace / "notes.txt"
     text_file.write_bytes(b"hello")
     unknown_file = workspace / "payload.unknown-extension"
     unknown_file.write_bytes(b"opaque")
-    client = FakeKimiClient()
+    client = FileClient(workspace)
     adapter = FakeAdapter()
     store = StateStore(tmp_path / "state.json")
     store.save(
@@ -5098,9 +5174,9 @@ async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send notes.txt"))
+        await router.handle_inbound(adapter, _message("/files send notes.txt"))
         await router.handle_inbound(
-            adapter, _message(f"/send {unknown_file.resolve()}")
+            adapter, _message(f"/files send {unknown_file.resolve()}")
         )
     finally:
         await router.close()
@@ -5113,10 +5189,12 @@ async def test_send_dispatches_one_file_with_workspace_resolution_and_mime(
             "application/octet-stream",
         ),
     ]
-    assert client.call_order == []
+    assert client.prompts == []
 
 
-async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
+async def test_files_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "directory").mkdir()
@@ -5141,20 +5219,20 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
     )
     adapter = FakeAdapter()
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
         for command in (
-            "/send",
-            "/send missing.txt",
-            "/send directory",
-            f"/send {outside}",
-            "/send escape.txt",
-            "/send *.txt",
-            "/send first.txt second.txt",
+            "/files send",
+            "/files send missing.txt",
+            "/files send directory",
+            f"/files send {outside}",
+            "/files send escape.txt",
+            "/files send *.txt",
+            "/files send first.txt second.txt",
         ):
             await router.handle_inbound(adapter, _message(command))
     finally:
@@ -5162,10 +5240,11 @@ async def test_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> None:
 
     assert adapter.files == []
     replies = [text for _message_ref, _conversation, text in adapter.sent]
-    assert replies[0] == "Usage: /send <path>"
-    assert any("File not found" in reply for reply in replies)
-    assert any("Not a regular file" in reply for reply in replies)
-    assert sum("stay inside" in reply for reply in replies) == 2
+    assert replies[0] == "Usage: /files send <n|path>"
+    assert any("file missing" in reply for reply in replies)
+    assert any("directory" in reply for reply in replies)
+    assert len(replies) == 7
+    assert all("41304" not in reply for reply in replies)
 
 
 def test_expand_fullwidth_tilde_helper(
@@ -5244,9 +5323,11 @@ async def test_new_fullwidth_tilde_missing_everywhere_reports_error(
     ]
 
 
-async def test_send_expands_fullwidth_tilde_inside_home_workspace(
+async def test_files_send_expands_fullwidth_tilde_inside_home_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "home"
     workspace.mkdir()
     (workspace / "notes.txt").write_text("hello", encoding="utf-8")
@@ -5265,14 +5346,14 @@ async def test_send_expands_fullwidth_tilde_inside_home_workspace(
     )
     adapter = FakeAdapter()
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send ～/notes.txt"))
-        await router.handle_inbound(adapter, _message("/send ～/missing.txt"))
+        await router.handle_inbound(adapter, _message("/files send ～/notes.txt"))
+        await router.handle_inbound(adapter, _message("/files send ～/missing.txt"))
     finally:
         await router.close()
 
@@ -5280,13 +5361,15 @@ async def test_send_expands_fullwidth_tilde_inside_home_workspace(
         OutboundFile("notes.txt", b"hello", "text/plain")
     ]
     assert [text for _ref, _conversation, text in adapter.sent] == [
-        f"File not found: {(workspace / 'missing.txt').resolve()}"
+        "Command failed: kimi server API error 40409: file missing"
     ]
 
 
-async def test_send_surfaces_platform_error_without_kimi_relabeling(
+async def test_files_send_surfaces_platform_error_without_kimi_relabeling(
     tmp_path: Path,
 ) -> None:
+    from test_workspace_files import FileClient
+
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "large.bin").write_bytes(b"large")
@@ -5304,13 +5387,13 @@ async def test_send_surfaces_platform_error_without_kimi_relabeling(
     adapter = FakeAdapter()
     adapter.file_error = RuntimeError("platform size limit")
     router = ChatRouter(
-        FakeKimiClient(),  # type: ignore[arg-type]
+        FileClient(workspace),
         state_store=store,
         default_workspace=workspace,
         model="kimi-code/k3",
     )
     try:
-        await router.handle_inbound(adapter, _message("/send large.bin"))
+        await router.handle_inbound(adapter, _message("/files send large.bin"))
     finally:
         await router.close()
 
@@ -6969,6 +7052,7 @@ async def test_new_session_forces_auto_mode_for_interaction_less_adapter(
     assert client.created[0][2] == {
         "model": "kimi-code/k3",
         "permission_mode": "auto",
+        "swarm_mode": False,
     }
     binding = router._state.bindings["feishu:cli_bot:ou_user"]
     assert binding.permission_mode == "auto"
@@ -7158,15 +7242,15 @@ async def test_per_command_help_details_and_fallbacks(tmp_path: Path) -> None:
     texts = [text for _message, _conversation, text in adapter.sent]
     index = next(text for text in texts if text.startswith("**Commands**"))
     assert "(details:" not in index
-    goal_details = [text for text in texts if text.startswith("**/goal [status")]
+    goal_details = [text for text in texts if text == COMMAND_HELP["/goal"].details]
     assert len(goal_details) == 1
     assert "/goal -- <objective>" in goal_details[0]
-    assert "\nExample" in goal_details[0]
+    assert "/goal -- status of the migration" in goal_details[0]
     show_details = next(
-        text for text in texts if text.startswith("**/tasks show <n|id>**")
+        text for text in texts if text == COMMAND_HELP["/tasks show"].details
     )
     assert "8 KiB" in show_details
-    task_fallbacks = [text for text in texts if text.startswith("**/tasks [all")]
+    task_fallbacks = [text for text in texts if text == COMMAND_HELP["/tasks"].details]
     assert len(task_fallbacks) == 1  # unregistered sub-form falls back to /tasks
     # `help` is not a help token: the keyword reaches the search handler.
     assert not any(
@@ -7185,6 +7269,13 @@ def test_help_resolver_preserves_free_form_arguments() -> None:
     assert command_help_details("/goal", "-- status ?") is None
     assert command_help_details("/mode", "yolo ?") is None
     assert command_help_details("/new", "/tmp/dir ?") is None
+    for action in ("show", "send", "search", "changes", "diff"):
+        assert command_help_details("/files", action + " ?") == COMMAND_HELP[f"/files {action}"].details
+        assert command_help_details("/files", action + "   ?") == COMMAND_HELP[f"/files {action}"].details
+    assert command_help_details("/files", "folder name ?") is None
+    assert command_help_details("/files", "show file name ?") is None
+    assert command_help_details("/workspace", "add ?") == COMMAND_HELP["/workspace add"].details
+    assert command_help_details("/workspace", "add folder name ?") is None
     assert (
         command_help_details("/sessions", "search help") is None
     )
