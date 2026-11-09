@@ -101,7 +101,7 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 - The managed Kimi server binds only to `127.0.0.1` and requires its generated bearer token.
 - Feishu authorizes stable `open_id`/`user_id` values, QQ authorizes app-scoped C2C `user_openid` values, and WeChat authorizes stable QR-scanner identities. None is a display-name or nickname substitute.
 - Platform secrets remain in protected configuration or adapter-owned managed storage. `state.json` never contains adapter credentials.
-- Workspace file browsing, previews, and downloads use Kimi’s session filesystem operations and their native root/symlink checks. Shared folder membership and the session’s original working directory are distinct native values.
+- Workspace file browsing, previews, and downloads use Kimi’s session filesystem operations and their native root/symlink checks. Shared folder membership and the session’s original working directory are distinct native values. Workspace aliases are resolved through Kimi’s workspace-scoped session membership.
 - `ExitPlanMode` plan previews use the native transcript plan projection scoped to the requesting agent and tool call. Wire-supplied paths never trigger host file reads.
 - The deployment model is one trusted host account and trusted operator, not tenant isolation. Kimi Code and its tools retain the host account's filesystem, process, and network authority.
 

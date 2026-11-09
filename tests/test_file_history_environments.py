@@ -9,6 +9,7 @@ import pytest
 from kimi_bridge.kimi_server import (
     FileContext,
     KimiServerClient,
+    KimiServerOperationError,
     PromptContent,
     PromptMedia,
     RecordedTurn,
@@ -245,6 +246,63 @@ async def test_remote_binding_without_cwd_fails_instead_of_using_host(tmp_path: 
     ) as client:
         with pytest.raises(KimiServerProtocolError):
             await client.get_file_context("session-1")
+
+
+@pytest.mark.parametrize("environment_id,cwd", [("local", None), ("remote", "/target")])
+async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
+    environment_id: str, cwd: str | None,
+):
+    binding = {"workspace_id": "old-id", "environment_id": environment_id}
+    if cwd is not None:
+        binding["cwd"] = cwd
+    alias = {"id": "visible-id", "root": "/primary", "additional_dirs": ["/extra"]}
+    http = FakeHttpClient(
+        [
+            _envelope({"metadata": {"cwd": "/original"}, "busy": True}),
+            _envelope(binding),
+            _envelope({"items": [
+                {"id": "unrelated", "root": "/original", "additional_dirs": []},
+                alias,
+            ]}),
+            _envelope({"items": [{"id": "other", "metadata": {"cwd": "/original"}}]}),
+            _envelope({"items": [{"id": f"older-{index}"} for index in range(50)]}),
+            _envelope({"items": [{"id": "session-1", "workspace_id": "old-id"}]}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        context = await client.get_file_context("session-1")
+    assert context == FileContext(
+        WorkspaceInfo("visible-id", "/primary", ("/extra",)),
+        cwd or "/original", environment_id,
+    )
+    membership = [request[2]["params"] for request in http.requests[3:]]
+    assert [query["workspace_id"] for query in membership] == [
+        "unrelated", "visible-id", "visible-id",
+    ]
+    assert membership[-1]["before_id"] == "older-49"
+    assert all(query["include_archive"] and "busy" not in query for query in membership)
+    assert all(method == "GET" for method, _, _ in http.requests)
+
+
+async def test_missing_workspace_does_not_guess_from_matching_session_cwd():
+    http = FakeHttpClient(
+        [
+            _envelope({"metadata": {"cwd": "/original"}}),
+            _envelope({"workspace_id": "missing", "environment_id": "local"}),
+            _envelope({"items": [{
+                "id": "unrelated", "root": "/original", "additional_dirs": [],
+            }]}),
+            _envelope({"items": [{"id": "other", "metadata": {"cwd": "/original"}}]}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        with pytest.raises(KimiServerOperationError):
+            await client.get_file_context("session-1")
+    assert all(method == "GET" for method, _, _ in http.requests)
 
 
 async def test_target_failure_does_not_download_host_file(tmp_path: Path):

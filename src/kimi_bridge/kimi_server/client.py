@@ -556,36 +556,41 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
     async def list_sessions(
         self,
         *,
-        busy: bool = False,
+        busy: bool | None = False,
         include_archive: bool = False,
         exclude_empty: bool = False,
         archived_only: bool = False,
         page_size: int | None = None,
         before_id: str | None = None,
         after_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
-            "busy": busy,
             "include_archive": include_archive,
             "exclude_empty": exclude_empty,
             "archived_only": archived_only,
         }
+        if busy is not None:
+            params["busy"] = busy
         if page_size is not None:
             params["page_size"] = page_size
         if before_id is not None:
             params["before_id"] = before_id
         if after_id is not None:
             params["after_id"] = after_id
+        if workspace_id is not None:
+            params["workspace_id"] = workspace_id
         data = await self._request_operation("list_sessions", params=params)
         return list(data["items"])
 
     async def list_all_sessions(
         self,
         *,
-        busy: bool = False,
+        busy: bool | None = False,
         include_archive: bool = False,
         exclude_empty: bool = False,
         page_size: int = 50,
+        workspace_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Page through the full session set, newest first.
 
@@ -602,6 +607,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                 exclude_empty=exclude_empty,
                 page_size=page_size,
                 before_id=before_id,
+                workspace_id=workspace_id,
             )
             if not page:
                 break

@@ -348,6 +348,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     "page_size": 10,
                     "before_id": "session_before",
                     "after_id": "session_after",
+                    "workspace_id": "wd_workspace_0123456789ab",
                 },
             ),
             response_fields=(

@@ -84,6 +84,16 @@ class WorkspaceOperations:
             None,
         )
         if info is None:
+            # Kimi's list deduplicates implicit IDs by root after primary changes.
+            # Its workspace-scoped session list resolves those aliases natively.
+            for value in workspaces["items"]:
+                members = await self.list_all_sessions(
+                    workspace_id=value["id"], include_archive=True, busy=None
+                )
+                if any(member["id"] == session_id for member in members):
+                    info = _workspace(value)
+                    break
+        if info is None:
             raise KimiServerOperationError(
                 "The session workspace is no longer registered"
             )
