@@ -128,6 +128,7 @@ async def test_recorded_diff_uses_actual_start_end_content_without_current_files
         (True, _change(binary=True), None, "binary"),
         (True, _change(oversize=True), None, "oversize"),
         (True, _change(), None, "missing"),
+        (True, _change(path="another.txt"), None, "not_recorded"),
     ],
 )
 async def test_unavailable_recordings_are_not_empty_diffs(
@@ -489,7 +490,8 @@ async def test_changes_selection_keeps_turn_then_is_replaced_by_file_list(
         await router.handle_inbound(adapter, _message("/files"))
         await router.handle_inbound(adapter, _message("/files diff 1"))
         assert server.content_turns == [7, 7]
-        assert "missing" in adapter.sent[-1][2]
+        result = await client.get_file_diff("session-fixture", "current.txt")
+        assert result.unavailable == "not_recorded"
     finally:
         await router.close()
 

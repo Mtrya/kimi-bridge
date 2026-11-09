@@ -447,7 +447,7 @@ class FileChanges:
 @dataclass(frozen=True, slots=True)
 class FileDiff:
     text: str | None
-    unavailable: str | None = None
+    unavailable: Literal["unrecorded", "not_recorded", "missing", "binary", "oversize"] | None = None
     truncated: bool = False
 
 

@@ -81,7 +81,7 @@ class FileHistoryOperations:
                 None,
             )
         if change is None:
-            return FileDiff(None, "missing")
+            return FileDiff(None, "not_recorded")
         path = change.path
         if change.binary or change.oversize:
             return FileDiff(None, "binary" if change.binary else "oversize")

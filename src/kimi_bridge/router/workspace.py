@@ -162,11 +162,16 @@ class _WorkspaceMixin:
                 diff = await self._client.get_file_diff(
                     binding.session_id, selected, turn=selected_turn
                 )
-                text = (
-                    f"Diff unavailable: {diff.unavailable}."
-                    if diff.unavailable
-                    else f"{selected}\n{_code_block(diff.text or 'No textual difference.')}"
-                )
+                if diff.unavailable:
+                    text = {
+                        "unrecorded": "**No recorded history**\nKimi did not record file history for this turn.",
+                        "not_recorded": "**No recorded change**\nThis file is not in Kimi's recorded changes for the selected turn.",
+                        "missing": "**Recorded content unavailable**\nKimi has a change entry, but its before/after content is unavailable.",
+                        "binary": "**Binary change**\nA text diff is not available for binary content.",
+                        "oversize": "**Diff too large**\nThis change exceeds the text preview limits.",
+                    }[diff.unavailable]
+                else:
+                    text = f"{selected}\n{_code_block(diff.text or 'No textual difference.')}"
                 if diff.truncated:
                     text += "\nDiff truncated."
                 await self._send_chunked(adapter, conversation, text)
