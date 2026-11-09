@@ -358,6 +358,31 @@ async def test_side_answer_is_labelled_independent_and_replaced_on_new_question(
         await router.close()
 
 
+@pytest.mark.parametrize("command", ["/switch other", "/archive", "/stop"])
+async def test_side_question_lifetime_follows_binding_changes_but_not_main_stop(
+    tmp_path: Path, command: str,
+):
+    client = SideClient()
+    client.sessions = [_control_session(busy=True), {**_control_session(), "id": "other"}]
+    router, store = _router(tmp_path, client)
+    adapter = FakeAdapter()
+    try:
+        await router.handle_inbound(adapter, _message("/btw held question"))
+        await _wait_for(lambda: len(client.calls) == 1)
+        await router.handle_inbound(adapter, _message(command))
+        if command == "/stop":
+            assert client.stopped == ["session-control"]
+            assert not client.cancelled
+            assert router._side_questions["feishu:cli_bot:ou_user"][0] == "session-control"
+        else:
+            assert client.cancelled == ["held question"]
+            assert not router._side_questions and not client.stopped
+            binding = store.load().bindings.get("feishu:cli_bot:ou_user")
+            assert (binding is None) if command == "/archive" else binding.session_id == "other"
+    finally:
+        await router.close()
+
+
 async def test_native_side_question_subscribes_and_submits_only_to_created_agent():
     ended = _turn_ended_ops(2)
     ended["payload"]["agent_id"] = "side-agent"
