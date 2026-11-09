@@ -324,6 +324,36 @@ async def test_native_cancel_reports_expired_prompt_outcome(code: int) -> None:
             assert error.value.code == code
 
 
+@pytest.mark.parametrize("expired", ["queued", "active"])
+async def test_session_abort_continues_when_a_snapshot_prompt_has_left_queue(expired):
+    http = FakeHttpClient([
+        _envelope({"active": {"prompt_id": "active"}, "queued": [{"prompt_id": "queued"}]}),
+        _envelope(None, code=40402) if expired == "queued" else _envelope({"aborted": True}),
+        _envelope(None, code=40402) if expired == "active" else _envelope({"aborted": True}),
+        _envelope({"aborted": True}),
+    ])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        assert await client.abort_session("session-1")
+    assert [request[1].rsplit("/", 1)[-1] for request in http.requests] == [
+        "prompts", "queued:abort", "active:abort", "session-1:abort",
+    ]
+
+
+async def test_session_abort_preserves_other_prompt_cancellation_failures():
+    http = FakeHttpClient([
+        _envelope({"active": {"prompt_id": "active"}, "queued": []}),
+        _envelope(None, code=50000),
+    ])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        with pytest.raises(KimiServerAPIError) as error:
+            await client.abort_session("session-1")
+    assert error.value.code == 50000 and len(http.requests) == 2
+
+
 async def test_effective_inspection_reads_live_agent_without_caching_closed_subscription() -> (
     None
 ):

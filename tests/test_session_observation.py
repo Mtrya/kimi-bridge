@@ -57,7 +57,7 @@ def _activity(
     )
 
 
-@pytest.mark.parametrize("transition", ["complete", "blocked"])
+@pytest.mark.parametrize("transition", ["complete", "blocked", None])
 @pytest.mark.parametrize("off_session", [False, True])
 async def test_goal_and_task_notices_survive_switch_without_changing_binding(
     tmp_path: Path, transition, off_session: bool,
@@ -70,6 +70,8 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
     router, store = _router(tmp_path, client)
     adapter = FakeAdapter()
     running = _task("fixture-task")
+    goal = GoalActivity("Fixture", transition) if transition is not None else None
+    expected_notices = 2 if transition is not None else 1
     try:
         await router.handle_inbound(adapter, _message("/status"))
         client.emit(
@@ -86,15 +88,15 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
         client.emit(
             "session-control",
             _activity(
-                goal=GoalActivity("Fixture", transition),
+                goal=goal,
                 tasks=(replace(running, status="completed"),),
             ),
         )
-        await _wait_for(lambda: len(adapter.notice_texts) == 2)
+        await _wait_for(lambda: len(adapter.notice_texts) == expected_notices)
         client.emit(
             "session-control",
             _activity(
-                goal=GoalActivity("Fixture", transition),
+                goal=goal,
                 tasks=(replace(running, status="completed"),),
             ),
         )
@@ -102,7 +104,7 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
         client.emit(selected, _event("assistant.delta", delta="B answer", offset=0))
         client.emit(selected, _event("turn.ended", turnId=1, reason="completed"))
         await _wait_for(lambda: any("B answer" in text for _, _, text in adapter.sent))
-        assert len(adapter.notice_texts) == 2
+        assert len(adapter.notice_texts) == expected_notices
         for _, _, text in adapter.notice_texts:
             if off_session:
                 heading, body, action = text.split("\n\n")

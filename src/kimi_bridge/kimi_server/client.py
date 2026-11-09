@@ -1040,16 +1040,17 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         prompts = await self._request_operation(
             "list_prompts", path_parameters={"session_id": session_id}
         )
-        queued = prompts["queued"]
-        for prompt in queued:
-            await self._abort_prompt_by_id(
-                session_id, str(prompt["prompt_id"])
-            )
         active = prompts["active"]
-        if active is not None:
-            await self._abort_prompt_by_id(
-                session_id, str(active["prompt_id"])
-            )
+        selected = [*prompts["queued"], *([active] if active is not None else [])]
+        for prompt in selected:
+            try:
+                await self._abort_prompt_by_id(
+                    session_id, str(prompt["prompt_id"])
+                )
+            except KimiServerAPIError as exc:
+                # A prompt can leave the queue after the snapshot; session work still needs stopping.
+                if exc.code != 40402:
+                    raise
         await self._request_operation(
             "abort_session",
             path_parameters={"session_id": session_id},
