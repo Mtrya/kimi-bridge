@@ -5250,7 +5250,8 @@ async def test_files_send_rejects_invalid_and_escaping_paths(tmp_path: Path) -> 
     assert replies[0] == "Usage: /files send <n|path>"
     assert any("file missing" in reply for reply in replies)
     assert any("directory" in reply for reply in replies)
-    assert sum("escapes workspace" in reply for reply in replies) == 2
+    assert len(replies) == 7
+    assert all("41304" not in reply for reply in replies)
 
 
 def test_expand_fullwidth_tilde_helper(

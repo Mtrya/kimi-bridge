@@ -45,6 +45,18 @@ class KimiServerAPIError(KimiServerOperationError):
         self.details = details
 
 
+class FileAccessError(KimiServerOperationError):
+    """A native file operation rejected a directory or a disallowed path."""
+
+    def __init__(self, reason: Literal["directory", "path_rejected"]) -> None:
+        self.reason = reason
+        super().__init__(
+            "The selected path is a directory."
+            if reason == "directory"
+            else "Kimi rejected the file path."
+        )
+
+
 class KimiServerProtocolError(KimiServerError):
     """The server violated or rejected the expected REST/WebSocket protocol."""
 

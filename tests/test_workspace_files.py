@@ -7,7 +7,7 @@ from urllib.parse import unquote
 import httpx
 import pytest
 
-from kimi_bridge.kimi_server import KimiServerClient, KimiServerAPIError
+from kimi_bridge.kimi_server import FileAccessError, KimiServerClient, KimiServerAPIError
 from kimi_bridge.router import ChatRouter
 from kimi_bridge.state import BridgeState, ConversationBinding, StateStore
 from test_router import FakeAdapter, FakeKimiClient, _message
@@ -107,7 +107,7 @@ class FileServer:
                     if value.is_relative_to(self.cwd)
                     else value.name,
                     "name": value.name,
-                    "kind": "directory" if value.is_dir() else "file",
+                    "kind": "symlink" if value.is_symlink() else "directory" if value.is_dir() else "file",
                     "size": value.stat().st_size,
                 }
                 for value in candidates
@@ -115,7 +115,7 @@ class FileServer:
             limit = body["limit"]
             return response({"items": items[:limit], "truncated": len(items) > limit})
         if resolved.is_dir():
-            return response(code=41301, message="path is a directory")
+            return response(code=40906, message="path is a directory")
         data = resolved.read_bytes()
         if path.endswith("fs:read"):
             binary = b"\x00" in data
@@ -200,13 +200,15 @@ async def test_file_choices_replace_and_numeric_space_paths_use_native_access(
     (workspace / "notes with spaces.txt").write_text("space fixture")
     try:
         await router.handle_inbound(adapter, _message("/files"))
-        await router.handle_inbound(adapter, _message("/files show 1"))
-        assert "numeric fixture" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files send 1"))
+        assert adapter.files[-1][2].data == b"numeric fixture"
         await router.handle_inbound(adapter, _message("/files search spaces"))
+        await router.handle_inbound(adapter, _message("/files show 1"))
+        assert "space fixture" in adapter.sent[-1][2]
         await router.handle_inbound(adapter, _message("/files send 1"))
         assert adapter.files[-1][2].data == b"space fixture"
-        await router.handle_inbound(adapter, _message("/files show ./123"))
-        assert "numeric fixture" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files send ./123"))
+        assert adapter.files[-1][2].data == b"numeric fixture"
         await router.handle_inbound(
             adapter, _message("/files send notes with spaces.txt")
         )
@@ -223,6 +225,101 @@ async def test_file_choices_replace_and_numeric_space_paths_use_native_access(
             request[2]["json"]["allow_external_symlinks"] is False
             for request in read_requests
         )
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("name", ["README", "Dockerfile", "source.PY", "notes.md"])
+async def test_known_text_formats_have_previews(tmp_path: Path, name: str):
+    workspace, _, _, adapter, router = _setup(tmp_path)
+    (workspace / name).write_text("preview fixture")
+    try:
+        await router.handle_inbound(adapter, _message(f"/files show {name}"))
+        assert "preview fixture" in adapter.sent[-1][2]
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("name", ["unknown.custom", "report.pdf", "archive.zip", "123"])
+async def test_other_formats_are_sendable_without_text_previews(tmp_path: Path, name: str):
+    workspace, _, _, adapter, router = _setup(tmp_path)
+    # Text bytes in an unlisted format must not bypass the preview allowlist.
+    content = b"send-only fixture"
+    (workspace / name).write_bytes(content)
+    path = f"./{name}"
+    try:
+        await router.handle_inbound(adapter, _message(f"/files show {path}"))
+        assert content.decode() not in adapter.sent[-1][2]
+        assert "/files send" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message(f"/files send {path}"))
+        assert adapter.files[-1][2].name == name
+        assert adapter.files[-1][2].data == content
+    finally:
+        await router.close()
+
+
+async def test_binary_bytes_are_not_previewed_as_an_allowed_text_format(tmp_path: Path):
+    workspace, _, _, adapter, router = _setup(tmp_path)
+    content = b"\x00binary fixture"
+    (workspace / "binary.txt").write_bytes(content)
+    try:
+        await router.handle_inbound(adapter, _message("/files show binary.txt"))
+        assert "binary fixture" not in adapter.sent[-1][2]
+        assert "/files send" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files send binary.txt"))
+        assert adapter.files[-1][2].data == content
+    finally:
+        await router.close()
+
+
+@pytest.mark.parametrize("verb", ["show", "send"])
+async def test_directories_require_listing_not_preview_or_delivery(tmp_path: Path, verb: str):
+    workspace, client, _, adapter, router = _setup(tmp_path)
+    (workspace / "folder").mkdir()
+    (workspace / "folder" / "file.txt").write_text("nested fixture")
+    try:
+        with pytest.raises(FileAccessError) as error:
+            await client.native.download_workspace_file("session-fixture", "folder")
+        assert error.value.reason == "directory"
+        await router.handle_inbound(adapter, _message(f"/files {verb} folder"))
+        assert adapter.files == []
+        assert "/files <directory>" in adapter.sent[-1][2]
+        assert "40906" not in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files folder"))
+        assert "folder/file.txt" in adapter.sent[-1][2]
+    finally:
+        await router.close()
+
+
+async def test_symlinks_are_labelled_and_native_escape_refusals_are_explained(tmp_path: Path):
+    workspace, client, _, adapter, router = _setup(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "file.txt").write_text("outside fixture")
+    (workspace / "inside.txt").write_text("inside fixture")
+    try:
+        (workspace / "escape").symlink_to(outside, target_is_directory=True)
+        (workspace / "inside-link.txt").symlink_to(workspace / "inside.txt")
+    except OSError:
+        await router.close()
+        pytest.skip("symlinks are unavailable")
+    try:
+        await router.handle_inbound(adapter, _message("/files"))
+        assert "escape [symlink]" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files show inside-link.txt"))
+        assert "inside fixture" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files send inside-link.txt"))
+        assert adapter.files[-1][2].data == b"inside fixture"
+        sent = len(adapter.files)
+        with pytest.raises(FileAccessError) as error:
+            await client.native.preview_workspace_file("session-fixture", "escape/file.txt")
+        assert error.value.reason == "path_rejected"
+        for command in ("/files escape", "/files show escape/file.txt", "/files send escape/file.txt"):
+            await router.handle_inbound(adapter, _message(command))
+            assert "outside fixture" not in adapter.sent[-1][2]
+            assert "41304" not in adapter.sent[-1][2]
+            assert "request_id" not in adapter.sent[-1][2]
+        assert len(adapter.files) == sent
     finally:
         await router.close()
 

@@ -5,8 +5,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from ..kimi_server import RecordedTurn, WorkspaceFile
+from ..kimi_server import FileAccessError, RecordedTurn, WorkspaceFile
 from ..platforms.base import ConversationRef, OutboundFile, PlatformAdapter
+
+
+_TEXT_PREVIEW_EXTENSIONS = frozenset({
+    "txt", "md", "rst", "log", "csv", "tsv", "json", "jsonl", "yaml", "yml",
+    "toml", "ini", "cfg", "conf", "xml", "html", "htm", "css", "scss",
+    "py", "pyi", "js", "jsx", "ts", "tsx", "sh", "bash", "zsh", "ps1", "sql",
+    "c", "h", "cc", "cpp", "hpp", "go", "rs", "java", "rb", "php", "lua", "r",
+})
+_TEXT_PREVIEW_NAMES = frozenset({
+    "readme", "license", "copying", "notice", "dockerfile", "makefile", "justfile",
+    ".gitignore", ".gitattributes", ".dockerignore", ".editorconfig", ".env",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +69,23 @@ class _WorkspaceMixin:
         await self._send_chunked(adapter, conversation, "\n".join(lines))
 
     async def _handle_files(
+        self,
+        conversation_key: str,
+        adapter: PlatformAdapter,
+        conversation: ConversationRef,
+        argument: str,
+    ) -> None:
+        try:
+            await self._dispatch_files(conversation_key, adapter, conversation, argument)
+        except FileAccessError as exc:
+            text = (
+                "This path is a directory. Use /files <directory> to list it; show and send require a file."
+                if exc.reason == "directory"
+                else "Kimi rejected this path. Use a direct path within the session working directory or shared workspace folders; symlinks must stay within those folders."
+            )
+            await self._send_chunked(adapter, conversation, text)
+
+    async def _dispatch_files(
         self,
         conversation_key: str,
         adapter: PlatformAdapter,
@@ -151,6 +180,8 @@ class _WorkspaceMixin:
                 )
                 if preview.binary:
                     text = f"{selected} · binary · {preview.size} bytes\nUse /files send to download it."
+                elif not _supports_text_preview(preview.path):
+                    text = f"{selected} · {preview.size} bytes\nNo text preview for this file format. Use /files send <n|path> to download it."
                 else:
                     body = preview.text or ""
                     text = f"{selected} · {preview.size} bytes\n{_code_block(body)}"
@@ -198,12 +229,19 @@ class _WorkspaceMixin:
 def _file_listing_text(entries: tuple[WorkspaceFile, ...], truncated: bool) -> str:
     lines = [f"Files · {len(entries)}"]
     lines.extend(
-        f"{number}. {entry.path}{'/' if entry.kind == 'directory' else ''}"
+        f"{number}. {entry.path}{'/' if entry.kind == 'directory' else ' [symlink]' if entry.kind == 'symlink' else ''}"
         for number, entry in enumerate(entries, 1)
     )
     if truncated:
         lines.append("Listing truncated. Choose a narrower directory or search.")
     return "\n".join(lines)
+
+
+def _supports_text_preview(path: str) -> bool:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in _TEXT_PREVIEW_NAMES or (
+        "." in name and name.rsplit(".", 1)[-1] in _TEXT_PREVIEW_EXTENSIONS
+    )
 
 
 def _code_block(text: str) -> str:

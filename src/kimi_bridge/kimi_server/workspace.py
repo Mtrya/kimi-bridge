@@ -13,9 +13,11 @@ from .types import (
     PlanDocument,
     FileContext,
     FileDownload,
+    FileAccessError,
     FileListing,
     FilePreview,
     KimiServerOperationError,
+    KimiServerAPIError,
     KimiServerProtocolError,
     WorkspaceFile,
     WorkspaceInfo,
@@ -27,6 +29,16 @@ def _workspace(value: dict[str, Any]) -> WorkspaceInfo:
 
 
 class WorkspaceOperations:
+    async def _file_request(self, operation: str, **kwargs: Any) -> Any:
+        try:
+            return await self._request_operation(operation, **kwargs)
+        except KimiServerAPIError as exc:
+            if exc.code == 40906:
+                raise FileAccessError("directory") from exc
+            if exc.code == 41304:
+                raise FileAccessError("path_rejected") from exc
+            raise
+
     async def list_environments(self, session_id: str) -> tuple[EnvironmentInfo, ...]:
         data = await self._request_operation(
             "session_environments", path_parameters={"session_id": session_id}
@@ -144,7 +156,7 @@ class WorkspaceOperations:
                 "allow_external_symlinks": False,
             }
         )
-        data = await self._request_operation(
+        data = await self._file_request(
             "search_files" if query is not None else "list_files",
             path_parameters={"session_id": session_id},
             json_body=body,
@@ -163,7 +175,7 @@ class WorkspaceOperations:
 
     async def preview_workspace_file(self, session_id: str, path: str) -> FilePreview:
         context = await self.get_file_context(session_id)
-        data = await self._request_operation(
+        data = await self._file_request(
             "read_file",
             path_parameters={"session_id": session_id},
             json_body={
@@ -186,7 +198,7 @@ class WorkspaceOperations:
     async def download_workspace_file(self, session_id: str, path: str) -> FileDownload:
         context = await self.get_file_context(session_id)
         path = _local_input(context, path)
-        response = await self._request_operation(
+        response = await self._file_request(
             "download_file",
             path_parameters={"session_id": session_id, "path": path},
             raw_response=True,
