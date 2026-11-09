@@ -8,7 +8,12 @@ from typing import Any
 
 from ..kimi_server import ActivityUpdate, KimiServerOperationError
 from ..platforms.base import ActorRef, ConversationRef, PlatformAdapter
-from .formatting import _persisted_assistant_text
+from .formatting import (
+    _format_goal_notice,
+    _format_observation_notice,
+    _format_task_notice,
+    _persisted_assistant_text,
+)
 from .models import _ActiveStream
 
 
@@ -34,7 +39,8 @@ class _ObservationMixin:
             session = await self._client.get_session(active.session_id)
             title = str(session.get("title") or active.session_id)
             await active.adapter.send_notice_text(
-                active.conversation, f"[{title} · {active.session_id}] {text}"
+                active.conversation,
+                _format_observation_notice(title, active.session_id, text),
             )
         except Exception:
             LOGGER.exception(
@@ -55,7 +61,7 @@ class _ObservationMixin:
                 and current.goal.status != previous.goal.status
             ):
                 await self._notice_once(
-                    active, f"Goal {current.goal.status}: {current.goal.objective}"
+                    active, _format_goal_notice(current.goal)
                 )
             prior = {(task.owner_agent_id, task.id): task for task in previous.tasks}
             for task in current.tasks:
@@ -67,8 +73,7 @@ class _ObservationMixin:
                     and (old.detached or old.kind == "subagent")
                 ):
                     await self._notice_once(
-                        active,
-                        f"{task.kind} {task.status}: {task.description or task.id}",
+                        active, _format_task_notice(task)
                     )
         # Empty snapshots never imply a missed task outcome.
         if (

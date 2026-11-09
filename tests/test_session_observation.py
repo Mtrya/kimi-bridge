@@ -100,10 +100,12 @@ async def test_goal_and_task_notices_survive_switch_without_changing_binding(
         client.emit("other", _event("turn.ended", turnId=1, reason="completed"))
         await _wait_for(lambda: any("B answer" in text for _, _, text in adapter.sent))
         assert len(adapter.notice_texts) == 2
-        assert all(
-            "session-control" in text and "Control session" in text
-            for _, _, text in adapter.notice_texts
-        )
+        for _, _, text in adapter.notice_texts:
+            heading, body, action = text.split("\n\n")
+            assert "Control session" in heading
+            assert heading.startswith("**") and heading.endswith("**")
+            assert "\n" in body
+            assert "/switch session-control" in action
         assert store.load().bindings["feishu:cli_bot:ou_user"].session_id == "other"
     finally:
         await router.close()

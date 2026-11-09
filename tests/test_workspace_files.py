@@ -286,7 +286,8 @@ async def test_directories_require_listing_not_preview_or_delivery(tmp_path: Pat
         assert "/files <directory>" in adapter.sent[-1][2]
         assert "40906" not in adapter.sent[-1][2]
         await router.handle_inbound(adapter, _message("/files folder"))
-        assert "folder/file.txt" in adapter.sent[-1][2]
+        await router.handle_inbound(adapter, _message("/files show 1"))
+        assert "nested fixture" in adapter.sent[-1][2]
     finally:
         await router.close()
 

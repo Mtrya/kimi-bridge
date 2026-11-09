@@ -7,6 +7,7 @@ from typing import Any
 
 from ..kimi_server import (
     FileContext,
+    GoalActivity,
     GoalInfo,
     KimiServerProtocolError,
     ModelInfo,
@@ -66,6 +67,21 @@ def _format_session_notice(notice: SessionNotice) -> str:
     if notice.kind == "error" and notice.retryable:
         lines.append("You can retry this request.")
     return "\n\n".join(lines)
+
+
+def _format_observation_notice(title: str, session_id: str, text: str) -> str:
+    return f"**{_title_from_text(title)}**\n\n{text}\n\n{_inline_code(f'/switch {session_id}')}"
+
+
+def _format_goal_notice(goal: GoalActivity) -> str:
+    heading = "✓ **Goal completed**" if goal.status == "complete" else "○ **Goal blocked**"
+    return f"{heading}\n{_truncate(_one_line(goal.objective), 180)}"
+
+
+def _format_task_notice(task: TaskInfo) -> str:
+    _, icon, label = _TASK_STATUS_DISPLAY[task.status]
+    summary = _task_summary(task) if task.description else _inline_code(task.id)
+    return f"{icon} **{label}** · {task.kind}\n{summary}"
 
 
 def _conversation_key(message: InboundMessage | InboundInteraction) -> str:

@@ -193,7 +193,7 @@ class _InteractionMixin:
                 LOGGER.exception("failed to retire off-session controls")
             if pending.request_id not in active.switch_notices:
                 active.switch_notices.add(pending.request_id)
-                await self._notice_once(active, "Input needed. Switch back to this session to answer.")
+                await self._notice_once(active, "**Input needed**\nSwitch back to this session to answer.")
 
     async def _cancel_active_work(
         self,
@@ -386,7 +386,7 @@ class _InteractionMixin:
             if not active.foreground:
                 if request_id not in active.switch_notices:
                     active.switch_notices.add(request_id)
-                    await self._notice_once(active, "Input needed. Switch back to this session to answer.")
+                    await self._notice_once(active, "**Input needed**\nSwitch back to this session to answer.")
                 return
             if active.conversation_key in self._pending or any(
                 pending.session_id == active.session_id for pending in self._pending.values()
