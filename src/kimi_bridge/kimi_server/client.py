@@ -737,7 +737,9 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                                 "turnId": terminal["ordinal"],
                                 "reason": reason,
                             },
-                            "snapshot": event["snapshot"],
+                            "snapshot": await self.get_snapshot(
+                                session_id, agent_id=agent_id
+                            ),
                         }
                         return
                 ended = event.get("payload", {}).get("type") == "turn.ended"
@@ -1626,68 +1628,69 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not agent_ids:
             raise ValueError("a conversation subscription requires at least one agent")
-        request_id = uuid.uuid4().hex
-        await self._send_json(
-            ws,
-            {
-                "type": "subscribe",
-                "request_id": request_id,
-                "session_id": session_id,
-                "agent_ids": agent_ids,
-            },
-        )
-        response: dict[str, Any] | None = None
-        pending_frames: list[dict[str, Any]] = []
-        remaining = set(agent_ids)
-        while remaining:
-            frame = await self._receive_json(ws)
-            frame_type = frame.get("type")
-            if frame_type == "ping":
-                await self._send_pong(ws)
-                continue
-            if frame_type == "response":
-                if frame.get("request_id") != request_id:
-                    raise _WebSocketResponseMismatch(
-                        f"expected response for request {request_id!r}, got "
-                        f"{frame.get('request_id')!r}"
-                    )
-                if frame.get("code") != 0:
+        async with asyncio.timeout(self._timeout):
+            request_id = uuid.uuid4().hex
+            await self._send_json(
+                ws,
+                {
+                    "type": "subscribe",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "agent_ids": agent_ids,
+                },
+            )
+            response: dict[str, Any] | None = None
+            pending_frames: list[dict[str, Any]] = []
+            remaining = set(agent_ids)
+            while remaining:
+                frame = await self._receive_json(ws)
+                frame_type = frame.get("type")
+                if frame_type == "ping":
+                    await self._send_pong(ws)
+                    continue
+                if frame_type == "response":
+                    if frame.get("request_id") != request_id:
+                        raise _WebSocketResponseMismatch(
+                            f"expected response for request {request_id!r}, got "
+                            f"{frame.get('request_id')!r}"
+                        )
+                    if frame.get("code") != 0:
+                        raise KimiServerAPIError(
+                            frame.get("code", -1),
+                            str(frame.get("msg") or "subscription failed"),
+                            request_id=request_id,
+                        )
+                    response = frame
+                    continue
+                if response is None:
+                    if (
+                        frame.get("agent_id") in remaining
+                        and frame_type
+                        in {
+                            "turns",
+                            "turns.failed",
+                            "task.list",
+                            "agent",
+                            "usage",
+                            "goal",
+                            "todo",
+                        }
+                    ):
+                        raise _WebSocketResponseMismatch(
+                            "the subscription response did not arrive first"
+                        )
+                    pending_frames.append(frame)
+                    continue
+                pending_frames.append(frame)
+                if frame_type == "turns.failed" and frame.get("agent_id") in remaining:
                     raise KimiServerAPIError(
                         frame.get("code", -1),
-                        str(frame.get("msg") or "subscription failed"),
-                        request_id=request_id,
+                        str(frame.get("msg") or "conversation load failed"),
                     )
-                response = frame
-                continue
-            if response is None:
-                if (
-                    frame.get("agent_id") in remaining
-                    and frame_type
-                    in {
-                        "turns",
-                        "turns.failed",
-                        "task.list",
-                        "agent",
-                        "usage",
-                        "goal",
-                        "todo",
-                    }
-                ):
-                    raise _WebSocketResponseMismatch(
-                        "the subscription response did not arrive first"
-                    )
-                pending_frames.append(frame)
-                continue
-            pending_frames.append(frame)
-            if frame_type == "turns.failed" and frame.get("agent_id") in remaining:
-                raise KimiServerAPIError(
-                    frame.get("code", -1),
-                    str(frame.get("msg") or "conversation load failed"),
-                )
-            if frame_type == "turns" and frame.get("agent_id") in remaining:
-                remaining.remove(frame["agent_id"])
-        assert response is not None
-        return response, pending_frames
+                if frame_type == "turns" and frame.get("agent_id") in remaining:
+                    remaining.remove(frame["agent_id"])
+            assert response is not None
+            return response, pending_frames
 
     @staticmethod
     async def _receive_json(ws: Any) -> dict[str, Any]:

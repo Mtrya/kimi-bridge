@@ -915,6 +915,7 @@ async def test_native_side_question_recovers_terminal_page_without_resubmitting(
         _envelope({"prompt_id": "side-prompt", "status": "running"}),
         _envelope({"turns": [running], "has_more": False}),
         _envelope({"turns": [ended], "has_more": False}),
+        _envelope({"turns": [ended], "has_more": False}),
         _envelope({"aborted": False}),
     ])
     async with KimiServerClient(

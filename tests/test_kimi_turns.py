@@ -297,6 +297,8 @@ def _agent_frame(agent_id: str) -> list[dict[str, Any]]:
 async def _client(
     sockets: Iterable[TurnsSocket],
     responses: Iterable[dict[str, Any]] | Callable[[httpx.Request], dict[str, Any]] = (),
+    *,
+    timeout: float = 15.0,
 ) -> tuple[KimiServerClient, NativeHttp, TurnsConnect]:
     http = NativeHttp(responses)
     connect = TurnsConnect(sockets)
@@ -306,6 +308,7 @@ async def _client(
         http_client=http.client,
         ws_connect=connect,
         reconnect_initial_backoff=0,
+        timeout=timeout,
     )
     assert await client.check_server_version() == "2.6.1"
     return client, http, connect
@@ -585,6 +588,11 @@ def test_projection_maps_native_compaction_and_notices() -> None:
         tokens_before=100,
         tokens_after=40,
     )
+    running = {**compaction, "status": "running"}
+    running.pop("outcome")
+    assert projection.apply_frame(
+        _frame("item.started", turn_id="compaction-turn", item=running)
+    ) == []
     assert _payloads(
         projection.apply_frame(_frame("item.ended", turn_id="compaction-turn", item=compaction))
     ) == [
@@ -757,6 +765,23 @@ async def test_native_subscription_failures_are_operation_errors_without_retry_s
         await http.aclose()
     assert len(connect.calls) == 1
     assert len(socket.sent) == 1
+
+
+async def test_subscription_page_timeout_reconnects() -> None:
+    first = TurnsSocket(pages={"main": []}, events=[{"type": "ping"}])
+    second = TurnsSocket()
+    client, http, connect = await _client([first, second], timeout=0.01)
+    stream = client.subscribe_events("session-1")
+    try:
+        assert isinstance(
+            await asyncio.wait_for(anext(stream), 1), InteractionSnapshot
+        )
+        assert len(connect.calls) == 2
+        assert [frame["type"] for frame in first.sent] == ["subscribe", "pong"]
+    finally:
+        await stream.aclose()
+        await client.aclose()
+        await http.aclose()
 
 
 async def test_manual_compaction_lifecycle_reaches_semantic_events() -> None:
@@ -1037,23 +1062,27 @@ async def test_inspect_activity_discovers_native_child_pages() -> None:
 async def test_side_question_recovers_terminal_turn_from_reconnect_page() -> None:
     running = _turn(
         "side-turn",
-        items=[_user(prompt_ids=["side-prompt"]), _item("side-answer", text="Side answer")],
+        items=[_user(prompt_ids=["side-prompt"]), _item("side-answer", text="Partial")],
     )
     ended = _turn(
         "side-turn",
         status="ended",
         outcome="completed",
-        items=[_user(prompt_ids=["side-prompt"]), _item("side-answer", text="Side answer")],
+        items=[
+            _user(prompt_ids=["side-prompt"]),
+            _item("side-answer", text="Complete side answer", status="ended"),
+        ],
     )
     first = TurnsSocket(
         pages={"side": [_page([running], agent_id="side")]},
         disconnect_after_events=True,
     )
-    second = TurnsSocket(pages={"side": [_page([ended], agent_id="side")]})
+    second = TurnsSocket(pages={"side": [_page([running], agent_id="side")]})
     responses = [
         {"agent_id": "side"},
         {"prompt_id": "side-prompt", "status": "running"},
         {"turns": [running], "has_more": False},
+        {"turns": [ended], "has_more": False},
         {"turns": [ended], "has_more": False},
         {"aborted": False},
     ]
@@ -1067,7 +1096,7 @@ async def test_side_question_recovers_terminal_turn_from_reconnect_page() -> Non
             "turnId": 1,
             "reason": "completed",
         }
-        assert _persisted_assistant_text(terminal["snapshot"]) == "Side answer"
+        assert _persisted_assistant_text(terminal["snapshot"]) == "Complete side answer"
     finally:
         await client.aclose()
         await http.aclose()

@@ -305,7 +305,11 @@ class ConversationProjection:
     ) -> list[dict[str, Any]]:
         if item.get("type") != "system" or item.get("kind") != "compaction":
             return []
-        if previous is not None:
+        if (
+            previous is not None
+            and previous.get("status") == "ended"
+            and previous.get("outcome") == "completed"
+        ):
             return []
         if item.get("status") != "ended" or item.get("outcome") != "completed":
             return []
