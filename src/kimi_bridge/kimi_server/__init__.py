@@ -16,7 +16,7 @@ from .contract import (
     kimi_semantic_contract,
 )
 from .supervisor import KimiServerSupervisor, parse_server_startup_line
-from .events import session_notice_from_event
+from .notices import session_notice_from_event
 from .probe import probe_kimi_compatibility
 from .types import (
     AccountQuota,

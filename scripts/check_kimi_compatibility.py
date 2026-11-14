@@ -717,6 +717,7 @@ async def check_live(
                 platform=report_platform,
             )
     reported_version = version or "latest"
+    captured_artifacts: dict[str, ArtifactMetadata] = {}
     try:
         with tempfile.TemporaryDirectory(
             prefix="kimi-bridge-compatibility-"
@@ -737,12 +738,21 @@ async def check_live(
                 startup_timeout=startup_timeout,
                 shutdown_timeout=min(5.0, max(0.1, startup_timeout)),
             )
+            def capture_document(name: str, document: dict[str, Any]) -> None:
+                metadata = _write_probe_artifact(
+                    f"{name}.json", document, artifact_directory
+                )
+                if metadata is not None:
+                    captured_artifacts[metadata.name] = metadata
+
             async with supervisor:
                 product = supervisor.executable_identity.product.value
                 if version is None:
                     reported_version = supervisor.executable_identity.version
                 probe = await probe_kimi_compatibility(
-                    supervisor, root / "workspace"
+                    supervisor,
+                    root / "workspace",
+                    on_document=capture_document,
                 )
             artifacts = _write_probe_artifacts(probe, artifact_directory)
             checks = list(probe.checks)
@@ -795,6 +805,7 @@ async def check_live(
                 "check_live",
             ),
         ),
+        artifacts=tuple(captured_artifacts.values()),
         platform=report_platform,
     )
 
@@ -1536,23 +1547,31 @@ def _write_probe_artifacts(
 ) -> tuple[ArtifactMetadata, ...]:
     if directory is None:
         return ()
-    directory.mkdir(parents=True, exist_ok=True)
     metadata = []
     for name, document in (
         ("openapi.json", probe.openapi),
         ("asyncapi.json", probe.asyncapi),
     ):
-        content = (json.dumps(document, sort_keys=True) + "\n").encode()
-        if len(content) > MAX_ARTIFACT_BYTES:
-            raise CompatibilityCheckError(
-                "artifact", f"{name} exceeds the {MAX_ARTIFACT_BYTES}-byte limit"
-            )
-        path = directory / name
-        path.write_bytes(content)
-        metadata.append(
-            ArtifactMetadata(name, len(content), hashlib.sha256(content).hexdigest())
-        )
+        item = _write_probe_artifact(name, document, directory)
+        assert item is not None
+        metadata.append(item)
     return tuple(metadata)
+
+
+def _write_probe_artifact(
+    name: str, document: dict[str, Any], directory: Path | None
+) -> ArtifactMetadata | None:
+    if directory is None:
+        return None
+    directory.mkdir(parents=True, exist_ok=True)
+    content = (json.dumps(document, sort_keys=True) + "\n").encode()
+    if len(content) > MAX_ARTIFACT_BYTES:
+        raise CompatibilityCheckError(
+            "artifact", f"{name} exceeds the {MAX_ARTIFACT_BYTES}-byte limit"
+        )
+    path = directory / name
+    path.write_bytes(content)
+    return ArtifactMetadata(name, len(content), hashlib.sha256(content).hexdigest())
 
 
 def _read_fixture(directory: Path, name: str) -> str:

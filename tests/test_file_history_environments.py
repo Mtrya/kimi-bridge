@@ -19,6 +19,7 @@ from kimi_bridge.platforms.base import InboundFile, InboundImage
 from kimi_bridge.router.workspace import _parse_new_options
 from test_kimi_server import FakeHttpClient, _envelope
 from test_kimi_server import _profile_payload
+from test_kimi_turns import _turn
 from test_router import (
     FakeAdapter,
     FakeKimiClient,
@@ -41,6 +42,32 @@ def _change(status="modified", **fields):
     }
 
 
+def _plan_response(plan: str, path: str):
+    return _envelope(
+        {
+            "turns": [
+                _turn(
+                    "plan-turn",
+                    items=[
+                        {
+                            "type": "tool_call",
+                            "item_id": "plan-tool",
+                            "status": "running",
+                            "created_at": "now",
+                            "display": {
+                                "kind": "plan_review",
+                                "plan": plan,
+                                "path": path,
+                            },
+                        }
+                    ],
+                )
+            ],
+            "has_more": False,
+        }
+    )
+
+
 def _context_responses(cwd="/target"):
     return [
         _envelope({"metadata": {"cwd": "/host"}}),
@@ -54,25 +81,33 @@ def _context_responses(cwd="/target"):
 
 
 async def test_latest_changes_select_finished_turn_with_assistant_steps():
-    transcript = {
-        "items": [
-            {"kind": "turn", "ordinal": 2, "state": "completed", "steps": [{}]},
-            {"kind": "turn", "ordinal": 3, "state": "failed", "steps": [{}]},
-            {"kind": "turn", "ordinal": 4, "state": "cancelled", "steps": []},
-            {"kind": "turn", "ordinal": 5, "state": "running", "steps": [{}]},
-        ]
-    }
-    http = FakeHttpClient(
-        [_envelope({"recorded": True, "changes": [_change()]})],
-        transcript_snapshots=[transcript],
-    )
+    turns = [
+        _turn(
+            f"turn-{ordinal}",
+            ordinal=ordinal,
+            status="ended" if outcome else "running",
+            outcome=outcome,
+            turn_number=number,
+            steps=[{}] if steps else [],
+        )
+        for ordinal, outcome, number, steps in (
+            (2, "completed", 12, True),
+            (3, "failed", 13, True),
+            (4, "interrupted", 14, False),
+            (5, None, 15, True),
+        )
+    ]
+    http = FakeHttpClient([
+        _envelope({"turns": turns, "has_more": False}),
+        _envelope({"recorded": True, "changes": [_change()]}),
+    ])
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
     ) as client:
         changes = await client.get_file_changes("session-1")
-    assert changes.turn == RecordedTurn(3)
+    assert changes.turn == RecordedTurn(13)
     assert changes.changes[0].additions == 1
-    assert http.requests[1][2]["params"] == {"turn_id": 3}
+    assert http.requests[1][2]["params"] == {"turn_number": 13}
 
 
 @pytest.mark.parametrize(
@@ -116,7 +151,7 @@ async def test_recorded_diff_uses_actual_start_end_content_without_current_files
         if request[1].endswith("/file-history/content")
     ]
     assert [request[2]["params"] for request in content_requests] == [
-        {"turn_id": 7, "path": "fixture.txt", "phase": phase}
+        {"turn_number": 7, "path": "fixture.txt", "phase": phase}
         for phase in ("start", "end")
     ]
     assert not any("/fs:" in request[1] for request in http.requests)
@@ -397,31 +432,14 @@ async def test_plan_document_uses_native_agent_projection_and_never_wire_host_pa
         tool_call_id="plan-tool",
         input_display={"path": str(host)},
     )
-    http = FakeHttpClient(
-        [
-            _envelope(
-                {
-                    "plans": [
-                        {"tool_call_id": "unrelated", "plan": "WRONG"},
-                        {
-                            "tool_call_id": "plan-tool",
-                            "plan": "TARGET PLAN",
-                            "path": str(host),
-                        },
-                    ]
-                }
-            )
-        ]
-    )
+    http = FakeHttpClient([_plan_response("TARGET PLAN", str(host))])
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
     ) as client:
         document = await client.get_plan_document(request)
     assert document.text == "TARGET PLAN" and document.name == "plan.md"
-    assert http.requests[0][2]["params"] == {
-        "agent_id": "child",
-        "tool_call_id": "plan-tool",
-    }
+    assert http.requests[0][1].endswith("/sessions/session-1/agents/child/turns")
+    assert http.requests[0][2]["params"] == {"page_size": 200}
     assert "HOST SECRET" not in document.text
 
 
@@ -503,26 +521,29 @@ async def test_changes_selection_keeps_turn_then_is_replaced_by_file_list(
             path = httpx.URL(url).path
             request = httpx.Request(method, url)
             data = None
-            if path.endswith("/transcript"):
+            if path.endswith("/turns"):
                 data = {
-                    "items": [
-                        {
-                            "kind": "turn",
-                            "ordinal": self.latest,
-                            "state": "completed",
-                            "steps": [{}],
-                        }
-                    ]
+                    "turns": [
+                        _turn(
+                            f"turn-{self.latest}",
+                            ordinal=self.latest,
+                            status="ended",
+                            outcome="completed",
+                            turn_number=self.latest,
+                            steps=[{}],
+                        )
+                    ],
+                    "has_more": False,
                 }
             elif path.endswith("/file-history/changes"):
                 data = {
                     "recorded": True,
                     "changes": [_change("deleted", path="deleted.txt")]
-                    if kwargs["params"]["turn_id"] == 7
+                    if kwargs["params"]["turn_number"] == 7
                     else [],
                 }
             elif path.endswith("/file-history/content"):
-                self.content_turns.append(kwargs["params"]["turn_id"])
+                self.content_turns.append(kwargs["params"]["turn_number"])
                 data = {
                     "content": {"version": 1, "content": "deleted fixture\n"}
                     if kwargs["params"]["phase"] == "start"
@@ -638,21 +659,9 @@ async def test_decoded_plan_approval_uses_native_projection_in_chat(tmp_path):
     }
     frame["request"]["tool_name"] = "ExitPlanMode"
     request = _interaction_update_from_wire(frame).request
-    http = FakeHttpClient(
-        [
-            _envelope(
-                {
-                    "plans": [
-                        {
-                            "tool_call_id": "plan-tool",
-                            "plan": "Projected plan fixture",
-                            "path": "/target/plan.md",
-                        }
-                    ]
-                }
-            )
-        ]
-    )
+    http = FakeHttpClient([
+        _plan_response("Projected plan fixture", "/target/plan.md")
+    ])
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
     ) as native:
@@ -672,10 +681,10 @@ async def test_decoded_plan_approval_uses_native_projection_in_chat(tmp_path):
             await router.handle_inbound(adapter, _message("/status"))
             await _wait_for(lambda: bool(adapter.interactions))
             assert adapter.interactions[0][2].plan_preview == "Projected plan fixture"
-            assert http.requests[0][2]["params"] == {
-                "agent_id": "child",
-                "tool_call_id": "plan-tool",
-            }
+            assert http.requests[0][1].endswith(
+                "/sessions/session-control/agents/child/turns"
+            )
+            assert http.requests[0][2]["params"] == {"page_size": 200}
         finally:
             await router.close()
 

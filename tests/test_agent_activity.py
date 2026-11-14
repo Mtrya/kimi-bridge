@@ -11,6 +11,7 @@ from kimi_bridge.kimi_server import (
     TodoItem,
 )
 from kimi_bridge.kimi_server.activity import ActivityProjection
+from test_kimi_turns import _item, _page, _turn
 from test_kimi_server import (
     FakeHttpClient,
     FakeWebSocket,
@@ -27,6 +28,7 @@ def _agent(identifier: str, **fields):
         "session_id": "session-1",
         "agent_id": identifier,
         "status": "running",
+        "compacting": False,
         **fields,
     }
 
@@ -79,6 +81,89 @@ def _nested_frames():
     ]
 
 
+def _activity_socket(socket_type=FakeWebSocket, *, terminal=False, **kwargs):
+    main_task = {
+        **_task_payload("child-task"),
+        "kind": "subagent",
+        "child_agent_id": "child",
+        "description": "Inspect source",
+        "detached": False,
+    }
+    child_task = {
+        **_task_payload("nested-task"),
+        "kind": "subagent",
+        "child_agent_id": "grandchild",
+        "description": "Inspect tests",
+        "detached": False,
+    }
+    shell_task = _task_payload(
+        "shell-task",
+        status="ended" if terminal else "running",
+        outcome="completed" if terminal else None,
+    )
+    activity = {
+        "main": [_agent("main", model="kimi-code/k3"), _tasks("main", main_task)],
+        "child": [
+            _agent("child", model="small"),
+            _tasks("child", child_task),
+            {
+                "type": "todo",
+                "session_id": "session-1",
+                "agent_id": "child",
+                "items": [
+                    {"title": "Read", "status": "done"},
+                    {"title": "Change", "status": "in_progress"},
+                    {"title": "Check", "status": "pending"},
+                ],
+            },
+        ],
+        "grandchild": [
+            _agent("grandchild"),
+            _tasks("grandchild", {**shell_task, "detached": False}),
+        ],
+    }
+    if terminal:
+        activity["grandchild"] = [
+            _agent("grandchild"),
+            {
+                "type": "task",
+                "session_id": "session-1",
+                "agent_id": "grandchild",
+                **shell_task,
+            },
+            {
+                "type": "todo",
+                "session_id": "session-1",
+                "agent_id": "grandchild",
+                "items": [],
+            },
+        ]
+
+    def page(agent_id, parent=None):
+        items = []
+        if parent is not None:
+            items.append(
+                _item(
+                    f"agent-tool-{agent_id}",
+                    "tool_call",
+                    name="Agent",
+                    agent_refs=[{"agent_id": parent, "role": "child"}],
+                )
+            )
+        return _page([_turn(f"turn-{agent_id}", items=items)], agent_id=agent_id)
+
+    return socket_type(
+        agent_burst=False,
+        activity_frames=activity,
+        pages={
+            "main": [page("main", "child")],
+            "child": [page("child", "grandchild")],
+            "grandchild": [page("grandchild")],
+        },
+        **kwargs,
+    )
+
+
 def test_activity_projects_nested_ownership_and_replacement_snapshots():
     projection = ActivityProjection("session-1")
     for frame in _nested_frames():
@@ -119,14 +204,9 @@ def test_activity_projects_nested_ownership_and_replacement_snapshots():
     ],
 )
 async def test_native_task_controls_use_discovered_owner(kind, task_id, owner):
-    listing = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []},
-        events=_nested_frames(),
-        events_before_ack=True,
-    )
+    listing = _activity_socket()
     task = {**_task_payload(task_id), "detached": True}
     command = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []},
         task_responses=[{"type": "response", "code": 0, "task": task}],
     )
     async with KimiServerClient(
@@ -138,11 +218,7 @@ async def test_native_task_controls_use_discovered_owner(kind, task_id, owner):
         await client.inspect_activity("session-1")
         # Reuse the projected activity to isolate the subsequent native command.
         if kind == "task.background":
-            listing2 = FakeWebSocket(
-                subscribe_payload={"accepted": ["session-1"], "not_found": []},
-                events=_nested_frames(),
-                events_before_ack=True,
-            )
+            listing2 = _activity_socket()
             client._ws_connect = FakeWebSocketConnect([listing2, command])
             assert (
                 await client.background_agent("session-1", "grandchild")
@@ -160,9 +236,11 @@ async def test_native_task_controls_use_discovered_owner(kind, task_id, owner):
         owner,
         task_id,
     )
-    assert next(frame for frame in listing.sent if frame["type"] == "subscribe_v2")[
-        "payload"
-    ]["transcript"] == {"*": "turn"}
+    assert [
+        frame["agent_ids"]
+        for frame in listing.sent
+        if frame["type"] == "subscribe"
+    ] == [["main"], ["child"], ["grandchild"]]
 
 
 @pytest.mark.parametrize(
@@ -181,11 +259,8 @@ async def test_background_outcomes_follow_native_acknowledgement(
     after = {**before, "detached": True, "status": status}
     if status == "ended":
         after["outcome"] = "completed"
-    listing = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []}, tasks=[before]
-    )
+    listing = FakeWebSocket(tasks=[before])
     command = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []},
         task_responses=[{"type": "response", "code": code, "task": after}],
     )
     async with KimiServerClient(
@@ -294,15 +369,10 @@ def test_terminal_activity_is_visible_once_then_retired():
 
 async def test_task_stop_refreshes_unknown_child_owner_after_native_not_found():
     missing = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"]},
         task_responses=[{"type": "response", "code": 40406, "msg": "missing"}],
     )
-    listing = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"]},
-        events=_nested_frames(),
-        events_before_ack=True,
-    )
-    stopped = FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})
+    listing = _activity_socket()
+    stopped = FakeWebSocket()
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
@@ -325,25 +395,11 @@ async def test_task_stop_refreshes_unknown_child_owner_after_native_not_found():
 
 
 @pytest.mark.parametrize("discovery", ["inspection", "subscription"])
-async def test_handshake_remembers_terminal_nested_owner_before_projection_prunes(
+async def test_native_discovery_remembers_terminal_nested_owner_before_projection_prunes(
     discovery,
 ):
-    frames = [
-        *_nested_frames(),
-        {
-            "type": "task",
-            "session_id": "session-1",
-            "agent_id": "grandchild",
-            **_task_payload("shell-task", status="ended", outcome="completed"),
-        },
-        {"type": "todo", "session_id": "session-1", "agent_id": "main", "items": []},
-    ]
-    listing = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"]},
-        events=frames,
-        events_before_ack=True,
-    )
-    watched = FakeWebSocket(subscribe_payload={"accepted": ["session-1"]})
+    listing = _activity_socket(terminal=True)
+    watched = FakeWebSocket()
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
@@ -394,20 +450,15 @@ async def test_unknown_owner_retry_closes_each_exchange_and_has_own_timeout():
             self.opened = False
 
         async def send(self, raw_frame):
-            if json.loads(raw_frame)["type"] in {"task.stop", "subscribe_v2"}:
-                await asyncio.sleep(0.2)
+            if json.loads(raw_frame)["type"] in {"task.stop", "subscribe"}:
+                await asyncio.sleep(0.05)
             await super().send(raw_frame)
 
     missing = SlowSocket(
-        subscribe_payload={"accepted": ["session-1"]},
         task_responses=[{"type": "response", "code": 40406, "msg": "missing"}],
     )
-    listing = SlowSocket(
-        subscribe_payload={"accepted": ["session-1"]},
-        events=_nested_frames(),
-        events_before_ack=True,
-    )
-    stopped = SlowSocket(subscribe_payload={"accepted": ["session-1"]})
+    listing = _activity_socket(SlowSocket)
+    stopped = SlowSocket()
     sockets.extend([missing, listing, stopped])
     async with KimiServerClient(
         "http://127.0.0.1:43123",

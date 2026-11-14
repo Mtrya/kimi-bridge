@@ -2777,6 +2777,49 @@ async def test_compact_correlates_manual_event_and_ignores_automatic_compaction(
     assert len(adapter.sent) == 1
 
 
+async def test_compact_resync_reports_unavailable_result_when_session_is_idle(
+    tmp_path: Path,
+) -> None:
+    client = FakeKimiClient()
+    client.sessions = [_control_session()]
+    store = StateStore(tmp_path / "state.json")
+    _bind_control_session(store)
+    adapter = FakeAdapter()
+    router = ChatRouter(
+        client,  # type: ignore[arg-type]
+        state_store=store,
+        default_workspace=tmp_path,
+        model="kimi-code/k3",
+    )
+    try:
+        command = asyncio.create_task(
+            router.handle_inbound(adapter, _message("/compact"))
+        )
+        await _wait_for(lambda: bool(client.compact_calls))
+        client.emit(
+            "session-control", _event("compaction.started", trigger="manual")
+        )
+        router._observers["session-control"].foreground = False
+        resync = _event("resync_required")
+        resync["snapshot"] = {
+            "turn_ids": [],
+            "in_flight_turn": None,
+            "messages": {"items": []},
+        }
+        client.emit("session-control", resync)
+        await asyncio.wait_for(command, 1)
+        await _wait_for(lambda: not router._command_tasks)
+    finally:
+        await router.close()
+
+    assert adapter.edits == [
+        (
+            adapter.sent[0][0],
+            "Compaction result unavailable after reconnect. Check /history.",
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("terminal", "expected"),
     (
@@ -3838,13 +3881,15 @@ async def delivery_context(tmp_path: Path):
         await router.close()
 
 
-async def test_blocked_prompt_is_reported_and_next_message_is_accepted(
-    delivery_context,
+@pytest.mark.parametrize("outcome", [PromptOutcome.BLOCKED, PromptOutcome.FAILED])
+async def test_unstarted_prompt_is_reported_and_next_message_is_accepted(
+    delivery_context, outcome
 ) -> None:
     router, client, adapter = delivery_context
-    client.prompt_outcomes = [PromptOutcome.BLOCKED]
-    await router.handle_inbound(adapter, _message("blocked"))
+    client.prompt_outcomes = [outcome]
+    await router.handle_inbound(adapter, _message("unstarted"))
     assert len(adapter.final_texts) == 1
+    assert "before execution" in adapter.final_texts[0][2]
     await router.handle_inbound(adapter, _message("next"))
     assert len(client.prompts) == 2
     assert len(adapter.final_texts) == 1

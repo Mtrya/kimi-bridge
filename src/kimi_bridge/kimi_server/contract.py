@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 
-KIMI_SEMANTIC_CONTRACT_VERSION = 15
+KIMI_SEMANTIC_CONTRACT_VERSION = 16
 KIMI_OPENAPI_TITLE = "Kimi Code Server API"
 KIMI_ASYNCAPI_TITLE = "Kimi Code WebSocket API"
 KIMI_WEBSOCKET_PATH = "/api/v1/ws"
@@ -59,17 +59,8 @@ class WebSocketMessageContract:
 
 
 @dataclass(frozen=True, slots=True)
-class TranscriptOpContract:
-    """One transcript journal operation folded into the semantic events."""
-
-    op: str
-    source: str
-    fields: tuple[SchemaFieldContract, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class SessionEventContract:
-    """One semantic event emitted by the bridge's transcript projection."""
+    """One semantic event emitted by the bridge's conversation projection."""
 
     event_type: str
     source: str
@@ -393,9 +384,8 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
         RestOperationContract("read_file", "WorkspaceOperations.preview_workspace_file", "POST", "/sessions/{session_id}/fs:read", "/api/v1/sessions/{session_id}/{tail}", request_examples=({"path": "fixture.txt", "length": 8192, "encoding": "auto", "allow_external_symlinks": False},), response_fields=(_field("path", "string"), _field("content", "string"), _field("encoding", "string", values=("utf-8", "base64")), _field("size", "integer"), _field("is_binary", "boolean"), _field("truncated", "boolean"))),
         RestOperationContract("download_file", "WorkspaceOperations.download_workspace_file", "GET", "/sessions/{session_id}/fs/{path}:download", "/api/v1/sessions/{session_id}/fs/{*}", response_media_type="application/octet-stream"),
         RestOperationContract("session_environments", "WorkspaceOperations.list_environments", "GET", "/sessions/{session_id}/environments", "/api/v1/sessions/{session_id}/environments", response_fields=(_field("environments", "array"), _field("environments.[].environment_id", "string"), _field("environments.[].type", "string", values=("local", "ssh", "docker", "command")), _field("environments.[].status", "string", values=("pending", "connecting", "ready", "disconnected", "disposed")))),
-        RestOperationContract("session_plan", "WorkspaceOperations.get_plan_document", "GET", "/sessions/{session_id}/transcript/plan", "/api/v1/sessions/{session_id}/transcript/plan", query_examples=({"agent_id": "main", "tool_call_id": "plan-review"},), response_fields=(_field("plans", "array"), _field("plans.[].tool_call_id", "string"), _field("plans.[].plan", "string"), _field("plans.[].path", "string", required=False))),
-        RestOperationContract("file_changes", "FileHistoryOperations.get_file_changes", "GET", "/sessions/{session_id}/file-history/changes", "/api/v1/sessions/{session_id}/file-history/changes", query_examples=({"turn_id": 0},), response_fields=(_field("recorded", "boolean"), _field("changes", "array"), _field("changes.[].path", "string"), _field("changes.[].status", "string", values=("added", "modified", "deleted")), _field("changes.[].additions", "integer", "number"), _field("changes.[].deletions", "integer", "number"), _field("changes.[].binary", "boolean", required=False), _field("changes.[].oversize", "boolean", required=False))),
-        RestOperationContract("file_change_content", "FileHistoryOperations.get_file_diff", "GET", "/sessions/{session_id}/file-history/content", "/api/v1/sessions/{session_id}/file-history/content", query_examples=({"turn_id": 0, "path": "fixture.txt", "phase": "start"}, {"turn_id": 0, "path": "fixture.txt", "phase": "end"}), response_fields=(_field("content", "object", required=False), _field("content.content", "string", required=False), _field("content.binary", "boolean", required=False))),
+        RestOperationContract("file_changes", "FileHistoryOperations.get_file_changes", "GET", "/sessions/{session_id}/file-history/changes", "/api/v1/sessions/{session_id}/file-history/changes", query_examples=({"turn_number": 0},), response_fields=(_field("recorded", "boolean"), _field("changes", "array"), _field("changes.[].path", "string"), _field("changes.[].status", "string", values=("added", "modified", "deleted")), _field("changes.[].additions", "integer", "number"), _field("changes.[].deletions", "integer", "number"), _field("changes.[].binary", "boolean", required=False), _field("changes.[].oversize", "boolean", required=False))),
+        RestOperationContract("file_change_content", "FileHistoryOperations.get_file_diff", "GET", "/sessions/{session_id}/file-history/content", "/api/v1/sessions/{session_id}/file-history/content", query_examples=({"turn_number": 0, "path": "fixture.txt", "phase": "start"}, {"turn_number": 0, "path": "fixture.txt", "phase": "end"}), response_fields=(_field("content", "object", required=False), _field("content.content", "string", required=False), _field("content.binary", "boolean", required=False))),
         RestOperationContract("list_plugins", "IntegrationOperations.list_plugins", "GET", "/plugins", "/api/v1/plugins", response_fields=(_field("plugins", "array"), _field("plugins.[].id", "string"), _field("plugins.[].displayName", "string"), _field("plugins.[].enabled", "boolean"), _field("plugins.[].state", "string", values=("ok", "error")), _field("plugins.[].version", "string", required=False), _field("plugins.[].skillCount", "number", "integer"), _field("plugins.[].mcpServerCount", "number", "integer"))),
         RestOperationContract("plugin_details", "IntegrationOperations.get_plugin_details", "GET", "/plugins/{plugin_id}", "/api/v1/plugins/{tail}", response_fields=(_field("id", "string"), _field("displayName", "string"), _field("enabled", "boolean"), _field("state", "string"), _field("skillCount", "number", "integer"), _field("mcpServerCount", "number", "integer"), _field("skills", "array"), _field("skills.[].name", "string"), _field("mcpServers", "array"), _field("mcpServers.[].name", "string"), _field("mcpServers.[].runtimeName", "string"), _field("mcpServers.[].enabled", "boolean"), _field("mcpServers.[].transport", "string"), _field("diagnostics", "array"), _field("diagnostics.[].severity", "string", values=("error", "warn", "info")))),
         RestOperationContract("mcp_servers", "IntegrationOperations.list_mcp_servers", "GET", "/mcp/servers", "/api/v1/mcp/servers", response_fields=(_field("servers", "array"), _field("servers.[].id", "string"), _field("servers.[].name", "string"), _field("servers.[].transport", "string", values=("stdio", "http", "sse")), _field("servers.[].status", "string", values=("connected", "connecting", "disconnected", "error")), _field("servers.[].tool_count", "integer"))),
@@ -478,10 +468,13 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "POST",
             "/sessions/{session_id}:undo",
             "/api/v1/sessions/{session_id}:archive",
-            request_examples=({"count": 2},),
+            request_examples=(
+                {"turn_id": "turn-1"},
+                {"turn_id": "turn-1", "agent_id": "main"},
+            ),
             schema_alias_note=(
-                "The OpenAPI session-action union is exposed under the "
-                "archive path; the runtime path remains :undo"
+                "The OpenAPI action union accepts turn_id but does not declare "
+                "removed_turn_ids; the live probe validates the native undo response"
             ),
         ),
         RestOperationContract(
@@ -554,7 +547,7 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                 _field(
                     "status",
                     "string",
-                    values=("running", "queued", "blocked"),
+                    values=("running", "queued", "blocked", "failed"),
                 ),
             ),
         ),
@@ -624,20 +617,6 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             ),
         ),
         RestOperationContract(
-            "pending_interactions",
-            "KimiServerClient._get_pending_interaction_ids",
-            "GET",
-            "/sessions/{session_id}/transcript",
-            "/api/v1/sessions/{session_id}/transcript",
-            query_examples=({"agent_id": "main", "page_size": 1},),
-            response_fields=(
-                _field("pending_interactions", "array"),
-                _field("pending_interactions.[]", "string"),
-                _field("agents", "array"),
-                _field("agents.[].agentId", "string"),
-            ),
-        ),
-        RestOperationContract(
             "respond_interaction",
             "KimiServerClient.resolve_approval/resolve_question/dismiss_question",
             "POST",
@@ -687,11 +666,11 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             response_fields=(
                 _field("active", "object"),
                 _field("active.prompt_id", "string", required=False, required_if_parent_present=True),
-                _field("active.status", "string", required=False, required_if_parent_present=True, values=("running", "queued", "blocked")),
+                _field("active.status", "string", required=False, required_if_parent_present=True, values=("running", "queued", "blocked", "failed")),
                 _field("active.content", "array", required=False, required_if_parent_present=True),
                 _field("queued", "array"),
                 _field("queued.[].prompt_id", "string"),
-                _field("queued.[].status", "string", values=("running", "queued", "blocked")),
+                _field("queued.[].status", "string", values=("running", "queued", "blocked", "failed")),
                 _field("queued.[].content", "array"),
             ),
         ),
@@ -703,59 +682,28 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
             "/api/v1/sessions/{session_id}/prompts/{tail}",
         ),
         RestOperationContract(
-            "transcript",
-            "KimiServerClient.get_snapshot",
+            "turns",
+            "KimiServerClient.get_snapshot/undo_session/get_plan_document",
             "GET",
-            "/sessions/{session_id}/transcript",
-            "/api/v1/sessions/{session_id}/transcript",
-            query_examples=({"agent_id": "main", "page_size": 100},),
+            "/sessions/{session_id}/agents/{agent_id}/turns",
+            "/api/v1/sessions/{session_id}/agents/{agent_id}/turns",
+            query_examples=({"page_size": 100}, {"before_ordinal": 20, "page_size": 200}),
             response_fields=(
-                _field("agent_id", "string"),
-                _field("items", "array"),
-                _field("items.[].kind", "string", values=("turn", "marker")),
-                _field("items.[].turnId", "string"),
-                _field("items.[].ordinal", "integer"),
-                _field(
-                    "items.[].state",
-                    "string",
-                    values=("queued", "running", "completed", "failed", "cancelled"),
-                ),
-                _field("items.[].triggerPromptId", "string", required=False),
-                _field("items.[].prompt", "string", required=False),
-                _field("items.[].steps", "array"),
-                _field("items.[].steps.[].frames", "array"),
-                _field("items.[].steps.[].frames.[].kind", "string"),
-                _field("items.[].steps.[].frames.[].role", "string"),
-                _field("items.[].steps.[].frames.[].text", "string"),
+                _field("turns", "array"),
+                _field("turns.[].turn_id", "string"),
+                _field("turns.[].ordinal", "integer"),
+                _field("turns.[].kind", "string", values=("agent", "system")),
+                _field("turns.[].status", "string", values=("running", "ended")),
+                _field("turns.[].outcome", "string", required=False, values=("completed", "interrupted", "failed")),
+                _field("turns.[].turn_number", "integer", required=False),
+                _field("turns.[].steps", "array"),
+                _field("turns.[].items", "array"),
                 _field("has_more", "boolean"),
-                _field("prompts", "array"),
-                _field("prompts.[].promptId", "string"),
-                _field("prompts.[].status", "string"),
-                _field("attachments", "array"),
-                _field("attachments.[].attachmentId", "string"),
-                _field("attachments.[].mediaType", "string"),
-                _field("attachments.[].name", "string", required=False),
-                _field("seq", "integer", required=False),
-            ),
-        ),
-        RestOperationContract(
-            "transcript_ops",
-            "evaluate_kimi_semantic_contract/probe_kimi_compatibility",
-            "GET",
-            "/sessions/{session_id}/transcript/ops",
-            "/api/v1/sessions/{session_id}/transcript/ops",
-            query_examples=({"agent_id": "main", "since_seq": 0},),
-            response_fields=(
-                _field("agent_id", "string"),
-                _field("batches", "array"),
-                _field("batches.[].seq", "integer"),
-                _field("batches.[].ops", "array"),
-                _field("latest_seq", "integer"),
-                _field("complete", "boolean"),
             ),
         ),
     )
 }
+
 
 
 _INTERACTION_FIELDS = (
@@ -769,111 +717,7 @@ _INTERACTION_FIELDS = (
 )
 
 
-KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
-    WebSocketMessageContract(
-        "client_hello",
-        "KimiServerClient._send_client_hello",
-        (
-            _field("type", "string", values=("client_hello",)),
-            _field("id", "string"),
-            _field("payload.client_id", "string"),
-        ),
-        (
-            {
-                "type": "client_hello",
-                "id": "request-1",
-                "payload": {"client_id": "kimi-bridge"},
-            },
-        ),
-    ),
-    WebSocketMessageContract(
-        "client_hello_ack",
-        "KimiServerClient._send_client_hello",
-        (
-            _field("type", "string", values=("ack",)),
-            _field("id", "string"),
-            _field("code", "integer", "number"),
-            _field("msg", "string"),
-        ),
-    ),
-    WebSocketMessageContract(
-        "subscribe_v2",
-        "KimiServerClient._send_subscribe_v2",
-        (
-            _field("type", "string", values=("subscribe_v2",)),
-            _field("id", "string"),
-            _field("payload.session_id", "string"),
-            _field("payload.transcript", "object"),
-            _field(
-                "payload.transcript.{}",
-                "string",
-                required=False,
-                values=("off", "turn", "block", "delta"),
-            ),
-            _field("payload.transcript_since", "object", required=False),
-            _field("payload.transcript_since.{}", "integer", required=False),
-        ),
-        (
-            {
-                "type": "subscribe_v2",
-                "id": "request-2",
-                "payload": {
-                    "session_id": "session-1",
-                    "transcript": {"main": "delta"},
-                    "transcript_since": {"main": 3},
-                },
-            },
-        ),
-    ),
-    WebSocketMessageContract(
-        "subscribe_v2_ack",
-        "KimiServerClient._send_subscribe_v2",
-        (
-            _field("type", "string", values=("ack",)),
-            _field("id", "string"),
-            _field("code", "integer", "number"),
-            _field("msg", "string"),
-            _field("payload.accepted", "array"),
-            _field("payload.accepted.[]", "string"),
-            _field("payload.not_found", "array"),
-            _field("payload.not_found.[]", "string"),
-        ),
-    ),
-    WebSocketMessageContract(
-        "server_hello",
-        "KimiServerClient._expect_server_hello",
-        (
-            _field("type", "string", values=("server_hello",)),
-            _field("payload.protocol_version", "integer", required=False),
-        ),
-    ),
-    WebSocketMessageContract(
-        "ping",
-        "KimiServerClient._expect_server_hello/_wait_for_ack/subscribe_events",
-        (
-            _field("type", "string", values=("ping",)),
-            _field("payload.nonce", "string"),
-        ),
-    ),
-    WebSocketMessageContract(
-        "pong",
-        "KimiServerClient._send_pong",
-        (
-            _field("type", "string", values=("pong",)),
-            _field("payload.nonce", "string"),
-        ),
-        ({"type": "pong", "payload": {"nonce": "nonce-1"}},),
-    ),
-    WebSocketMessageContract(
-        "error",
-        "KimiServerClient._raise_ws_error",
-        (
-            _field("type", "string", values=("error",)),
-            _field("payload.code", "integer", "number"),
-            _field("payload.msg", "string"),
-            _field("payload.fatal", "boolean", required=False),
-        ),
-    ),
+_KIMI_SHARED_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
     WebSocketMessageContract(
         "interaction",
         "KimiServerClient.subscribe_events",
@@ -1106,116 +950,223 @@ KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
 )
 
 
-KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
-    TranscriptOpContract(
-        "reset",
-        "TranscriptProjection.apply_reset",
+KIMI_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
+    WebSocketMessageContract(
+        "subscribe",
+        "KimiServerClient._subscribe",
         (
-            _field("agentId", "string"),
-            _field("snapshot", "object"),
-            _field("snapshot.items", "array"),
+            _field("type", "string", values=("subscribe",)),
+            _field("request_id", "string"),
+            _field("session_id", "string"),
+            _field("agent_ids", "array", required=False),
+            _field("agent_ids.[]", "string", required=False),
+        ),
+        (
+            {"type": "subscribe", "request_id": "request-1", "session_id": "session-1"},
+            {"type": "subscribe", "request_id": "request-2", "session_id": "session-1", "agent_ids": ["main"]},
         ),
     ),
-    TranscriptOpContract(
-        "turn.upsert",
-        "TranscriptProjection._apply_turn_upsert",
+    WebSocketMessageContract(
+        "response",
+        "KimiServerClient._subscribe",
         (
-            _field("turn.kind", "string", values=("turn",)),
-            _field("turn.turnId", "string"),
+            _field("type", "string", values=("response",)),
+            _field("request_id", "string"),
+            _field("code", "integer", "number"),
+            _field("msg", "string", required=False),
+        ),
+    ),
+    WebSocketMessageContract(
+        "ping",
+        "KimiServerClient._subscribe/subscribe_events",
+        (_field("type", "string", values=("ping",)),),
+    ),
+    WebSocketMessageContract(
+        "pong",
+        "KimiServerClient._send_pong",
+        (_field("type", "string", values=("pong",)),),
+        ({"type": "pong"},),
+    ),
+    WebSocketMessageContract(
+        "turns",
+        "ConversationProjection.apply_page",
+        (
+            _field("type", "string", values=("turns",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turns", "array"),
+            _field("turns.[].turn_id", "string"),
+            _field("turns.[].ordinal", "integer"),
+            _field("turns.[].kind", "string", values=("agent", "system")),
+            _field("turns.[].status", "string", values=("running", "ended")),
+            _field("turns.[].outcome", "string", required=False, values=("completed", "interrupted", "failed")),
+            _field("turns.[].turn_number", "integer", required=False),
+            _field("turns.[].steps", "array"),
+            _field("turns.[].items", "array"),
+            _field("has_more", "boolean"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "turns_removed",
+        "ConversationProjection._remove_turns",
+        (
+            _field("type", "string", values=("turns.removed",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_ids", "array"),
+            _field("turn_ids.[]", "string"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "turns_failed",
+        "KimiServerClient.subscribe_events",
+        (
+            _field("type", "string", values=("turns.failed",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("code", "integer", "number"),
+            _field("msg", "string"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "turn",
+        "ConversationProjection._apply_turn",
+        (
+            _field("type", "string", values=("turn.started", "turn.ended")),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn", "object"),
+            _field("turn.turn_id", "string"),
             _field("turn.ordinal", "integer"),
-            _field(
-                "turn.state",
-                "string",
-                values=("queued", "running", "completed", "failed", "cancelled"),
+            _field("turn.kind", "string", values=("agent", "system")),
+            _field("turn.status", "string", values=("running", "ended")),
+            _field("turn.outcome", "string", required=False, values=("completed", "interrupted", "failed")),
+            _field("turn.turn_number", "integer", required=False),
+            _field("turn.steps", "array"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "turn_updated",
+        "ConversationProjection._apply_turn_update",
+        (
+            _field("type", "string", values=("turn.updated",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_id", "string"),
+            _field("step", "object", required=False),
+            _field("step.index", "integer", required=False),
+            _field("retry", "object", required=False),
+        ),
+    ),
+    WebSocketMessageContract(
+        "item",
+        "ConversationProjection._apply_item",
+        (
+            _field("type", "string", values=("item.started", "item.ended")),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_id", "string"),
+            _field("item", "object"),
+            _field("item.type", "string", values=("user_message", "assistant_message", "reasoning", "tool_call", "notification", "system")),
+            _field("item.item_id", "string"),
+            _field("item.step_index", "integer", required=False),
+            _field("item.status", "string", values=("running", "ended")),
+            _field("item.created_at", "string"),
+            _field("item.text", "string", required=False),
+            _field("item.prompt_ids", "array", required=False),
+            _field("item.placement", "string", required=False, values=("opener", "steer")),
+            _field("item.attachments", "array", required=False),
+            _field("item.display", "any", required=False),
+        ),
+    ),
+    WebSocketMessageContract(
+        "item_updated",
+        "ConversationProjection._apply_item_update",
+        (
+            _field("type", "string", values=("item.updated",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_id", "string"),
+            _field("item_id", "string"),
+            _field("set", "object"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "item_delta",
+        "ConversationProjection._apply_item_delta",
+        (
+            _field("type", "string", values=("item.delta",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_id", "string"),
+            _field("item_id", "string"),
+            _field("field", "string", values=("text", "input_text", "output")),
+            _field("delta", "string"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "item_removed",
+        "ConversationProjection._remove_item",
+        (
+            _field("type", "string", values=("item.removed",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("turn_id", "string"),
+            _field("item_id", "string"),
+        ),
+    ),
+    WebSocketMessageContract(
+        "notice",
+        "ConversationProjection._notice_events",
+        (
+            _field("type", "string", values=("notice",)),
+            _field("session_id", "string"),
+            _field("agent_id", "string"),
+            _field("level", "string", values=("info", "warning", "error")),
+            _field("title", "string"),
+            _field("detail", "string", required=False),
+            _field("code", "string", required=False),
+        ),
+    ),
+    *(
+        replace(
+            message,
+            fields=(
+                _field("type", "string", values=("agent",)),
+                _field("session_id", "string"),
+                _field("agent_id", "string"),
+                _field("event_created_at", "string", required=False),
+                _field("status", "string", values=("idle", "running")),
+                _field("compacting", "boolean"),
+                _field("model", "string", required=False),
+                _field("thinking", "string", required=False),
+                _field("permission_mode", "string", required=False, values=("manual", "auto", "yolo")),
+                _field("plan_mode", "boolean"),
+                _field("swarm_mode", "boolean", required=False),
+                _field("tower_mode", "boolean", required=False),
             ),
-            _field("turn.prompt", "string", required=False),
-        ),
-    ),
-    TranscriptOpContract(
-        "step.upsert",
-        "TranscriptProjection._apply_step_upsert",
-        (
-            _field("turnId", "string"),
-            _field("step.stepId", "string"),
-            _field("step.ordinal", "integer"),
-            _field(
-                "step.state",
-                "string",
-                values=("running", "completed", "interrupted", "failed"),
-            ),
-        ),
-    ),
-    TranscriptOpContract(
-        "frame.upsert",
-        "TranscriptProjection._apply_frame_upsert",
-        (
-            _field("turnId", "string"),
-            _field("stepId", "string"),
-            _field("frame.frameId", "string"),
-            _field(
-                "frame.kind", "string", values=("text", "thinking", "tool", "notice")
-            ),
-            _field("frame.text", "string", required=False),
-            _field("frame.role", "string", required=False),
-        ),
-    ),
-    TranscriptOpContract(
-        "append",
-        "TranscriptProjection._apply_append",
-        (
-            _field("target.type", "string", values=("frame",)),
-            _field("target.turnId", "string"),
-            _field("target.stepId", "string"),
-            _field("target.frameId", "string"),
-            _field("offset", "integer"),
-            _field("text", "string"),
-        ),
-    ),
-    TranscriptOpContract(
-        "marker.upsert",
-        "TranscriptProjection._apply_marker_upsert",
-        (
-            _field("item.kind", "string", values=("marker",)),
-            _field("item.marker", "string"),
-            _field("item.payload", "object", required=False),
-        ),
-    ),
-    TranscriptOpContract(
-        "prompt.upsert",
-        "TranscriptProjection._apply_prompt_upsert",
-        (
-            _field("prompt.promptId", "string"),
-            _field(
-                "prompt.status",
-                "string",
-                values=(
-                    "running",
-                    "queued",
-                    "blocked",
-                    "completed",
-                    "failed",
-                    "aborted",
-                ),
-            ),
-        ),
-    ),
-    TranscriptOpContract(
-        "items.remove",
-        "TranscriptProjection state pruning",
-        (_field("ids", "array"),),
-    ),
-    TranscriptOpContract(
-        "attachment.upsert",
-        "TranscriptProjection snapshot attachments",
-        (
-            _field("attachment.attachmentId", "string"),
-            _field("attachment.mediaType", "string"),
-        ),
-    ),
-    TranscriptOpContract(
-        "interaction.upsert",
-        "Flat interaction frames provide session-wide delivery",
-        (_field("interaction", "object"),),
+        )
+        if message.name == "agent"
+        else replace(message, name="response")
+        if message.name in {"task_watch_ack", "task_stop_ack"}
+        else message
+        for message in _KIMI_SHARED_WEBSOCKET_MESSAGES
+        if message.name in {
+            "interaction",
+            "session_event",
+            "agent",
+            "usage",
+            "goal",
+            "todo",
+            "task_list",
+            "task",
+            "task_output",
+            "task_watch",
+            "task_stop",
+            "task_background",
+            "task_watch_ack",
+            "task_stop_ack",
+        }
     ),
 )
 
@@ -1223,27 +1174,27 @@ KIMI_TRANSCRIPT_OPS: tuple[TranscriptOpContract, ...] = (
 KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     SessionEventContract(
         "turn.started",
-        "TranscriptProjection/ChatRouter.dispatch_event",
+        "ConversationProjection/ChatRouter.dispatch_event",
         (_field("turnId", "integer", "number"),),
     ),
     SessionEventContract(
         "turn.step.started",
-        "TranscriptProjection/ChatRouter.dispatch_event",
+        "ConversationProjection/ChatRouter.dispatch_event",
         (_field("step", "integer", "number"),),
     ),
     SessionEventContract(
         "assistant.delta",
-        "TranscriptProjection/ChatRouter.dispatch_event",
+        "ConversationProjection/ChatRouter.dispatch_event",
         (_field("delta", "string"),),
     ),
     SessionEventContract(
         "thinking.delta",
-        "TranscriptProjection/ChatRouter.dispatch_event",
+        "ConversationProjection/ChatRouter.dispatch_event",
         (_field("delta", "string"),),
     ),
     SessionEventContract(
         "turn.ended",
-        "TranscriptProjection/ChatRouter.dispatch_event/session_notice_from_event",
+        "ConversationProjection/ChatRouter.dispatch_event/session_notice_from_event",
         (
             _field("turnId", "integer", "number"),
             _field(
@@ -1256,7 +1207,7 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "error",
-        "TranscriptProjection/session_notice_from_event",
+        "ConversationProjection/session_notice_from_event",
         (
             _field("code", "string"),
             _field("message", "string"),
@@ -1265,7 +1216,7 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "warning",
-        "TranscriptProjection/session_notice_from_event",
+        "ConversationProjection/session_notice_from_event",
         (
             _field("message", "string"),
             _field("code", "string", required=False),
@@ -1273,17 +1224,17 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "prompt.completed",
-        "TranscriptProjection/ChatRouter.dispatch_event",
+        "ConversationProjection/ChatRouter.dispatch_event",
         (_field("promptId", "string"),),
     ),
     SessionEventContract(
         "compaction.started",
-        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
+        "ConversationProjection/ChatRouter._dispatch_compaction_event",
         (_field("trigger", "string", values=("manual", "auto")),),
     ),
     SessionEventContract(
         "compaction.completed",
-        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
+        "ConversationProjection/ChatRouter._dispatch_compaction_event",
         (
             _field("result", "object"),
             _field("result.compactedCount", "integer", "number"),
@@ -1293,11 +1244,11 @@ KIMI_SESSION_EVENTS: tuple[SessionEventContract, ...] = (
     ),
     SessionEventContract(
         "compaction.blocked",
-        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
+        "ConversationProjection/ChatRouter._dispatch_compaction_event",
     ),
     SessionEventContract(
         "compaction.cancelled",
-        "TranscriptProjection/ChatRouter._dispatch_compaction_event",
+        "ConversationProjection/ChatRouter._dispatch_compaction_event",
     ),
 )
 
@@ -1309,9 +1260,9 @@ KIMI_LIFECYCLE_INVARIANTS: tuple[tuple[str, str], ...] = (
     ("rest.bearer_auth", "KimiServerClient._request"),
     ("session.create", "KimiServerClient.create_session"),
     ("websocket.bearer_auth", "KimiServerClient.subscribe_events"),
-    ("websocket.subscribe_v2_resumes", "KimiServerClient._send_subscribe_v2"),
-    ("websocket.agent_burst_before_ack", "KimiServerClient._wait_for_ack"),
-    ("websocket.transcript_seq_resume", "KimiServerClient.subscribe_events"),
+    ("websocket.subscribe_resumes", "KimiServerClient._subscribe"),
+    ("websocket.response_before_agent_burst", "KimiServerClient._subscribe"),
+    ("websocket.turns_page_resume", "KimiServerClient.subscribe_events"),
 )
 
 
@@ -1330,6 +1281,36 @@ def kimi_semantic_contract() -> dict[str, Any]:
         if item.required_if_parent_present:
             payload["required_if_parent_present"] = True
         return payload
+
+    def rest_payload(item: RestOperationContract) -> dict[str, Any]:
+        return {
+            "name": item.name,
+            "source": item.source,
+            "method": item.method,
+            "runtime_path": item.runtime_path,
+            "spec_path": item.spec_path,
+            "request_media_type": item.request_media_type,
+            "response_media_type": item.response_media_type,
+            "api_version": item.api_version,
+            "request_examples": list(item.request_examples),
+            "request_fields": [field_payload(field) for field in item.request_fields],
+            "query_examples": [dict(value) for value in item.query_examples],
+            "response_fields": [field_payload(field) for field in item.response_fields],
+            "schema_alias_note": item.schema_alias_note,
+        }
+
+    def message_payload(item: WebSocketMessageContract) -> dict[str, Any]:
+        return {
+            "name": item.name,
+            "source": item.source,
+            "fields": [field_payload(field) for field in item.fields],
+            "examples": [dict(value) for value in item.examples],
+            **(
+                {"discriminator": dict([item.discriminator])}
+                if item.discriminator is not None
+                else {}
+            ),
+        }
 
     return {
         "schema_version": KIMI_SEMANTIC_CONTRACT_VERSION,
@@ -1358,55 +1339,14 @@ def kimi_semantic_contract() -> dict[str, Any]:
             },
         },
         "rest": [
-            {
-                "name": item.name,
-                "source": item.source,
-                "method": item.method,
-                "runtime_path": item.runtime_path,
-                "spec_path": item.spec_path,
-                "request_media_type": item.request_media_type,
-                "response_media_type": item.response_media_type,
-                "api_version": item.api_version,
-                "request_examples": list(item.request_examples),
-                "request_fields": [
-                    field_payload(field) for field in item.request_fields
-                ],
-                "query_examples": [dict(value) for value in item.query_examples],
-                "response_fields": [
-                    field_payload(field) for field in item.response_fields
-                ],
-                "schema_alias_note": item.schema_alias_note,
-            }
-            for item in KIMI_REST_OPERATIONS.values()
+            rest_payload(item) for item in KIMI_REST_OPERATIONS.values()
         ],
         "websocket": {
             "path": KIMI_WEBSOCKET_PATH,
             "authentication": "Authorization: Bearer <startup-token>",
             "messages": [
-                {
-                    "name": item.name,
-                    "source": item.source,
-                    "fields": [field_payload(field) for field in item.fields],
-                    "examples": [dict(value) for value in item.examples],
-                    **(
-                        {"discriminator": dict([item.discriminator])}
-                        if item.discriminator is not None
-                        else {}
-                    ),
-                }
-                for item in KIMI_WEBSOCKET_MESSAGES
+                message_payload(item) for item in KIMI_WEBSOCKET_MESSAGES
             ],
-            "transcript": {
-                "frames": ["transcript.reset", "transcript.ops"],
-                "ops": [
-                    {
-                        "op": item.op,
-                        "source": item.source,
-                        "fields": [field_payload(field) for field in item.fields],
-                    }
-                    for item in KIMI_TRANSCRIPT_OPS
-                ],
-            },
             "events": [
                 {
                     "type": item.event_type,

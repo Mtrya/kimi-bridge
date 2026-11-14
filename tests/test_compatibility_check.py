@@ -20,9 +20,15 @@ from kimi_bridge.compatibility import (
     SUPPORTED_KIMI_CODE_VERSIONS,
     kimi_code_version_sort_key,
 )
-from kimi_bridge.kimi_server import KimiContractCheck, KimiServerAPIError
+from kimi_bridge.kimi_server import (
+    KimiContractCheck,
+    KimiServerAPIError,
+    PromptOutcome,
+    PromptSubmission,
+)
 from kimi_bridge.kimi_server import contract as kimi_contract
 from kimi_bridge.kimi_server import probe as probe_module
+from kimi_bridge.kimi_server.turns import snapshot_from_turns, turn_prompt_id
 
 
 def _load_checker() -> Any:
@@ -182,7 +188,6 @@ def interaction_contract_documents(monkeypatch):
     )
     monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", ())
     monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", contracts)
     openapi, asyncapi = _minimal_documents()
     payload = {
@@ -262,11 +267,12 @@ def test_interaction_contract_checks_each_variant(
     assert expected in failures
 
 
-async def test_live_probe_monitors_subscribe_and_resume_sequence(
+async def test_live_probe_monitors_native_subscription_pages_and_undo(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    subscription_calls: list[dict[str, Any]] = []
+    subscription_calls: list[str] = []
+    undo_calls: list[str] = []
 
     class FakeProbeClient:
         def __init__(self) -> None:
@@ -280,7 +286,7 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
             return None
 
         async def check_server_version(self) -> str:
-            return "2.5.1"
+            return "2.6.1"
 
         async def get_openapi_document(self) -> dict[str, Any]:
             return {}
@@ -327,15 +333,12 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         async def is_session_archived(self, session_id: str) -> bool:
             return self.archived_session == session_id
 
-        async def probe_subscription(
-            self, _session_id: str, *, since: int | None = None
-        ) -> int:
-            subscription_calls.append({"since": since})
-            return 1
+        async def probe_subscription(self, session_id: str) -> None:
+            subscription_calls.append(session_id)
 
         async def get_snapshot(self, _session_id: str) -> dict[str, Any]:
             return {
-                "as_of_seq": 0,
+                "turn_ids": [],
                 "messages": {"items": [], "has_more": False},
                 "in_flight_turn": None,
             }
@@ -345,10 +348,20 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         connection=SimpleNamespace(token="secret"),
         executable_identity=SimpleNamespace(product=SimpleNamespace(value="kimi-code")),
     )
+
+    async def undo(_client: Any, session_id: str) -> None:
+        undo_calls.append(session_id)
+
     monkeypatch.setattr(probe_module, "KimiServerClient", lambda **_kwargs: client)
     monkeypatch.setattr(
         probe_module, "evaluate_kimi_semantic_contract", lambda *_args, **_kwargs: ()
     )
+    monkeypatch.setattr(
+        probe_module,
+        "probe_turns_replay",
+        lambda _asyncapi: _passing_check("runtime.behavior.turns.replay"),
+    )
+    monkeypatch.setattr(probe_module, "_probe_native_undo", undo)
 
     result = await probe_module.probe_kimi_compatibility(
         supervisor, tmp_path / "workspace"
@@ -356,16 +369,15 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
 
     assert client.created_profiles == [{"model": "kimi-code/k3"}]
     assert client.secondary_model_updates == ["kimi-code/k3"]
-    assert subscription_calls == [{"since": None}, {"since": 1}]
-    assert any(
-        item.id == "runtime.behavior.secondary_model.persistence"
-        and item.status == "pass"
-        for item in result.checks
-    )
+    assert subscription_calls == ["session-1", "session-1"]
+    assert undo_calls == ["session-1"]
     for identifier in (
-        "runtime.lifecycle.websocket.subscribe_v2_resumes",
-        "runtime.lifecycle.websocket.agent_burst_before_ack",
-        "runtime.lifecycle.websocket.transcript_seq_resume",
+        "runtime.lifecycle.websocket.subscribe_resumes",
+        "runtime.lifecycle.websocket.response_before_agent_burst",
+        "runtime.lifecycle.websocket.turns_page_resume",
+        "runtime.behavior.turns_snapshot",
+        "runtime.behavior.turns.replay",
+        "runtime.behavior.turns.undo",
         "runtime.behavior.task.direct_commands",
         "runtime.behavior.session.profile_binding",
         "runtime.behavior.session.fork_restore",
@@ -373,6 +385,76 @@ async def test_live_probe_monitors_subscribe_and_resume_sequence(
         assert any(
             item.id == identifier and item.status == "pass" for item in result.checks
         )
+
+
+async def test_native_undo_probe_cancels_retrying_turn_before_undo() -> None:
+    class FakeUndoClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+            self.turn: dict[str, Any] | None = {
+                "turn_id": "turn-1",
+                "ordinal": 0,
+                "kind": "agent",
+                "status": "running",
+                "steps": [{"index": 1, "outcome": "failed"}],
+                "items": [
+                    {
+                        "type": "user_message",
+                        "item_id": "prompt-1",
+                        "status": "ended",
+                        "outcome": "completed",
+                        "prompt_ids": ["prompt-1"],
+                        "placement": "opener",
+                        "origin": {"kind": "user"},
+                        "text": "Local compatibility probe",
+                        "attachments": [],
+                    }
+                ],
+                "retry": {"attempt": 1, "next_attempt": 2, "max_attempts": 10},
+            }
+
+        async def submit_prompt(self, session_id: str, text: str) -> PromptSubmission:
+            self.calls.append("submit")
+            return PromptSubmission("prompt-1", PromptOutcome.SUBMITTED)
+
+        async def get_snapshot(self, session_id: str) -> dict[str, Any]:
+            turns = [self.turn] if self.turn is not None else []
+            return snapshot_from_turns({"turns": turns, "has_more": False})
+
+        async def cancel_prompt(self, session_id: str, prompt_id: str) -> bool:
+            assert self.turn is not None and self.turn["status"] == "running"
+            assert turn_prompt_id(self.turn) == prompt_id
+            self.calls.append("cancel")
+            self.turn = {
+                **self.turn,
+                "status": "ended",
+                "outcome": "interrupted",
+                "end_reason": "user_cancelled",
+            }
+            return True
+
+        async def _terminal_turn_for_prompt(
+            self, session_id: str, agent_id: str, prompt_id: str
+        ) -> dict[str, Any] | None:
+            if (
+                self.turn is not None
+                and self.turn["status"] == "ended"
+                and turn_prompt_id(self.turn) == prompt_id
+            ):
+                return self.turn
+            return None
+
+        async def undo_session(self, session_id: str) -> None:
+            assert self.turn is not None and self.turn["outcome"] == "interrupted"
+            self.calls.append("undo")
+            self.turn = None
+
+    client = FakeUndoClient()
+
+    await probe_module._probe_native_undo(client, "session-1")
+
+    assert client.calls == ["submit", "cancel", "undo"]
+    assert client.turn is None
 
 
 @pytest.mark.parametrize("drift", ["missing", "optional", "type", "values"])
@@ -385,7 +467,7 @@ def test_prompt_submission_contract_detects_status_drift(drift: str) -> None:
     ]["data"]
     data["properties"] = {
         "prompt_id": {"type": "string"},
-        "status": {"type": "string", "enum": ["running", "queued", "blocked"]},
+        "status": {"type": "string", "enum": ["running", "queued", "blocked", "failed"]},
     }
     data["required"] = ["prompt_id", "status"]
 
@@ -428,7 +510,6 @@ def test_semantic_projection_tolerates_additions_and_rejects_required_drift(
     monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {"example": operation})
     monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", ())
     openapi, asyncapi = _minimal_documents()
     openapi["paths"]["/api/v1/added"] = {"get": {}}
     data_schema = openapi["paths"]["/api/v1/example"]["get"]["responses"]["200"][
@@ -467,7 +548,7 @@ def test_semantic_projection_tolerates_additions_and_rejects_required_drift(
     }
 
 
-def test_semantic_projection_checks_requests_messages_and_transcript_ops(
+def test_semantic_projection_checks_requests_and_native_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     openapi, asyncapi = _minimal_documents()
@@ -478,242 +559,76 @@ def test_semantic_projection_checks_requests_messages_and_transcript_ops(
         "/example",
         "/api/v1/example",
     )
-    message = kimi_contract.WebSocketMessageContract(
-        "client_hello",
-        "KimiServerClient._send_client_hello",
-        (
-            kimi_contract.SchemaFieldContract(("type",), ("string",)),
-            kimi_contract.SchemaFieldContract(("id",), ("string",)),
-        ),
-        ({"type": "client_hello", "id": "request-1"},),
-    )
-    turn_upsert = kimi_contract.TranscriptOpContract(
-        "turn.upsert",
-        "TranscriptProjection._apply_turn_upsert",
-        (
-            kimi_contract.SchemaFieldContract(
-                ("turn", "state"),
-                ("string",),
-                values=("running", "completed"),
-            ),
-        ),
+    subscribe = next(
+        message
+        for message in kimi_contract.KIMI_WEBSOCKET_MESSAGES
+        if message.name == "subscribe"
     )
     monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {"example": operation})
-    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (message,))
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (subscribe,))
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", (turn_upsert,))
     asyncapi["components"]["messages"] = {
-        "client_hello": {
+        "subscribe": {
             "payload": {
                 "type": "object",
                 "properties": {
-                    "type": {"type": "string", "enum": ["client_hello"]},
-                    "id": {"type": "string"},
+                    "type": {"type": "string", "enum": ["subscribe"]},
+                    "request_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "agent_ids": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["type", "id"],
+                "required": ["type", "request_id", "session_id"],
             }
         },
-    }
-    openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"] = {
-        "get": {
-            "responses": {
-                "200": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "code": {"type": "number", "enum": [0]},
-                                    "data": {
-                                        "type": "object",
-                                        "properties": {
-                                            "batches": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "seq": {"type": "integer"},
-                                                        "ops": {
-                                                            "type": "array",
-                                                            "items": {
-                                                                "oneOf": [
-                                                                    {
-                                                                        "type": "object",
-                                                                        "properties": {
-                                                                            "op": {
-                                                                                "type": "string",
-                                                                                "enum": [
-                                                                                    "turn.upsert"
-                                                                                ],
-                                                                            },
-                                                                            "turn": {
-                                                                                "type": "object",
-                                                                                "properties": {
-                                                                                    "state": {
-                                                                                        "type": "string",
-                                                                                        "enum": [
-                                                                                            "running",
-                                                                                            "completed",
-                                                                                        ],
-                                                                                    }
-                                                                                },
-                                                                                "required": [
-                                                                                    "state"
-                                                                                ],
-                                                                            },
-                                                                        },
-                                                                        "required": [
-                                                                            "op",
-                                                                            "turn",
-                                                                        ],
-                                                                    }
-                                                                ]
-                                                            },
-                                                        },
-                                                    },
-                                                    "required": ["seq", "ops"],
-                                                },
-                                            }
-                                        },
-                                    },
-                                    "required": ["code", "data"],
-                                },
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert not [item for item in checks if item.status == "fail"]
 
-    journal_variants = openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"][
-        "get"
-    ]["responses"]["200"]["content"]["application/json"]["schema"]["properties"][
-        "data"
-    ]["properties"]["batches"]["items"]["properties"]["ops"]["items"]["oneOf"]
-    journal_variants.append(
-        {
-            "type": "object",
-            "properties": {"op": {"type": "string", "enum": ["unknown.operation"]}},
-            "required": ["op"],
-        }
-    )
-    assert "transcript.ops.vocabulary" in {
-        check.id
-        for check in kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
-        if check.status == "fail"
-    }
-    journal_variants.pop()
-
     openapi["paths"]["/api/v1/example"]["get"]["requestBody"] = {
         "required": True,
         "content": {"application/json": {"schema": {"type": "object"}}},
     }
-    openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"]["get"][
-        "responses"
-    ]["200"]["content"]["application/json"]["schema"]["properties"]["data"][
-        "properties"
-    ]["batches"]["items"]["properties"]["ops"]["items"]["oneOf"][0]["properties"][
-        "turn"
-    ]["properties"].pop("state")
+    asyncapi["components"]["messages"]["subscribe"]["payload"]["required"].remove(
+        "request_id"
+    )
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     failures = {item.id for item in checks if item.status == "fail"}
     assert "rest.example.request" in failures
-    assert "transcript.op.turn.upsert.turn.state" in failures
+    assert "websocket.message.subscribe.request_id" in failures
 
 
 def test_semantic_projection_checks_fields_required_in_optional_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     openapi, asyncapi = _minimal_documents()
-    turn_upsert = kimi_contract.TranscriptOpContract(
-        "turn.upsert",
-        "TranscriptProjection._apply_turn_upsert",
-        (
+    operation = kimi_contract.RestOperationContract(
+        "example",
+        "KimiServerClient.example",
+        "GET",
+        "/example",
+        "/api/v1/example",
+        response_fields=(
             kimi_contract.SchemaFieldContract(
-                ("turn", "usage", "inputOther"),
+                ("usage", "inputOther"),
                 ("integer", "number"),
                 required=False,
                 required_if_parent_present=True,
             ),
         ),
     )
-    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
+    monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {"example": operation})
     monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", (turn_upsert,))
+    data = openapi["paths"]["/api/v1/example"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]["properties"]["data"]
     usage_schema = {
         "type": "object",
         "properties": {"inputOther": {"type": "integer"}},
         "required": ["inputOther"],
     }
-    openapi["paths"]["/api/v1/sessions/{session_id}/transcript/ops"] = {
-        "get": {
-            "responses": {
-                "200": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "object",
-                                "properties": {
-                                    "code": {"type": "number", "enum": [0]},
-                                    "data": {
-                                        "type": "object",
-                                        "properties": {
-                                            "batches": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "seq": {
-                                                            "type": "integer"
-                                                        },
-                                                        "ops": {
-                                                            "type": "array",
-                                                            "items": {
-                                                                "oneOf": [
-                                                                    {
-                                                                        "type": "object",
-                                                                        "properties": {
-                                                                            "op": {
-                                                                                "type": "string",
-                                                                                "enum": [
-                                                                                    "turn.upsert"
-                                                                                ],
-                                                                            },
-                                                                            "turn": {
-                                                                                "type": "object",
-                                                                                "properties": {
-                                                                                    "usage": usage_schema
-                                                                                },
-                                                                            },
-                                                                        },
-                                                                        "required": [
-                                                                            "op",
-                                                                            "turn",
-                                                                        ],
-                                                                    }
-                                                                ]
-                                                            },
-                                                        },
-                                                    },
-                                                    "required": ["seq", "ops"],
-                                                },
-                                            }
-                                        }
-                                    },
-                                    "required": ["code", "data"],
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    data["properties"] = {"usage": usage_schema}
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert not [item for item in checks if item.status == "fail"]
@@ -721,7 +636,7 @@ def test_semantic_projection_checks_fields_required_in_optional_parent(
     usage_schema["required"] = []
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert {item.id for item in checks if item.status == "fail"} == {
-        "transcript.op.turn.upsert.turn.usage.inputOther"
+        "rest.example.response.usage.inputOther"
     }
 
 
@@ -811,7 +726,6 @@ def test_semantic_projection_checks_multipart_request_shape(
     )
     monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", ())
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
     assert not [item for item in checks if item.status == "fail"]
@@ -836,71 +750,34 @@ def test_semantic_projection_checks_multipart_request_shape(
     }
 
 
-def test_semantic_projection_accepts_an_optional_outbound_message_field(
+def test_semantic_projection_accepts_optional_outbound_agent_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     openapi, asyncapi = _minimal_documents()
     subscribe = next(
         message
         for message in kimi_contract.KIMI_WEBSOCKET_MESSAGES
-        if message.name == "subscribe_v2"
+        if message.name == "subscribe"
     )
     assert next(
-        field
-        for field in subscribe.fields
-        if field.path == ("payload", "transcript_since")
+        field for field in subscribe.fields if field.path == ("agent_ids",)
     ).required is False
-
-    message = kimi_contract.WebSocketMessageContract(
-        "subscribe_v2",
-        "KimiServerClient._send_subscribe_v2",
-        (
-            kimi_contract.SchemaFieldContract(
-                ("payload", "session_id"), ("string",)
-            ),
-            kimi_contract.SchemaFieldContract(
-                ("payload", "transcript"), ("object",)
-            ),
-            kimi_contract.SchemaFieldContract(
-                ("payload", "transcript_since"),
-                ("object",),
-                required=False,
-            ),
-        ),
-        (
-            {
-                "type": "subscribe_v2",
-                "id": "request-2",
-                "payload": {
-                    "session_id": "session-1",
-                    "transcript": {"main": "delta"},
-                    "transcript_since": {"main": 3},
-                },
-            },
-        ),
-    )
     monkeypatch.setattr(kimi_contract, "KIMI_REST_OPERATIONS", {})
-    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (message,))
+    monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", (subscribe,))
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", ())
     asyncapi["components"]["messages"] = {
-        "subscribe_v2": {
+        "subscribe": {
             "payload": {
                 "type": "object",
                 "properties": {
-                    "payload": {
-                        "type": "object",
-                        "properties": {
-                            "session_id": {"type": "string"},
-                            "transcript": {"type": "object"},
-                            "transcript_since": {"type": "object"},
-                        },
-                        "required": ["session_id", "transcript"],
-                    }
+                    "type": {"type": "string", "enum": ["subscribe"]},
+                    "request_id": {"type": "string"},
+                    "session_id": {"type": "string"},
+                    "agent_ids": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["payload"],
+                "required": ["type", "request_id", "session_id"],
             }
-        }
+        },
     }
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
@@ -945,7 +822,6 @@ def test_semantic_projection_accepts_an_optional_session_context_limit(
     )
     monkeypatch.setattr(kimi_contract, "KIMI_WEBSOCKET_MESSAGES", ())
     monkeypatch.setattr(kimi_contract, "KIMI_SESSION_EVENTS", ())
-    monkeypatch.setattr(kimi_contract, "KIMI_TRANSCRIPT_OPS", ())
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
 
@@ -1230,7 +1106,10 @@ async def test_live_checker_attributes_probe_failure_to_requested_version(
         async def __aexit__(self, *_exc: object) -> None:
             return None
 
-    async def failed_probe(*_args: Any, **_kwargs: Any) -> Any:
+    async def failed_probe(*_args: Any, **kwargs: Any) -> Any:
+        on_document = kwargs["on_document"]
+        on_document("openapi", {"openapi": "3.1.0", "paths": {}})
+        on_document("asyncapi", {"asyncapi": "3.1.0", "channels": {}})
         raise RuntimeError("probe failed")
 
     monkeypatch.setattr(
@@ -1241,11 +1120,26 @@ async def test_live_checker_attributes_probe_failure_to_requested_version(
     )
     monkeypatch.setattr(checker, "probe_kimi_compatibility", failed_probe)
 
-    report = await check_live(version="0.37.2")
+    artifact_directory = tmp_path / "artifacts"
+    report = await check_live(
+        version="0.37.2", artifact_directory=artifact_directory
+    )
 
     assert not report.compatible
     assert report.product == "kimi-code"
     assert report.version == "0.37.2"
+    assert {artifact.name for artifact in report.artifacts} == {
+        "openapi.json",
+        "asyncapi.json",
+    }
+    assert json.loads((artifact_directory / "openapi.json").read_text()) == {
+        "openapi": "3.1.0",
+        "paths": {},
+    }
+    assert json.loads((artifact_directory / "asyncapi.json").read_text()) == {
+        "asyncapi": "3.1.0",
+        "channels": {},
+    }
 
 
 @pytest.mark.skipif(
@@ -1953,7 +1847,7 @@ def test_queue_contract_rejects_optional_decoded_fields(field):
         "required": ["prompt_id", "status", "content"],
         "properties": {
             "prompt_id": {"type": "string"},
-            "status": {"type": "string", "enum": ["running", "queued", "blocked"]},
+            "status": {"type": "string", "enum": ["running", "queued", "blocked", "failed"]},
             "content": {"type": "array", "items": {"type": "object"}},
         },
     }

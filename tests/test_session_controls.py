@@ -358,10 +358,8 @@ async def test_effective_inspection_reads_live_agent_without_caching_closed_subs
     None
 ):
     class SelectedSocket(FakeWebSocket):
-        def _agent_burst_frames(self, session_id, *, include_reset=True):
-            frames = super()._agent_burst_frames(
-                session_id, include_reset=include_reset
-            )
+        def _agent_burst_frames(self, session_id, agent_id="main"):
+            frames = super()._agent_burst_frames(session_id, agent_id)
             for frame in frames:
                 if frame.get("type") == "agent":
                     frame.update(
@@ -379,7 +377,7 @@ async def test_effective_inspection_reads_live_agent_without_caching_closed_subs
         "token",
         http_client=http,
         ws_connect=FakeWebSocketConnect(
-            [SelectedSocket(subscribe_payload={"accepted": ["session-1"]})]
+            [SelectedSocket()]
         ),
     ) as client:
         status = await client.inspect_session("session-1")
@@ -391,19 +389,19 @@ async def test_effective_inspection_reads_live_agent_without_caching_closed_subs
         assert (await client.get_session_status("session-1")).model is None
 
 
-async def test_effective_inspection_times_out_when_subscription_ack_stalls():
+async def test_effective_inspection_times_out_when_subscription_response_stalls():
     import asyncio
     import json
     from kimi_bridge.kimi_server import KimiServerTransportError
 
     class StalledSocket(FakeWebSocket):
         async def send(self, raw_frame):
-            if json.loads(raw_frame)["type"] == "subscribe_v2":
+            if json.loads(raw_frame)["type"] == "subscribe":
                 self.sent.append(json.loads(raw_frame))
             else:
                 await super().send(raw_frame)
 
-    socket = StalledSocket(subscribe_payload={"accepted": ["session-1"]})
+    socket = StalledSocket()
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",

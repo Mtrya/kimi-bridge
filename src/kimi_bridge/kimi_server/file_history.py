@@ -18,25 +18,13 @@ class FileHistoryOperations:
         self, session_id: str, *, turn: RecordedTurn | None = None
     ) -> FileChanges:
         if turn is None:
-            transcript = await self._request_operation(
-                "transcript",
-                path_parameters={"session_id": session_id},
-                params={"agent_id": "main", "page_size": 100},
-            )
-            terminal = [
-                item
-                for item in transcript["items"]
-                if item["kind"] == "turn"
-                and item["state"] in {"completed", "failed", "cancelled"}
-                and item.get("steps")
-            ]
-            if not terminal:
+            turn = await self._latest_recorded_turn(session_id)
+            if turn is None:
                 return FileChanges(None, False, ())
-            turn = RecordedTurn(max(item["ordinal"] for item in terminal))
         data = await self._request_operation(
             "file_changes",
             path_parameters={"session_id": session_id},
-            params={"turn_id": turn.number},
+            params={"turn_number": turn.number},
         )
         changes = tuple(
             FileChange(
@@ -50,6 +38,20 @@ class FileHistoryOperations:
             for value in data["changes"]
         )
         return FileChanges(turn, data["recorded"], changes)
+
+    async def _latest_recorded_turn(self, session_id: str) -> RecordedTurn | None:
+        async for page in self._turn_pages(session_id, "main", page_size=200):
+            for turn in reversed(page["turns"]):
+                number = turn.get("turn_number")
+                if (
+                    turn.get("kind") == "agent"
+                    and turn.get("status") == "ended"
+                    and turn.get("steps")
+                    and isinstance(number, int)
+                    and not isinstance(number, bool)
+                ):
+                    return RecordedTurn(number)
+        return None
 
     async def get_file_diff(
         self, session_id: str, path: str, *, turn: RecordedTurn | None = None
@@ -91,7 +93,11 @@ class FileHistoryOperations:
                 await self._request_operation(
                     "file_change_content",
                     path_parameters={"session_id": session_id},
-                    params={"turn_id": view.turn.number, "path": path, "phase": phase},
+                    params={
+                        "turn_number": view.turn.number,
+                        "path": path,
+                        "phase": phase,
+                    },
                 )
             )["content"]
 

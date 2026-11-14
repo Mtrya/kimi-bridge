@@ -79,6 +79,7 @@ class PromptOutcome(Enum):
     STEERED = "steered"
     STEERING_UNAVAILABLE = "steering_unavailable"
     BLOCKED = "blocked"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +95,7 @@ class QueuedPrompt:
     """One native input shown by queue inspection."""
 
     id: str
-    status: Literal["running", "queued", "blocked"]
+    status: Literal["running", "queued", "blocked", "failed"]
     text: str
 
 

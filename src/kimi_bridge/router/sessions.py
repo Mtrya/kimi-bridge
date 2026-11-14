@@ -716,10 +716,12 @@ class _SessionMixin(_ObservationMixin):
                 elif isinstance(event, (InteractionUpdate, InteractionSnapshot)):
                     await self._handle_interaction_event(active, event)
                 else:
+                    payload = event.get("payload", {})
+                    if payload.get("type") == "resync_required":
+                        await self._reconcile_compaction_resync(active.session_id)
                     if active.foreground:
                         await self._dispatch_stream_event(active, event)
                     else:
-                        payload = event.get("payload", {})
                         self._dispatch_compaction_event(active.session_id, payload.get("type", ""), payload)
         except asyncio.CancelledError:
             failure = KimiServerError("kimi event stream stopped")
@@ -735,6 +737,18 @@ class _SessionMixin(_ObservationMixin):
                 failure = KimiServerError("kimi event stream stopped")
             if not active.preserve_compaction_waiter:
                 self._fail_compaction_waiter(active.session_id, failure)
+
+    async def _reconcile_compaction_resync(self, session_id: str) -> None:
+        waiter = self._compaction_waiters.get(session_id)
+        if (
+            waiter is None
+            or waiter.future.done()
+            or waiter.active_trigger == "auto"
+        ):
+            return
+        status = await self._client.get_session_status(session_id)
+        if not status.busy:
+            waiter.future.set_result(_CompactionOutcome("unavailable"))
 
     def _dispatch_compaction_event(
         self,

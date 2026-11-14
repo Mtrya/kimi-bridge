@@ -37,8 +37,8 @@ from test_kimi_server import (
     FakeWebSocket,
     FakeWebSocketConnect,
     _envelope,
-    _turn_ended_ops,
 )
+from test_kimi_turns import _frame, _item, _page, _turn, _user
 
 
 def _activity(
@@ -384,26 +384,32 @@ async def test_side_question_lifetime_follows_binding_changes_but_not_main_stop(
 
 
 async def test_native_side_question_subscribes_and_submits_only_to_created_agent():
-    ended = _turn_ended_ops(2)
-    ended["payload"]["agent_id"] = "side-agent"
+    running = _turn(
+        "side-turn",
+        items=[
+            _user(prompt_ids=["side-prompt"]),
+            _item("side-answer", text="Native side answer"),
+        ],
+    )
+    ended = _turn(
+        "side-turn",
+        status="ended",
+        outcome="completed",
+        items=running["items"],
+    )
     socket = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []}, events=[ended]
-    )
-    http = FakeHttpClient(
-        [
-            _envelope({"agent_id": "side-agent"}),
-            _envelope({"prompt_id": "side-prompt", "status": "running"}),
-            _envelope(None, code=40903, msg="already ended"),
-        ],
-        transcript_snapshots=[
-            {"agents": [], "pending_interactions": []},
-            {"attachments": [], "seq": 2, "has_more": False, "items": [
-                {"kind": "turn", "ordinal": 1, "state": "completed", "steps": [
-                    {"frames": [{"kind": "text", "role": "assistant", "text": "Native side answer"}]}
-                ]}
-            ]},
+        pages={"side-agent": [_page([running], agent_id="side-agent")]},
+        events=[
+            _frame("turn.ended", agent_id="side-agent", turn=ended)
         ],
     )
+    http = FakeHttpClient([
+        _envelope({"agent_id": "side-agent"}),
+        _envelope({"prompt_id": "side-prompt", "status": "running"}),
+        _envelope({"turns": [running], "has_more": False}),
+        _envelope({"turns": [ended], "has_more": False}),
+        _envelope({"aborted": False}),
+    ])
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
@@ -426,19 +432,19 @@ async def test_native_side_question_subscribes_and_submits_only_to_created_agent
         "content": [{"type": "text", "text": "Inspect fixture"}],
         "agent_id": "side-agent",
     }
-    subscribe = next(frame for frame in socket.sent if frame["type"] == "subscribe_v2")
-    assert subscribe["payload"]["transcript"] == {"side-agent": "delta"}
-    transcripts = [
-        request for request in http.requests if request[1].endswith("/transcript")
+    subscribe = next(frame for frame in socket.sent if frame["type"] == "subscribe")
+    assert subscribe["agent_ids"] == ["side-agent"]
+    turns = [
+        request for request in http.requests if request[1].endswith("/turns")
     ]
-    assert all(
-        request[2]["params"]["agent_id"] == "side-agent" for request in transcripts
+    assert turns and all(
+        "/agents/side-agent/turns" in request[1] for request in turns
     )
 
 
 async def test_native_subscriptions_for_distinct_sessions_progress_independently():
     sockets = [
-        FakeWebSocket(subscribe_payload={"accepted": [session_id], "not_found": []})
+        FakeWebSocket()
         for session_id in ("A", "B")
     ]
     async with KimiServerClient(
@@ -472,7 +478,6 @@ async def test_native_subscriptions_for_distinct_sessions_progress_independently
 
 async def test_reconnect_replaces_activity_with_a_baseline():
     disconnected = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []},
         disconnect_after_events=True,
         tasks=[
             {
@@ -483,9 +488,7 @@ async def test_reconnect_replaces_activity_with_a_baseline():
             }
         ],
     )
-    reconnected = FakeWebSocket(
-        subscribe_payload={"accepted": ["session-1"], "not_found": []}
-    )
+    reconnected = FakeWebSocket()
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
@@ -885,92 +888,57 @@ async def test_running_agent_retains_observation_without_main_busy_or_tasks(tmp_
 
 
 @pytest.mark.parametrize("state", ["completed", "failed", "cancelled"])
-async def test_native_side_question_recovers_terminal_reset_without_resubmitting(state):
-    class SideSocket(FakeWebSocket):
-        def _agent_burst_frames(self, session_id, *, include_reset=True):
-            frames = super()._agent_burst_frames(
-                session_id, include_reset=include_reset
-            )
-            for frame in frames:
-                frame["agent_id"] = "side-agent"
-                if frame["type"] == "transcript.reset":
-                    frame["payload"]["agent_id"] = "side-agent"
-            return frames
-
-    turn = {
-        "kind": "turn",
-        "turnId": "side-turn",
-        "ordinal": 1,
-        "state": state,
-        "triggerPromptId": "side-prompt",
-        "steps": [
-            {
-                "stepId": "side-step",
-                "ordinal": 1,
-                "state": state,
-                "frames": [
-                    {
-                        "kind": "text",
-                        "role": "assistant",
-                        "text": "Recovered side fixture",
-                    }
-                ],
-            }
+async def test_native_side_question_recovers_terminal_page_without_resubmitting(state):
+    running = _turn(
+        "side-turn",
+        items=[
+            _user(prompt_ids=["side-prompt"]),
+            _item("side-answer", text="Recovered side fixture"),
         ],
-    }
-    first = SideSocket(
-        subscribe_payload={"accepted": ["session-1"]}, disconnect_after_events=True
     )
-    second = SideSocket(
-        subscribe_payload={"accepted": ["session-1"]},
-        reset_on_resume=True,
-        reset_seq=10,
+    outcome = "interrupted" if state == "cancelled" else state
+    ended = _turn(
+        "side-turn",
+        status="ended",
+        outcome=outcome,
+        items=running["items"],
     )
-    second._reset_snapshot_items = [turn]
-    empty = {
-        "items": [],
-        "agents": [],
-        "pending_interactions": [],
-        "attachments": [],
-        "has_more": False,
-        "seq": 1,
-    }
-    complete = {**empty, "items": [turn], "seq": 10}
-    http = FakeHttpClient(
-        [
-            _envelope({"agent_id": "side-agent"}),
-            _envelope({"prompt_id": "side-prompt", "status": "running"}),
-            _envelope(None, code=40903, msg="already ended"),
-        ],
-        transcript_snapshots=[empty, complete, complete],
+    first = FakeWebSocket(
+        pages={"side-agent": [_page([running], agent_id="side-agent")]},
+        disconnect_after_events=True,
     )
+    second = FakeWebSocket(
+        pages={"side-agent": [_page([ended], agent_id="side-agent")]},
+    )
+    http = FakeHttpClient([
+        _envelope({"agent_id": "side-agent"}),
+        _envelope({"prompt_id": "side-prompt", "status": "running"}),
+        _envelope({"turns": [running], "has_more": False}),
+        _envelope({"turns": [ended], "has_more": False}),
+        _envelope({"turns": [ended], "has_more": False}),
+        _envelope({"aborted": False}),
+    ])
     async with KimiServerClient(
         "http://127.0.0.1:43123",
         "token",
         http_client=http,
         ws_connect=FakeWebSocketConnect([first, second]),
-        sleep=lambda _: asyncio.sleep(0),
+        reconnect_initial_backoff=0,
     ) as client:
-
-        async def collect():
-            return [
-                event
-                async for event in client.side_question("session-1", "Inspect fixture")
-            ]
-
-        events = await asyncio.wait_for(collect(), 1)
-    ended = [event for event in events if event["payload"]["type"] == "turn.ended"]
-    assert len(ended) == 1 and ended[0]["payload"]["reason"] == state
-    assert ended[0]["snapshot"]["messages"]["items"][-1]["content"] == [
+        events = [
+            event
+            async for event in client.side_question("session-1", "Inspect fixture")
+        ]
+    terminal = [
+        event for event in events if event["payload"]["type"] == "turn.ended"
+    ]
+    assert len(terminal) == 1 and terminal[0]["payload"]["reason"] == state
+    assert terminal[0]["snapshot"]["messages"]["items"][-1]["content"] == [
         {"type": "text", "text": "Recovered side fixture"}
     ]
-    assert (
-        len(
-            [
-                request
-                for request in http.requests
-                if request[0] == "POST" and request[1].endswith("/prompts")
-            ]
-        )
-        == 1
-    )
+    prompts = [
+        request
+        for request in http.requests
+        if request[0] == "POST" and request[1].endswith("/prompts")
+    ]
+    assert len(prompts) == 1
