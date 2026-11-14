@@ -51,23 +51,33 @@ class WorkspaceOperations:
     async def get_plan_document(self, request: ApprovalRequest) -> PlanDocument | None:
         if request.tool_name != "ExitPlanMode" or request.tool_call_id is None:
             return None
-        data = await self._request_operation(
-            "session_plan",
-            path_parameters={"session_id": request.session_id},
-            params={"agent_id": request.agent_id, "tool_call_id": request.tool_call_id},
-        )
-        plan = next(
-            (
-                value
-                for value in data["plans"]
-                if value["tool_call_id"] == request.tool_call_id
-            ),
-            None,
-        )
-        if plan is None:
-            return None
-        name = (plan.get("path") or "plan.md").replace("\\", "/").rsplit("/", 1)[-1]
-        return PlanDocument(name, plan["plan"])
+        async for page in self._turn_pages(
+            request.session_id, request.agent_id, page_size=200
+        ):
+            for turn in page["turns"]:
+                for item in turn.get("items") or ():
+                    if (
+                        item.get("type") != "tool_call"
+                        or item.get("item_id") != request.tool_call_id
+                    ):
+                        continue
+                    display = item.get("display")
+                    if not isinstance(display, dict):
+                        return None
+                    if display.get("kind") != "plan_review":
+                        return None
+                    plan = display.get("plan")
+                    if not isinstance(plan, str):
+                        raise KimiServerProtocolError(
+                            "plan_review display must carry plan text"
+                        )
+                    name = (
+                        (display.get("path") or "plan.md")
+                        .replace("\\", "/")
+                        .rsplit("/", 1)[-1]
+                    )
+                    return PlanDocument(name, plan)
+        return None
 
     async def get_file_context(self, session_id: str) -> FileContext:
         session = await self.get_session(session_id)

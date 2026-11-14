@@ -274,6 +274,10 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
             await self._send_chunked(
                 adapter, conversation, f"{operation} was blocked before execution."
             )
+        elif result.outcome is PromptOutcome.FAILED:
+            await self._send_chunked(
+                adapter, conversation, f"{operation} failed before execution."
+            )
 
     async def _build_prompt_content(
         self,

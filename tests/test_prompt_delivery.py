@@ -53,8 +53,10 @@ def exchange(
     [
         ("running", PromptDelivery.STEER_IF_ACTIVE, PromptOutcome.SUBMITTED),
         ("blocked", PromptDelivery.STEER_IF_ACTIVE, PromptOutcome.BLOCKED),
+        ("failed", PromptDelivery.STEER_IF_ACTIVE, PromptOutcome.FAILED),
         ("queued", PromptDelivery.ENQUEUE, PromptOutcome.SUBMITTED),
         ("blocked", PromptDelivery.ENQUEUE, PromptOutcome.BLOCKED),
+        ("failed", PromptDelivery.ENQUEUE, PromptOutcome.FAILED),
     ],
 )
 async def test_submission_without_steering(status, delivery, expected) -> None:
@@ -137,6 +139,30 @@ async def test_lost_response_does_not_resubmit(during_steering) -> None:
         assert caught.value.uncertain is True
     assert isinstance(caught.value.__cause__, KimiServerTransportError)
     assert sum(request.url.path.endswith("/prompts") for request in requests) == 1
+
+
+async def test_failed_prompt_is_preserved_in_queue_inspection() -> None:
+    http, _ = exchange(
+        [
+            envelope(
+                {
+                    "active": {
+                        "prompt_id": "failed-prompt",
+                        "status": "failed",
+                        "content": [{"type": "text", "text": "hello"}],
+                    },
+                    "queued": [],
+                }
+            )
+        ]
+    )
+    async with http:
+        client = KimiServerClient("http://localhost:1234", "token", http_client=http)
+        queue = await client.get_prompt_queue("s1")
+    assert queue.active is not None
+    assert queue.active.id == "failed-prompt"
+    assert queue.active.status == "failed"
+    assert queue.active.text == "hello"
 
 
 async def test_submission_rejection_is_not_misclassified_as_uncertain() -> None:

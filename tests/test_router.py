@@ -3838,13 +3838,15 @@ async def delivery_context(tmp_path: Path):
         await router.close()
 
 
-async def test_blocked_prompt_is_reported_and_next_message_is_accepted(
-    delivery_context,
+@pytest.mark.parametrize("outcome", [PromptOutcome.BLOCKED, PromptOutcome.FAILED])
+async def test_unstarted_prompt_is_reported_and_next_message_is_accepted(
+    delivery_context, outcome
 ) -> None:
     router, client, adapter = delivery_context
-    client.prompt_outcomes = [PromptOutcome.BLOCKED]
-    await router.handle_inbound(adapter, _message("blocked"))
+    client.prompt_outcomes = [outcome]
+    await router.handle_inbound(adapter, _message("unstarted"))
     assert len(adapter.final_texts) == 1
+    assert "before execution" in adapter.final_texts[0][2]
     await router.handle_inbound(adapter, _message("next"))
     assert len(client.prompts) == 2
     assert len(adapter.final_texts) == 1

@@ -34,10 +34,13 @@ async def deliver_prompt(
     status = data.get("status")
     if not isinstance(prompt_id, str) or not prompt_id:
         raise KimiServerProtocolError("prompt submission has no prompt id")
-    if not isinstance(status, str) or status not in {"running", "queued", "blocked"}:
+    if not isinstance(status, str) or status not in {"running", "queued", "blocked", "failed"}:
         raise KimiServerProtocolError("prompt submission has an invalid status")
-    if status == "blocked":
-        return PromptSubmission(prompt_id, PromptOutcome.BLOCKED)
+    if status in {"blocked", "failed"}:
+        return PromptSubmission(
+            prompt_id,
+            PromptOutcome.BLOCKED if status == "blocked" else PromptOutcome.FAILED,
+        )
     submitted = PromptSubmission(prompt_id, PromptOutcome.SUBMITTED)
     if delivery is PromptDelivery.ENQUEUE or status != "queued":
         return submitted

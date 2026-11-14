@@ -44,7 +44,7 @@ from .types import (
 
 def _queued_prompt_from_wire(value: dict[str, Any]) -> QueuedPrompt:
     status = value["status"]
-    if status not in {"running", "queued", "blocked"}:
+    if status not in {"running", "queued", "blocked", "failed"}:
         raise KimiServerProtocolError(f"unknown prompt status: {status!r}")
     parts = []
     for part in value["content"]:

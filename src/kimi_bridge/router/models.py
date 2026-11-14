@@ -46,7 +46,6 @@ class _RenderState:
 class _PendingFinalization:
     answer: _RenderState
     thinking: _RenderState
-    turn_end_seq: int | None
     notice: SessionNotice | None = None
 
 

@@ -491,7 +491,6 @@ class _RenderingMixin:
         prompt_id = _snapshot_prompt_id(snapshot, turn_id=turn_id)
         answer.prompt_id = prompt_id
         thinking.prompt_id = prompt_id
-        turn_end_seq = _optional_int(event.get("seq"))
 
         answer_text = _in_flight_assistant_text(snapshot, turn_id=turn_id)
         if answer_text is None:
@@ -514,7 +513,6 @@ class _RenderingMixin:
         active.pending_finalization = _PendingFinalization(
             answer=answer,
             thinking=thinking,
-            turn_end_seq=turn_end_seq,
             notice=terminal_notice,
         )
 
@@ -546,17 +544,13 @@ class _RenderingMixin:
 
         pending.answer.prompt_id = prompt_id
         pending.thinking.prompt_id = prompt_id
-        required_seq = _max_seq(
-            pending.turn_end_seq,
-            _optional_int(event.get("seq")),
-        )
         for delay in (0.0, *FINAL_SNAPSHOT_RETRY_DELAYS):
             if delay:
                 await self._poll_sleep(delay)
             if active.pending_finalization is not pending:
                 return
             snapshot = await self._client.get_snapshot(active.session_id)
-            if not _snapshot_is_final(snapshot, required_seq=required_seq):
+            if not _snapshot_is_final(snapshot):
                 continue
             answer_text = _persisted_assistant_text(
                 snapshot, prompt_id=prompt_id
@@ -777,20 +771,8 @@ def _optional_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _snapshot_is_final(
-    snapshot: dict[str, Any], *, required_seq: int | None
-) -> bool:
-    if isinstance(snapshot.get("in_flight_turn"), dict):
-        return False
-    if required_seq is None:
-        return True
-    as_of_seq = _optional_int(snapshot.get("as_of_seq"))
-    return as_of_seq is not None and as_of_seq >= required_seq
-
-
-def _max_seq(first: int | None, second: int | None) -> int | None:
-    values = [value for value in (first, second) if value is not None]
-    return max(values) if values else None
+def _snapshot_is_final(snapshot: dict[str, Any]) -> bool:
+    return not isinstance(snapshot.get("in_flight_turn"), dict)
 
 
 def _extend_provisional_text(render: _RenderState, candidate: str | None) -> None:

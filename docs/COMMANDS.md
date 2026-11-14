@@ -156,7 +156,7 @@ Changing `/mode` affects later permission checks but does not answer a currently
 - `auto` approves ordinary tools and skips questions. Plan review still requires a response on Feishu and Telegram.
 - `yolo` auto-approves regular tools but may still ask questions.
 
-Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. An `ExitPlanMode` approval additionally shows a bounded (4,000-character) plan preview from the native transcript, scoped to the requesting agent and tool call, and sends the full plan as a file when the preview truncates. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode, and the bridge automatically approves `ExitPlanMode` requests so `/plan on` can finish without interaction. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
+Feishu renders approvals and questions as interactive cards. Telegram renders approval buttons and a sequential question wizard. An `ExitPlanMode` approval additionally shows a bounded (4,000-character) plan preview from the native plan-review tool display, scoped to the requesting agent and tool call, and sends the full plan as a file when the preview truncates. QQ and WeChat cannot present approvals or questions: every session is forced into `auto` mode, and the bridge automatically approves `ExitPlanMode` requests so `/plan on` can finish without interaction. `/mode` explains that the mode is fixed, and `/render-thinking on` explains that separate thinking rendering remains off for those adapters.
 
 Plan mode is enabled explicitly with `/plan on` or Kimi configuration; the agent cannot enter it itself.
 
@@ -170,7 +170,7 @@ QQ uses a stable-frontier `stream_messages` lifecycle with correction withdrawal
 
 Explicit native goal-complete/blocked updates and background task/subagent outcomes produce short notices. Goal-clear updates stay silent: Kimi Code 2.5.2 exposes the same cleared state after completion and cancellation. Current-session notices show the outcome and detail; notices from other sessions add the session name above them and a `/switch <session-id>` command below. Leaving work running by switching, creating, or forking sessions retains observation and its original allowed delivery route across restarts. A notice leaves the current binding unchanged. Initial/reconnect snapshots establish baselines; absent tasks do not imply a completion. The bridge attempts each notice once, logs failed delivery, and drops it. Adapter transport retry behavior still applies.
 
-`/btw` uses Kimi’s native read-only side agent and returns one answer labelled “Side question”. Main work, thinking output, and queued prompts remain independent; ordinary messages continue targeting main. Another `/btw` replaces the previous side question. Switching sessions, archiving, and shutdown close it; a disconnected subscription resumes its journal without resubmitting the question.
+`/btw` uses Kimi’s native read-only side agent and returns one answer labelled “Side question”. Main work, thinking output, and queued prompts remain independent; ordinary messages continue targeting main. Another `/btw` replaces the previous side question. Switching sessions, archiving, and shutdown close it; a disconnected subscription requests fresh authoritative turns pages without resubmitting the question.
 
 ## Inbound and outbound media
 
