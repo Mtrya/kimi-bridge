@@ -187,7 +187,9 @@ def _check_request_contract(
             for example in contract.request_examples
         )
     else:
-        ok = body_schema is None and not (
+        # A bodyless client call stays valid when a documented body is
+        # optional; only a required body breaks it.
+        ok = not (
             isinstance(request_body, dict)
             and request_body.get("required") is True
         )
@@ -347,6 +349,32 @@ def _evaluate_asyncapi_contract(
                     contract.source,
                 )
             )
+        if contract.frame_types:
+            # The client dispatches each frame on its ``type`` value; a
+            # renamed or retyped frame would be silently ignored, so every
+            # provided variant must keep one of the dispatched aliases.
+            checks.append(
+                _contract_check(
+                    f"websocket.message.{name}.frame_type",
+                    "websocket",
+                    all(
+                        any(
+                            _schema_accepts_instance(type_schema, value)
+                            for value in contract.frame_types
+                        )
+                        for variant in variants
+                        for type_schema in (
+                            state
+                            for state, _required in _field_states(
+                                variant, ("type",)
+                            )
+                        )
+                    ),
+                    "message frame type matches a dispatched alias "
+                    f"({', '.join(contract.frame_types)})",
+                    contract.source,
+                )
+            )
         if contract.examples:
             checks.append(
                 _contract_check(
@@ -415,11 +443,44 @@ def _dereference_node(
             for key, value in node.items()
             if key != "$ref"
         }
-        return {**resolved, **siblings}
+        return _compose_reference_siblings(resolved, siblings)
     return {
         key: _dereference_node(value, root, active)
         for key, value in node.items()
     }
+
+
+def _compose_reference_siblings(
+    resolved: dict[str, Any], siblings: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply keywords adjacent to a ``$ref`` alongside the resolved schema.
+
+    JSON Schema treats ``$ref`` as a peer assertion, so adjacent
+    constraints narrow the referenced schema instead of replacing it:
+    required-name lists combine and property schemas merge per key.
+    """
+    if not siblings:
+        return resolved
+    composed = dict(resolved)
+    merged_required: list[str] = []
+    for source in (resolved, siblings):
+        required = source.get("required")
+        if isinstance(required, list):
+            for name in required:
+                if name not in merged_required:
+                    merged_required.append(name)
+    if merged_required:
+        composed["required"] = merged_required
+    resolved_properties = resolved.get("properties")
+    sibling_properties = siblings.get("properties")
+    if isinstance(resolved_properties, dict) and isinstance(
+        sibling_properties, dict
+    ):
+        composed["properties"] = {**resolved_properties, **sibling_properties}
+    for key, value in siblings.items():
+        if key not in ("required", "properties"):
+            composed[key] = value
+    return composed
 
 
 def _lookup_pointer(
@@ -527,20 +588,22 @@ def _field_matches(
         schema, requirement.path
     ):
         return False
-    if not requirement.required:
-        # An optional field is one the bridge may omit on an outbound shape,
-        # so an outbound schema must not require it. Any optional field must
-        # also stay verifiable without unresolved references.
-        if (
-            outbound
-            and not requirement.required_if_parent_present
-            and any(required for _schema, required in states)
-        ):
-            return False
-        if any(
-            _contains_unresolved_ref(field_schema) for field_schema, _ in states
-        ):
-            return False
+    if any(
+        _contains_unresolved_ref(field_schema) for field_schema, _ in states
+    ):
+        # An unresolved reference leaves the consumed shape unverifiable,
+        # whether the field is required or optional.
+        return False
+    if (
+        outbound
+        and not requirement.required
+        and not requirement.required_if_parent_present
+        and all(required for _schema, required in states)
+    ):
+        # An outbound field the bridge may omit must stay omittable in at
+        # least one accepted request shape; alternatives that require it
+        # are covered by the instance checks for the sent examples.
+        return False
     if (
         "any" in requirement.types
         and not requirement.values

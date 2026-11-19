@@ -778,6 +778,67 @@ async def test_session_model_resolves_through_agent_inspection_without_agent_con
     ]
 
 
+async def test_session_normalizes_the_native_2_7_payload_shape() -> None:
+    """2.7 sessions carry top-level ``cwd``/``activity`` without legacy fields."""
+
+    session = {
+        "id": "session-1",
+        "title": "Native shape",
+        "workspace_id": "wd_workspace_0123456789ab",
+        "cwd": "/tmp/native",
+        "activity": "idle",
+        "created_at": "2026-11-20T00:00:00Z",
+        "updated_at": "2026-11-20T00:00:00Z",
+    }
+    http = FakeHttpClient([_envelope(session)])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    normalized = await client.get_session("session-1")
+
+    assert normalized["cwd"] == "/tmp/native"
+    assert normalized["busy"] is False
+    assert normalized["metadata"]["cwd"] == "/tmp/native"
+
+
+async def test_update_profile_resolves_the_model_through_agent_inspection() -> None:
+    """2.7 profile responses may omit ``agent.model``; the edit still applies."""
+
+    session = {
+        "id": "session-1",
+        "title": "Goal session",
+        "workspace_id": "wd_workspace_0123456789ab",
+        "cwd": "/tmp/workspace",
+        "activity": "idle",
+    }
+    agent = {
+        "status": "idle",
+        "compacting": False,
+        "plan_mode": False,
+        "swarm_mode": False,
+        "tower_mode": False,
+    }
+
+    class InspectSocket(FakeWebSocket):
+        def _agent_burst_frames(self, session_id, agent_id="main"):
+            frames = super()._agent_burst_frames(session_id, agent_id)
+            for frame in frames:
+                if frame.get("type") == "agent":
+                    frame.update(model="kimi-code/k3")
+            return frames
+
+    http = FakeHttpClient([_envelope({"session": session, "agent": agent})])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([InspectSocket()]),
+    ) as client:
+        profile = await client.update_profile("session-1", goal_objective="Finish")
+
+    assert profile.session_id == "session-1"
+    assert profile.model == "kimi-code/k3"
+
+
 async def test_session_status_reads_the_stored_session_object() -> None:
     status = {
         "id": "session-1",

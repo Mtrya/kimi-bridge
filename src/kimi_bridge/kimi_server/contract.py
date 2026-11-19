@@ -57,6 +57,7 @@ class WebSocketMessageContract:
     examples: tuple[Mapping[str, Any], ...] = ()
     discriminator: tuple[str, str] | None = None
     spec_names: tuple[str, ...] = ()
+    frame_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +427,8 @@ KIMI_REST_OPERATIONS: dict[str, RestOperationContract] = {
                     "goal_control": "pause",
                 },
             },
+            {"agent_config": {"goal_objective": "Finish the task"}},
+            {"agent_config": {"goal_control": "pause"}},
         ),
         response_fields=_PROFILE_FIELDS,
     ),
@@ -765,6 +768,7 @@ _KIMI_SHARED_WEBSOCKET_MESSAGES: tuple[WebSocketMessageContract, ...] = (
             _field("max_context_tokens", "integer", required=False),
         ),
         spec_names=("usage", "context"),
+        frame_types=("usage", "context"),
     ),
     WebSocketMessageContract(
         "goal",
@@ -1266,6 +1270,7 @@ def kimi_semantic_contract() -> dict[str, Any]:
             "source": item.source,
             "fields": [field_payload(field) for field in item.fields],
             "examples": [dict(value) for value in item.examples],
+            "frame_types": list(item.frame_types),
             **(
                 {"discriminator": dict([item.discriminator])}
                 if item.discriminator is not None

@@ -485,7 +485,13 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         )
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
-        """Read cumulative native counters, with live context-window values."""
+        """Read session usage, preferring live context-window values.
+
+        Kimi Code 2.7 session objects no longer carry cumulative token
+        counters, so those fields report ``None`` on a 2.7 server; the
+        live context values come from the usage frames of the bound
+        subscription.
+        """
 
         data = await self.get_session(session_id)
         return _session_usage_from_wire(
@@ -977,8 +983,18 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         session = data.get("session")
         agent = data.get("agent")
         if isinstance(session, dict) and isinstance(agent, dict):
-            return _session_profile_from_wire(session, agent=agent)
-        return _session_profile_from_wire(data)
+            wire_session, wire_agent = session, agent
+        else:
+            wire_session, wire_agent = data, None
+        effective_config = wire_session.get("agent_config") or wire_agent
+        if not (
+            isinstance(effective_config, dict) and effective_config.get("model")
+        ):
+            # 2.7 profile responses may omit the bound model even though the
+            # contract allows it; the model stays visible in the main
+            # agent's state, so resolve it there before decoding.
+            wire_agent = await self._inspect_main_agent(session_id)
+        return _session_profile_from_wire(wire_session, agent=wire_agent)
 
     async def list_tasks(
         self, session_id: str, *, status: TaskStatus | None = None
