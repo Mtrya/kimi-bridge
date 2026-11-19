@@ -994,6 +994,15 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
             # contract allows it; the model stays visible in the main
             # agent's state, so resolve it there before decoding.
             wire_agent = await self._inspect_main_agent(session_id)
+        if isinstance(wire_agent, dict):
+            # The response carries the post-update agent state; cache it so
+            # status reads never lag behind an applied settings change.
+            self._agent_frames[session_id] = {
+                "type": "agent",
+                "session_id": session_id,
+                "agent_id": _MAIN_AGENT_ID,
+                **wire_agent,
+            }
         return _session_profile_from_wire(wire_session, agent=wire_agent)
 
     async def list_tasks(
