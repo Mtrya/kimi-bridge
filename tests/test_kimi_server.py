@@ -730,6 +730,54 @@ async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> N
     assert resolved.capabilities == ("image_in", "video_in")
 
 
+async def test_session_model_resolves_through_agent_inspection_without_agent_config() -> (
+    None
+):
+    """2.7 session objects carry no agent_config; the model lives in the agent frame."""
+
+    session = {
+        "id": "session-1",
+        "busy": False,
+        "metadata": {"cwd": "/tmp"},
+        "activity": "idle",
+    }
+    model = {
+        "provider": "kimi-code",
+        "model": "kimi-code/k3",
+        "display_name": "K3",
+        "max_context_size": 262_144,
+        "capabilities": [],
+    }
+
+    class InspectSocket(FakeWebSocket):
+        def _agent_burst_frames(self, session_id, agent_id="main"):
+            frames = super()._agent_burst_frames(session_id, agent_id)
+            for frame in frames:
+                if frame.get("type") == "agent":
+                    frame.update(model="kimi-code/k3")
+            return frames
+
+    http = FakeHttpClient(
+        [
+            _envelope(session),
+            _envelope({"items": [model]}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([InspectSocket()]),
+    ) as client:
+        resolved = await client.get_session_model("session-1")
+
+    assert resolved.alias == "kimi-code/k3"
+    assert [request[1] for request in http.requests] == [
+        "http://127.0.0.1:43123/api/v1/sessions/session-1",
+        "http://127.0.0.1:43123/api/v1/models",
+    ]
+
+
 async def test_session_status_reads_the_stored_session_object() -> None:
     status = {
         "id": "session-1",

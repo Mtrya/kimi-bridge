@@ -351,15 +351,20 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
             self.get_session_status(session_id),
             self.list_models(),
         )
-        if status.model is None:
+        model_alias = status.model
+        if model_alias is None:
+            # 2.7 session objects carry no agent_config, so the bound model
+            # is only visible in the main agent's state; inspect it directly.
+            model_alias = (await self._inspect_main_agent(session_id)).get("model")
+        if model_alias is None:
             raise KimiServerProtocolError(
                 f"kimi session {session_id} has no configured model"
             )
         for model in models:
-            if model.alias == status.model:
+            if model.alias == model_alias:
                 return model
         raise KimiServerProtocolError(
-            f"kimi session {session_id} uses unavailable model {status.model!r}"
+            f"kimi session {session_id} uses unavailable model {model_alias!r}"
         )
 
     async def create_session(
