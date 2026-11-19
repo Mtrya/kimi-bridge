@@ -655,9 +655,17 @@ def test_semantic_projection_checks_fields_required_in_optional_parent(
         ({"instruction": {"allOf": [{"$ref": "#/components/schemas/Missing"}]}}, [], "fail"),
         ({"instruction": {"type": "string", "$ref": "#/components/schemas/Missing"}}, [], "fail"),
     ],
+    ids=[
+        "optional-string", "permissive", "any-of-permissive", "one-of-permissive",
+        "missing-field", "wrong-type", "required", "missing-ref", "any-of-missing-ref",
+        "all-of-missing-ref", "mixed-missing-ref",
+    ],
 )
-def test_compaction_contract_requires_optional_instruction_support(
-    properties: dict[str, Any], required: list[str], expected: str,
+def test_optional_request_field_contract_rejects_required_and_unresolved_refs(
+    monkeypatch: pytest.MonkeyPatch,
+    properties: dict[str, Any],
+    required: list[str],
+    expected: str,
 ) -> None:
     openapi, asyncapi = _minimal_documents()
     action = openapi["paths"].pop("/api/v1/example")["get"]
@@ -673,12 +681,28 @@ def test_compaction_contract_requires_optional_instruction_support(
             },
         },
     }
-    operation = kimi_contract.KIMI_REST_OPERATIONS["compact_session"]
-    openapi["paths"][operation.spec_path] = {"post": action}
+    operation = kimi_contract.RestOperationContract(
+        "example_optional_field",
+        "KimiServerClient.example",
+        "POST",
+        "/example",
+        "/api/v1/example",
+        request_fields=(
+            kimi_contract._field("instruction", "string", required=False),
+        ),
+    )
+    monkeypatch.setattr(
+        kimi_contract,
+        "KIMI_REST_OPERATIONS",
+        {"example_optional_field": operation},
+    )
+    openapi["paths"]["/api/v1/example"] = {"post": action}
 
     checks = kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
 
-    request = next(item for item in checks if item.id == "rest.compact_session.request")
+    request = next(
+        item for item in checks if item.id == "rest.example_optional_field.request"
+    )
     assert request.status == expected
 
 
@@ -790,12 +814,10 @@ def test_semantic_projection_accepts_an_optional_session_context_limit(
 ) -> None:
     openapi, asyncapi = _minimal_documents()
     get_session = kimi_contract.KIMI_REST_OPERATIONS["get_session"]
-    context_limit = next(
-        field
+    assert all(
+        field.path != ("usage", "context_limit")
         for field in get_session.response_fields
-        if field.path == ("usage", "context_limit")
     )
-    assert context_limit.required is False
 
     operation = kimi_contract.RestOperationContract(
         "get_session",
@@ -803,7 +825,9 @@ def test_semantic_projection_accepts_an_optional_session_context_limit(
         "GET",
         "/sessions/{session_id}",
         "/api/v1/sessions/{session_id}",
-        response_fields=(context_limit,),
+        response_fields=(
+            kimi_contract._field("usage.context_limit", "integer", required=False),
+        ),
     )
     example = openapi["paths"].pop("/api/v1/example")
     data_schema = example["get"]["responses"]["200"]["content"][

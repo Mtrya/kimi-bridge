@@ -1007,15 +1007,15 @@ async def test_mismatched_permission_mode_readback_is_rejected(
         model="kimi-code/k3",
     )
     try:
-        with pytest.raises(
-            KimiServerProtocolError, match="did not bind permission mode"
-        ):
-            await router.handle_inbound(adapter, _message("first"))
+        await router.handle_inbound(adapter, _message("first"))
     finally:
         await router.close()
 
     assert store.load().bindings == {}
     assert client.prompts == []
+    assert any(
+        "did not bind permission mode" in text[-1] for text in adapter.final_texts
+    )
 
 
 @pytest.mark.parametrize(
@@ -1357,14 +1357,14 @@ async def test_new_binding_is_not_persisted_until_model_is_confirmed(
     )
     adapter = FakeAdapter()
     try:
-        with pytest.raises(KimiServerProtocolError, match="did not bind model"):
-            await router.handle_inbound(adapter, _message("first"))
+        await router.handle_inbound(adapter, _message("first"))
     finally:
         await router.close()
+    assert any("did not bind model" in text[-1] for text in adapter.final_texts)
 
     assert store.load().bindings == {}
     assert client.prompts == []
-    assert adapter.sent == []
+    assert len(adapter.sent) == 1
 
 
 async def test_persisted_unbound_session_repairs_model_once_and_keeps_mode(
@@ -3947,10 +3947,14 @@ async def test_unexpected_delivery_failures_remain_visible(
 ) -> None:
     router, client, adapter = delivery_context
     client.prompt_error = error
-    with pytest.raises(type(error)) as caught:
+    if isinstance(error, KimiServerError):
         await router.handle_inbound(adapter, _message("hello"))
-    assert caught.value is error
-    assert adapter.final_texts == []
+        assert adapter.final_texts[-1][-1] == "Prompt failed: invalid contract"
+    else:
+        with pytest.raises(type(error)) as caught:
+            await router.handle_inbound(adapter, _message("hello"))
+        assert caught.value is error
+        assert adapter.final_texts == []
 
 
 @pytest.mark.parametrize("blocked", [False, True])

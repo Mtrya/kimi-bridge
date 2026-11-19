@@ -17,7 +17,7 @@ from kimi_bridge.kimi_server import (
 )
 from kimi_bridge.platforms.base import InboundFile, InboundImage
 from kimi_bridge.router.workspace import _parse_new_options
-from test_kimi_server import FakeHttpClient, _envelope
+from test_kimi_server import FakeHttpClient, FakeResponse, _envelope
 from test_kimi_server import _profile_payload
 from test_kimi_turns import _turn
 from test_router import (
@@ -30,6 +30,8 @@ from test_router import (
 from test_session_controls import _router
 from test_workspace_files import FileServer
 from test_workspace_files import _setup
+
+from typing import Any
 
 
 def _change(status="modified", **fields):
@@ -283,6 +285,47 @@ async def test_remote_binding_without_cwd_fails_instead_of_using_host(tmp_path: 
             await client.get_file_context("session-1")
 
 
+class _WorkspaceListingHttp(FakeHttpClient):
+    """Serves GET /api/v1/sessions from a per-workspace session mapping.
+
+    The client enumerates the required ``busy`` and ``has_prompt`` flags,
+    so the fake answers each listing request from the mapping instead of a
+    fixed response order, splitting pages along the ``before_id`` cursor.
+    """
+
+    def __init__(
+        self,
+        responses: list[dict[str, Any]],
+        *,
+        sessions_by_workspace: dict[str, list[dict[str, Any]]],
+    ) -> None:
+        super().__init__(responses)
+        self._sessions_by_workspace = sessions_by_workspace
+        self.list_params: list[dict[str, Any]] = []
+
+    async def request(self, method: str, url: str, **kwargs: Any):
+        params = kwargs.get("params") or {}
+        if method == "GET" and url.endswith("/api/v1/sessions"):
+            self.list_params.append(params)
+            sessions = self._sessions_by_workspace.get(
+                params.get("workspace_id"), []
+            )
+            start = 0
+            before_id = params.get("before_id")
+            if before_id is not None:
+                start = next(
+                    (
+                        index + 1
+                        for index, session in enumerate(sessions)
+                        if session["id"] == before_id
+                    ),
+                    len(sessions),
+                )
+            page = sessions[start:start + 50]
+            return FakeResponse(_envelope({"items": page}))
+        return await super().request(method, url, **kwargs)
+
+
 @pytest.mark.parametrize("environment_id,cwd", [("local", None), ("remote", "/target")])
 async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
     environment_id: str, cwd: str | None,
@@ -291,7 +334,7 @@ async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
     if cwd is not None:
         binding["cwd"] = cwd
     alias = {"id": "visible-id", "root": "/primary", "additional_dirs": ["/extra"]}
-    http = FakeHttpClient(
+    http = _WorkspaceListingHttp(
         [
             _envelope({"metadata": {"cwd": "/original"}, "busy": True}),
             _envelope(binding),
@@ -299,10 +342,13 @@ async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
                 {"id": "unrelated", "root": "/original", "additional_dirs": []},
                 alias,
             ]}),
-            _envelope({"items": [{"id": "other", "metadata": {"cwd": "/original"}}]}),
-            _envelope({"items": [{"id": f"older-{index}"} for index in range(50)]}),
-            _envelope({"items": [{"id": "session-1", "workspace_id": "old-id"}]}),
-        ]
+        ],
+        sessions_by_workspace={
+            "visible-id": [
+                *[{"id": f"older-{index}"} for index in range(50)],
+                {"id": "session-1", "workspace_id": "old-id"},
+            ],
+        },
     )
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
@@ -312,25 +358,32 @@ async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
         WorkspaceInfo("visible-id", "/primary", ("/extra",)),
         cwd or "/original", environment_id,
     )
-    membership = [request[2]["params"] for request in http.requests[3:]]
+    membership = http.list_params
     assert [query["workspace_id"] for query in membership] == [
-        "unrelated", "visible-id", "visible-id",
+        "unrelated", "unrelated", "unrelated", "unrelated",
+        "visible-id", "visible-id", "visible-id", "visible-id",
+        "visible-id", "visible-id", "visible-id", "visible-id",
     ]
     assert membership[-1]["before_id"] == "older-49"
-    assert all(query["include_archive"] and "busy" not in query for query in membership)
+    assert all(
+        query["include_archive"]
+        and query["busy"] in (True, False)
+        and query["has_prompt"] in (True, False)
+        for query in membership
+    )
     assert all(method == "GET" for method, _, _ in http.requests)
 
 
 async def test_missing_workspace_does_not_guess_from_matching_session_cwd():
-    http = FakeHttpClient(
+    http = _WorkspaceListingHttp(
         [
             _envelope({"metadata": {"cwd": "/original"}}),
             _envelope({"workspace_id": "missing", "environment_id": "local"}),
             _envelope({"items": [{
                 "id": "unrelated", "root": "/original", "additional_dirs": [],
             }]}),
-            _envelope({"items": [{"id": "other", "metadata": {"cwd": "/original"}}]}),
-        ]
+        ],
+        sessions_by_workspace={},
     )
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
