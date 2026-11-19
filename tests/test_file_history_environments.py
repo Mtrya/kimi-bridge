@@ -286,18 +286,19 @@ async def test_remote_binding_without_cwd_fails_instead_of_using_host(tmp_path: 
 
 
 class _WorkspaceListingHttp(FakeHttpClient):
-    """Serves GET /api/v1/sessions from a per-workspace session mapping.
+    """Serves GET /api/v1/sessions from a per-workspace, per-filter mapping.
 
     The client enumerates the required ``busy`` and ``has_prompt`` flags,
-    so the fake answers each listing request from the mapping instead of a
-    fixed response order, splitting pages along the ``before_id`` cursor.
+    so the fake answers each listing request from the mapping for that
+    exact flag combination instead of a fixed response order, splitting
+    pages along the ``before_id`` cursor.
     """
 
     def __init__(
         self,
         responses: list[dict[str, Any]],
         *,
-        sessions_by_workspace: dict[str, list[dict[str, Any]]],
+        sessions_by_workspace: dict[str, dict[bool, list[dict[str, Any]]]],
     ) -> None:
         super().__init__(responses)
         self._sessions_by_workspace = sessions_by_workspace
@@ -308,8 +309,8 @@ class _WorkspaceListingHttp(FakeHttpClient):
         if method == "GET" and url.endswith("/api/v1/sessions"):
             self.list_params.append(params)
             sessions = self._sessions_by_workspace.get(
-                params.get("workspace_id"), []
-            )
+                params.get("workspace_id"), {}
+            ).get(params.get("has_prompt"), [])
             start = 0
             before_id = params.get("before_id")
             if before_id is not None:
@@ -344,10 +345,13 @@ async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
             ]}),
         ],
         sessions_by_workspace={
-            "visible-id": [
-                *[{"id": f"older-{index}"} for index in range(50)],
-                {"id": "session-1", "workspace_id": "old-id"},
-            ],
+            "visible-id": {
+                True: [
+                    *[{"id": f"older-{index}"} for index in range(50)],
+                    {"id": "session-1", "workspace_id": "old-id"},
+                ],
+                False: [],
+            },
         },
     )
     async with KimiServerClient(
@@ -361,9 +365,14 @@ async def test_hidden_workspace_resolves_native_alias_membership_across_pages(
     membership = http.list_params
     assert [query["workspace_id"] for query in membership] == [
         "unrelated", "unrelated", "unrelated", "unrelated",
-        "visible-id", "visible-id", "visible-id", "visible-id",
-        "visible-id", "visible-id", "visible-id", "visible-id",
+        "visible-id", "visible-id", "visible-id",
+        "visible-id", "visible-id", "visible-id",
     ]
+    assert {
+        (query["busy"], query["has_prompt"]) for query in membership
+    } == {
+        (False, False), (False, True), (True, False), (True, True),
+    }
     assert membership[-1]["before_id"] == "older-49"
     assert all(
         query["include_archive"]

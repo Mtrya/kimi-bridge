@@ -301,21 +301,20 @@ def _evaluate_asyncapi_contract(
     message_contracts = semantic_contract.KIMI_WEBSOCKET_MESSAGES
     for contract in message_contracts:
         spec_names = contract.spec_names or (contract.name,)
-        message = next(
-            (message_map[name] for name in spec_names if name in message_map),
-            None,
-        )
-        payload = message.get("payload") if isinstance(message, dict) else None
+        payloads = []
+        for spec_name in spec_names:
+            message = message_map.get(spec_name)
+            if isinstance(message, dict):
+                payloads.append(message.get("payload"))
         name = contract.name
-        variants = [payload] if isinstance(payload, dict) else []
+        variants = [payload for payload in payloads if isinstance(payload, dict)]
         if contract.discriminator is not None:
             field, value = contract.discriminator
             name = f"{name}.{value}"
             variants = [
                 variant
-                for variant in (
-                    _schema_alternatives(payload) if isinstance(payload, dict) else []
-                )
+                for payload in variants
+                for variant in _schema_alternatives(payload)
                 if _field_matches(
                     variant, SchemaFieldContract((field,), ("string",), values=(value,))
                 )
@@ -355,6 +354,7 @@ def _evaluate_asyncapi_contract(
                     "websocket",
                     all(
                         _schema_accepts_instance(payload, example)
+                        for payload in variants
                         for example in contract.examples
                     ),
                     "outbound message shapes remain accepted",

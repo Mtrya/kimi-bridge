@@ -255,6 +255,11 @@ async def test_mcp_restart_only_targets_selected_server_and_does_not_claim_healt
     assert http.requests[2][0] == "PUT" and http.requests[2][1].endswith(
         "/mcp/servers/selected%2Fserver"
     )
+    assert http.requests[2][2]["json"] == {
+        "transport": "stdio",
+        "command": "fixture",
+        "status": status,
+    }
     assert len(http.requests) == 3
 
 

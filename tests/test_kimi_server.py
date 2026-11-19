@@ -925,6 +925,7 @@ async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> 
             _envelope({"aborted": True}),
             _envelope({"aborted": True}),
             _envelope({"aborted": True}),
+            _envelope({"active": None, "queued": []}),
         ]
     )
     client = KimiServerClient(
@@ -953,12 +954,16 @@ async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> 
             "POST",
             "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
         ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
+        ),
     ]
-    assert http.requests[-1][0:2] == (
+    assert http.requests[-2][0:2] == (
         "POST",
         "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
     )
-    assert http.requests[-1][2]["json"] == {"agent_id": "main"}
+    assert http.requests[-2][2]["json"] == {"agent_id": "main"}
 
 
 async def test_abort_session_stops_promptless_main_turn() -> None:
@@ -966,6 +971,7 @@ async def test_abort_session_stops_promptless_main_turn() -> None:
         [
             _envelope({"active": None, "queued": []}),
             _envelope({"aborted": True}),
+            _envelope({"active": None, "queued": []}),
         ]
     )
     client = KimiServerClient(
@@ -982,8 +988,11 @@ async def test_abort_session_stops_promptless_main_turn() -> None:
             "POST",
             "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
         ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
+        ),
     ]
-    assert http.requests[-1][2]["json"] == {"agent_id": "main"}
 
 
 async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:

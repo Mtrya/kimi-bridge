@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from kimi_bridge.kimi_server import (
+    GoalBudget,
+    GoalInfo,
     KimiServerAPIError,
     KimiServerClient,
     PromptDelivery,
@@ -62,6 +64,28 @@ async def test_native_goal_edit_decodes_existing_identity_progress_and_budget(
              "goal": after},
         ]
         revised = await client.edit_goal("session-1", "Revised")
+    assert original == GoalInfo(
+        id="",
+        objective="Original",
+        completion_criterion="All checks pass",
+        status=status,
+        turns_used=4,
+        tokens_used=1234,
+        wall_clock_ms=9000,
+        budget=GoalBudget(
+            token_budget=None,
+            turn_budget=None,
+            wall_clock_budget_ms=None,
+            remaining_tokens=None,
+            remaining_turns=None,
+            remaining_wall_clock_ms=None,
+            token_budget_reached=False,
+            turn_budget_reached=False,
+            wall_clock_budget_reached=False,
+            over_budget=False,
+        ),
+        terminal_reason=None,
+    )
     assert revised == replace(original, objective="Revised")
     assert http.requests[0][0] == "POST"
     assert http.requests[0][1].endswith("/sessions/session-1/profile")
@@ -333,13 +357,14 @@ async def test_session_abort_continues_when_a_snapshot_prompt_has_left_queue(exp
         _envelope(None, code=40402) if expired == "queued" else _envelope({"aborted": True}),
         _envelope(None, code=40402) if expired == "active" else _envelope({"aborted": True}),
         _envelope({"aborted": True}),
+        _envelope({"active": None, "queued": []}),
     ])
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
     ) as client:
         assert await client.abort_session("session-1")
     assert [request[1].rsplit("/", 1)[-1] for request in http.requests] == [
-        "prompts", "queued:abort", "active:abort", "session-1:cancel",
+        "prompts", "queued:abort", "active:abort", "session-1:cancel", "prompts",
     ]
 
 

@@ -113,6 +113,11 @@ _CONVERSATION_FRAME_TYPES = frozenset(
 )
 
 
+def _session_recency_key(session: dict[str, Any]) -> str:
+    updated_at = session.get("updated_at")
+    return str(updated_at) if updated_at is not None else ""
+
+
 class _WebSocketResponseMismatch(KimiServerProtocolError):
     """A reconnect handshake received a frame for a different request."""
 
@@ -663,8 +668,17 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         merged: dict[str, dict[str, Any]] = {}
         for page in pages:
             for session in page:
-                merged.setdefault(str(session["id"]), session)
-        return list(merged.values())
+                key = str(session["id"])
+                existing = merged.get(key)
+                if (
+                    existing is None
+                    or _session_recency_key(session) > _session_recency_key(existing)
+                ):
+                    merged[key] = session
+        sessions = sorted(merged.values(), key=_session_recency_key, reverse=True)
+        if page_size is not None:
+            sessions = sessions[:page_size]
+        return sessions
 
     async def _list_sessions_page(
         self,
@@ -733,8 +747,14 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         merged: dict[str, dict[str, Any]] = {}
         for stream in streams:
             for session in stream:
-                merged.setdefault(str(session["id"]), session)
-        return list(merged.values())
+                key = str(session["id"])
+                existing = merged.get(key)
+                if (
+                    existing is None
+                    or _session_recency_key(session) > _session_recency_key(existing)
+                ):
+                    merged[key] = session
+        return sorted(merged.values(), key=_session_recency_key, reverse=True)
 
     async def _paginate_sessions(
         self,
@@ -1174,6 +1194,18 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
     async def abort_session(self, session_id: str) -> bool:
         """Abort the main turn after discarding prompt work queued behind it."""
 
+        await self._drain_prompt_queue(session_id)
+        await self._request_operation(
+            "abort_session",
+            path_parameters={"session_id": session_id},
+            json_body={"agent_id": _MAIN_AGENT_ID},
+        )
+        # Prompts submitted while the queue was being drained survive the
+        # main-agent cancel; drain whatever remains.
+        await self._drain_prompt_queue(session_id)
+        return True
+
+    async def _drain_prompt_queue(self, session_id: str) -> None:
         prompts = await self._request_operation(
             "list_prompts", path_parameters={"session_id": session_id}
         )
@@ -1188,12 +1220,6 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                 # A prompt can leave the queue after the snapshot; session work still needs stopping.
                 if exc.code != 40402:
                     raise
-        await self._request_operation(
-            "abort_session",
-            path_parameters={"session_id": session_id},
-            json_body={"agent_id": _MAIN_AGENT_ID},
-        )
-        return True
 
     async def _abort_prompt_by_id(
         self, session_id: str, prompt_id: str

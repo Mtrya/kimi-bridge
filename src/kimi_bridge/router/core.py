@@ -13,6 +13,7 @@ from ..kimi_server import (
     KimiServerClient,
     FileContext,
     KimiServerError,
+    KimiServerOperationError,
     PromptContent,
     PromptDelivery,
     PromptMedia,
@@ -218,9 +219,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
                         permission_mode=binding.permission_mode,
                     )
                     await self._report_prompt_outcome(adapter, msg.conversation, result)
-            except (KimiServerError, KeyError, TypeError) as exc:
-                if not isinstance(exc, KimiServerError):
-                    LOGGER.exception("kimi payload shape failed")
+            except KimiServerOperationError as exc:
                 await self._report_operation_error(
                     adapter,
                     msg.conversation,
@@ -242,7 +241,7 @@ class ChatRouter(_CommandMixin, _InteractionMixin, _SessionMixin, _RenderingMixi
         self,
         adapter: PlatformAdapter,
         conversation: ConversationRef,
-        exc: Exception,
+        exc: KimiServerOperationError,
         *,
         operation: str,
     ) -> None:

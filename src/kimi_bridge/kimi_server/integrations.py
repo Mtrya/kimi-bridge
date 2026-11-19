@@ -44,9 +44,10 @@ def _mcp_runtime_server(
     locator = value.get("locator") or {
         "source": "global", "name": value.get("id", value.get("name")),
     }
-    configured_name = locator["name"]
     if locator.get("source") == "plugin":
         configured_name = f"{locator['plugin_id']}:{locator['server_name']}"
+    else:
+        configured_name = locator["name"]
     config = value.get("config")
     if not isinstance(config, dict):
         config = configured.get(configured_name)
@@ -58,7 +59,11 @@ def _mcp_runtime_server(
     if auth is None:
         auth = config.get("status", "connected")
     status = config.get("status", "connected")
-    if auth in {"oauth-required", "oauth-expired"} or status == "error":
+    if (
+        auth in {"oauth-required", "oauth-expired", "unavailable"}
+        or status == "error"
+        or value.get("error")
+    ):
         status = "error"
     return McpServer(
         server_id,
@@ -201,7 +206,15 @@ class IntegrationOperations:
         )
         inspection = McpInspection(
             servers,
-            tuple((server.name, value.get("auth_status", server.status)) for server, value in zip(servers, runtime)),
+            tuple(
+                (
+                    server.name,
+                    value.get(
+                        "auth_status", value.get("authStatus", server.status)
+                    ),
+                )
+                for server, value in zip(servers, runtime)
+            ),
             tuple(tool for tool in tools if tool.active and tool.source == "mcp"),
         )
         if selector is None:
