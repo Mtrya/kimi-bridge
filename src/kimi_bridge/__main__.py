@@ -10,8 +10,9 @@ import shutil
 import signal
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import ParamSpec
 
 from . import __version__
 from .compatibility import (
@@ -23,7 +24,12 @@ from .compatibility import (
 )
 from .config import CONFIG_PATH_ENV, Config, load_config, resolve_config_path
 from .config_mutation import set_platform
-from .kimi_server import KimiServerClient, KimiServerError, KimiServerSupervisor
+from .kimi_server import (
+    KimiServerClient,
+    KimiServerError,
+    KimiServerProtocolError,
+    KimiServerSupervisor,
+)
 from .platforms.base import PlatformAdapter
 from .platforms.feishu import FEISHU_API_DOMAIN, FeishuAdapter
 from .platforms.feishu.storage import FeishuStorage, FeishuStorageError
@@ -52,6 +58,29 @@ _CREDENTIAL_BEARING_LIBRARY_LOGGERS = (
 
 class AdapterConfigurationError(RuntimeError):
     """Expected adapter configuration failure safe to render without traceback."""
+
+
+LOGGER = logging.getLogger(__name__)
+_P = ParamSpec("_P")
+
+
+def _guard_protocol_errors(
+    handler: Callable[_P, Awaitable[None]],
+) -> Callable[_P, Awaitable[None]]:
+    """Keep one poisoned event from killing an adapter's event loop.
+
+    The router deliberately propagates protocol violations, but a
+    long-running adapter must survive a single bad Kimi payload: the
+    event is logged and dropped instead of tearing down polling.
+    """
+
+    async def guarded(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        try:
+            await handler(*args, **kwargs)
+        except KimiServerProtocolError:
+            LOGGER.exception("Dropping an event after a Kimi protocol violation")
+
+    return guarded
 
 
 def _configure_logging(log_level: str) -> None:
@@ -105,7 +134,10 @@ async def run(config_path: str | Path) -> None:
             adapter_wait: asyncio.Task[None] | None = None
             signal_wait: asyncio.Task[bool] | None = None
             try:
-                await adapter.start(router.handle_inbound, router.handle_interaction)
+                await adapter.start(
+                    _guard_protocol_errors(router.handle_inbound),
+                    _guard_protocol_errors(router.handle_interaction),
+                )
                 await router.restore(adapter)
                 adapter_wait = asyncio.create_task(
                     adapter.wait(), name=f"{adapter.name}-adapter"

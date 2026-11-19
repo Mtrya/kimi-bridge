@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from typing import Any, cast
 
@@ -154,6 +155,35 @@ def _session_from_wire(value: dict[str, Any]) -> dict[str, Any]:
             raise KimiServerProtocolError(f"unknown session activity: {activity!r}")
         normalized["busy"] = activity != "idle"
     return normalized
+
+
+def session_recency_key(session: dict[str, Any]) -> tuple[int, float, str]:
+    """Return a comparable newest-first sort key for one session payload.
+
+    The Kimi contract types ``updated_at`` as an opaque value, so ISO
+    timestamps in any offset and epoch numbers are parsed into comparable
+    seconds instead of compared as strings; anything unparsed sorts below
+    every parsed value by its original text.
+    """
+    value = session.get("updated_at")
+    if isinstance(value, bool):
+        return (0, 0.0, "")
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if abs(seconds) >= 1e12:
+            # Epoch milliseconds.
+            seconds /= 1000.0
+        return (2, seconds, "")
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return (1, 0.0, text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (2, moment.timestamp(), "")
+    return (0, 0.0, "")
 
 
 def _session_workspace_from_wire(value: dict[str, Any]) -> str:

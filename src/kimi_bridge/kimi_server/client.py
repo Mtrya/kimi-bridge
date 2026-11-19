@@ -89,6 +89,7 @@ from .wire import (
     _skill_info_from_wire,
     _task_info_from_wire,
     _tool_info_from_wire,
+    session_recency_key as _session_recency_key,
 )
 
 
@@ -111,11 +112,6 @@ _CONVERSATION_FRAME_TYPES = frozenset(
         "notice",
     }
 )
-
-
-def _session_recency_key(session: dict[str, Any]) -> str:
-    updated_at = session.get("updated_at")
-    return str(updated_at) if updated_at is not None else ""
 
 
 class _WebSocketResponseMismatch(KimiServerProtocolError):
@@ -1217,7 +1213,11 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         )
 
     async def abort_session(self, session_id: str) -> bool:
-        """Abort the main turn after discarding prompt work queued behind it."""
+        """Abort the main turn after discarding prompt work queued behind it.
+
+        An error while confirming the drain propagates as a failure: the
+        caller should retry rather than assume the queue was discarded.
+        """
 
         await self._drain_prompt_queue(session_id)
         await self._request_operation(

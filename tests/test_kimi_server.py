@@ -839,6 +839,48 @@ async def test_update_profile_resolves_the_model_through_agent_inspection() -> N
     assert profile.model == "kimi-code/k3"
 
 
+async def test_list_sessions_merges_partitions_newest_first_and_caps_pages() -> None:
+    """Partitions merge by recency across formats, dedupe keeps the newest."""
+
+    older = {"id": "s-old", "updated_at": "2026-11-19T10:00:00Z"}
+    newer = {"id": "s-new", "updated_at": "2026-11-20T08:00:00+08:00"}
+    stale_copy = dict(newer, updated_at="2026-11-19T00:00:00Z")
+    epoch_newest = {"id": "s-epoch", "updated_at": 1795219200}
+    http = FakeHttpClient(
+        [
+            _envelope({"items": [older]}),
+            _envelope({"items": [newer]}),
+            _envelope({"items": [stale_copy]}),
+            _envelope({"items": [epoch_newest, older]}),
+        ]
+    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    sessions = await client.list_sessions(busy=None)
+
+    assert [session["id"] for session in sessions] == [
+        "s-epoch",
+        "s-new",
+        "s-old",
+    ]
+    assert sessions[1]["updated_at"] == "2026-11-20T08:00:00+08:00"
+
+    capped_http = FakeHttpClient(
+        [
+            _envelope({"items": [older]}),
+            _envelope({"items": [newer]}),
+            _envelope({"items": [stale_copy]}),
+            _envelope({"items": [epoch_newest, older]}),
+        ]
+    )
+    capped_client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=capped_http
+    )
+    capped = await capped_client.list_sessions(busy=None, page_size=2)
+
+    assert [session["id"] for session in capped] == ["s-epoch", "s-new"]
+
+
 async def test_session_status_reads_the_stored_session_object() -> None:
     status = {
         "id": "session-1",

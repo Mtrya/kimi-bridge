@@ -267,6 +267,39 @@ def test_interaction_contract_checks_each_variant(
     assert expected in failures
 
 
+@pytest.mark.parametrize(
+    "frame_name,frame_type,accepted",
+    [
+        ("usage", "usage", True),
+        ("context", "context", True),
+        ("usage", "metrics", False),
+        ("context", "metrics", False),
+    ],
+)
+def test_usage_frame_type_must_match_a_dispatched_alias(
+    frame_name: str, frame_type: str, accepted: bool
+) -> None:
+    openapi, asyncapi = _minimal_documents()
+    asyncapi["components"]["messages"][frame_name] = {
+        "payload": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "const": frame_type},
+                "session_id": {"type": "string"},
+                "agent_id": {"type": "string"},
+                "context_tokens": {"type": "integer"},
+            },
+            "required": ["type", "session_id", "agent_id", "context_tokens"],
+        }
+    }
+    failures = {
+        check.id
+        for check in kimi_contract.evaluate_kimi_semantic_contract(openapi, asyncapi)
+        if check.status == "fail"
+    }
+    assert ("websocket.message.usage.frame_type" in failures) is not accepted
+
+
 async def test_live_probe_monitors_native_subscription_pages_and_undo(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

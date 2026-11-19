@@ -172,6 +172,52 @@ async def test_mcp_inspection_keeps_runtime_auth_and_bound_tools_scopes_separate
     assert [request[0] for request in http.requests] == ["GET", "GET", "POST", "GET"]
 
 
+async def test_mcp_inspection_reports_runtime_errors_and_camel_case_auth():
+    http = FakeHttpClient(
+        [
+            _envelope({"metadata": {"cwd": "/bound"}}),
+            _envelope(
+                {
+                    "servers": [
+                        {
+                            "id": "server",
+                            "name": "server",
+                            "transport": "http",
+                            "status": "connected",
+                            "tool_count": 0,
+                        }
+                    ]
+                }
+            ),
+            _envelope(
+                [
+                    {
+                        "server_id": "server",
+                        "runtime_name": "server",
+                        "locator": {"source": "global", "name": "server"},
+                        "config": {
+                            "transport": "http",
+                            "url": "https://example.invalid",
+                            "status": "connected",
+                        },
+                        "enabled": True,
+                        "editable": True,
+                        "authStatus": "unavailable",
+                        "error": "handshake failed",
+                    }
+                ]
+            ),
+            _envelope({"tools": []}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        result = await client.inspect_mcp("bound-session")
+    assert result.servers[0].status == "error"
+    assert result.auth_statuses == (("server", "unavailable"),)
+
+
 @pytest.mark.parametrize("selector", [
     "plugin-weather:calendar", "plugin-weather_calendar", "unknown",
 ])
