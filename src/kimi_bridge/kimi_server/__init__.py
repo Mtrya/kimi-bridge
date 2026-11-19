@@ -17,6 +17,7 @@ from .contract import (
 )
 from .supervisor import KimiServerSupervisor, parse_server_startup_line
 from .notices import session_notice_from_event
+from .wire import session_recency_key
 from .probe import probe_kimi_compatibility
 from .types import (
     AccountQuota,
@@ -175,4 +176,5 @@ __all__ = [
     "parse_server_startup_line",
     "probe_kimi_compatibility",
     "session_notice_from_event",
+    "session_recency_key",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from typing import Any, cast
 
@@ -136,9 +137,84 @@ def _session_usage_from_wire(
     )
 
 
-def _session_profile_from_wire(value: dict[str, Any]) -> SessionProfile:
-    agent_config = value["agent_config"]
-    metadata = value["metadata"]
+def _session_from_wire(value: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(value)
+    metadata = value.get("metadata")
+    cwd = value.get("cwd")
+    if cwd is None and isinstance(metadata, dict):
+        cwd = metadata.get("cwd")
+    if cwd is not None:
+        normalized["cwd"] = cwd
+        normalized["metadata"] = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "cwd": cwd,
+        }
+    if "busy" not in normalized and "activity" in value:
+        activity = value["activity"]
+        if (
+            not isinstance(activity, str)
+            or activity not in {"idle", "turn", "background"}
+        ):
+            raise KimiServerProtocolError(f"unknown session activity: {activity!r}")
+        normalized["busy"] = activity != "idle"
+    return normalized
+
+
+def session_recency_key(session: dict[str, Any]) -> tuple[int, float, str]:
+    """Return a comparable newest-first sort key for one session payload.
+
+    The Kimi contract types ``updated_at`` as an opaque value, so ISO
+    timestamps in any offset and epoch numbers are parsed into comparable
+    seconds instead of compared as strings; anything unparsed sorts below
+    every parsed value by its original text.
+    """
+    value = session.get("updated_at")
+    if isinstance(value, bool):
+        return (0, 0.0, "")
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if abs(seconds) >= 1e12:
+            # Epoch milliseconds.
+            seconds /= 1000.0
+        return (2, seconds, "")
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        try:
+            moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return (1, 0.0, text)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (2, moment.timestamp(), "")
+    return (0, 0.0, "")
+
+
+def _session_workspace_from_wire(value: dict[str, Any]) -> str:
+    workspace = _session_from_wire(value).get("cwd")
+    if not isinstance(workspace, str) or not workspace:
+        raise KimiServerProtocolError("session object has no working directory")
+    return workspace
+
+
+def _session_busy_from_wire(value: dict[str, Any]) -> bool:
+    normalized = _session_from_wire(value)
+    if "busy" not in normalized:
+        raise KimiServerProtocolError("session object has no activity state")
+    return bool(normalized["busy"])
+
+
+def _session_profile_from_wire(
+    value: dict[str, Any],
+    *,
+    agent: dict[str, Any] | None = None,
+    usage: dict[str, Any] | None = None,
+) -> SessionProfile:
+    agent_config = value.get("agent_config") or agent
+    if not isinstance(agent_config, dict):
+        raise KimiServerProtocolError("session object has no effective agent config")
+    model = agent_config.get("model")
+    if not model:
+        raise KimiServerProtocolError("session profile has no configured model")
     pending_interaction = value.get("pending_interaction", "none")
     if pending_interaction not in {"none", "approval", "question"}:
         raise KimiServerProtocolError(
@@ -158,16 +234,16 @@ def _session_profile_from_wire(value: dict[str, Any]) -> SessionProfile:
     return SessionProfile(
         session_id=str(value["id"]),
         title=str(value["title"]),
-        workspace=str(metadata["cwd"]),
-        busy=bool(value["busy"]),
+        workspace=_session_workspace_from_wire(value),
+        busy=_session_busy_from_wire(value),
         pending_interaction=cast(PendingInteractionKind, pending_interaction),
-        model=str(agent_config["model"]),
+        model=str(model),
         thinking_effort=(
             str(thinking_effort) if thinking_effort is not None else None
         ),
         permission_mode=cast(PermissionMode | None, permission_mode),
         plan_mode=(bool(plan_mode) if plan_mode is not None else None),
-        usage=_session_usage_from_wire(value["usage"]),
+        usage=_session_usage_from_wire(value.get("usage") or {}, live=usage),
     )
 
 
@@ -178,8 +254,10 @@ def _session_status_from_wire(
     usage: dict[str, Any] | None = None,
 ) -> SessionStatus:
     agent_config = value.get("agent_config")
+    if agent_config is None:
+        agent_config = {}
     if not isinstance(agent_config, dict):
-        raise KimiServerProtocolError("session object has no agent_config")
+        raise KimiServerProtocolError("session agent_config is not an object")
     if agent is not None:
         agent_config = {
             **agent_config,
@@ -211,7 +289,7 @@ def _session_status_from_wire(
     if context_tokens is None:
         context_tokens = 0
     return SessionStatus(
-        busy=bool(value["busy"]),
+        busy=_session_busy_from_wire(value),
         model=str(model) if model else None,
         thinking_effort=str(thinking) if thinking else "",
         permission_mode=cast(PermissionMode, permission_mode),
@@ -226,11 +304,13 @@ def _goal_info_from_wire(value: dict[str, Any]) -> GoalInfo:
     status = value["status"]
     if status not in {"active", "paused", "blocked", "complete"}:
         raise KimiServerProtocolError(f"unknown goal status: {status!r}")
-    budget = value["budget"]
-    completion_criterion = value.get("completionCriterion")
-    terminal_reason = value.get("terminalReason")
+    budget = value.get("budget") or {}
+    completion_criterion = value.get(
+        "completionCriterion", value.get("completion_criterion")
+    )
+    terminal_reason = value.get("terminalReason", value.get("terminal_reason"))
     return GoalInfo(
-        id=str(value["goalId"]),
+        id=str(value.get("goalId", value.get("goal_id", ""))),
         objective=str(value["objective"]),
         completion_criterion=(
             str(completion_criterion)
@@ -238,9 +318,9 @@ def _goal_info_from_wire(value: dict[str, Any]) -> GoalInfo:
             else None
         ),
         status=cast(GoalStatus, status),
-        turns_used=int(value["turnsUsed"]),
-        tokens_used=int(value["tokensUsed"]),
-        wall_clock_ms=int(value["wallClockMs"]),
+        turns_used=int(value.get("turnsUsed", value.get("turns_used", 0))),
+        tokens_used=int(value.get("tokensUsed", value.get("tokens_used", 0))),
+        wall_clock_ms=int(value.get("wallClockMs", value.get("wall_clock_ms", 0))),
         budget=GoalBudget(
             token_budget=_optional_int(budget.get("tokenBudget")),
             turn_budget=_optional_int(budget.get("turnBudget")),
@@ -252,12 +332,12 @@ def _goal_info_from_wire(value: dict[str, Any]) -> GoalInfo:
             remaining_wall_clock_ms=_optional_int(
                 budget.get("remainingWallClockMs")
             ),
-            token_budget_reached=bool(budget["tokenBudgetReached"]),
-            turn_budget_reached=bool(budget["turnBudgetReached"]),
+            token_budget_reached=bool(budget.get("tokenBudgetReached", False)),
+            turn_budget_reached=bool(budget.get("turnBudgetReached", False)),
             wall_clock_budget_reached=bool(
-                budget["wallClockBudgetReached"]
+                budget.get("wallClockBudgetReached", False)
             ),
-            over_budget=bool(budget["overBudget"]),
+            over_budget=bool(budget.get("overBudget", False)),
         ),
         terminal_reason=(
             str(terminal_reason) if terminal_reason is not None else None

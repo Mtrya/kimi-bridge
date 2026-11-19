@@ -19,6 +19,7 @@ from ..kimi_server import (
     PermissionMode,
     SessionArchiveUncertain,
     SessionStatus,
+    session_recency_key as _session_recency_key,
 )
 from ..platforms.base import (
     ActorRef,
@@ -32,7 +33,6 @@ from ..state import (
     ObservationRoute,
 )
 from .files import _expand_fullwidth_tilde
-from .formatting import _session_recency_key
 from .models import _ActiveStream, _CompactionOutcome, _RenderState, THINKING_LABEL
 from .observation import _ObservationMixin
 

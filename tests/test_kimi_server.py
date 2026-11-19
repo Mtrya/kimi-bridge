@@ -730,6 +730,176 @@ async def test_session_model_resolution_uses_bound_model_and_live_catalog() -> N
     assert resolved.capabilities == ("image_in", "video_in")
 
 
+async def test_session_model_resolves_through_agent_inspection_without_agent_config() -> (
+    None
+):
+    """2.7 session objects carry no agent_config; the model lives in the agent frame."""
+
+    session = {
+        "id": "session-1",
+        "busy": False,
+        "metadata": {"cwd": "/tmp"},
+        "activity": "idle",
+    }
+    model = {
+        "provider": "kimi-code",
+        "model": "kimi-code/k3",
+        "display_name": "K3",
+        "max_context_size": 262_144,
+        "capabilities": [],
+    }
+
+    class InspectSocket(FakeWebSocket):
+        def _agent_burst_frames(self, session_id, agent_id="main"):
+            frames = super()._agent_burst_frames(session_id, agent_id)
+            for frame in frames:
+                if frame.get("type") == "agent":
+                    frame.update(model="kimi-code/k3")
+            return frames
+
+    http = FakeHttpClient(
+        [
+            _envelope(session),
+            _envelope({"items": [model]}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([InspectSocket()]),
+    ) as client:
+        resolved = await client.get_session_model("session-1")
+
+    assert resolved.alias == "kimi-code/k3"
+    assert [request[1] for request in http.requests] == [
+        "http://127.0.0.1:43123/api/v1/sessions/session-1",
+        "http://127.0.0.1:43123/api/v1/models",
+    ]
+
+
+async def test_session_normalizes_the_native_2_7_payload_shape() -> None:
+    """2.7 sessions carry top-level ``cwd``/``activity`` without legacy fields."""
+
+    session = {
+        "id": "session-1",
+        "title": "Native shape",
+        "workspace_id": "wd_workspace_0123456789ab",
+        "cwd": "/tmp/native",
+        "activity": "idle",
+        "created_at": "2026-11-20T00:00:00Z",
+        "updated_at": "2026-11-20T00:00:00Z",
+    }
+    http = FakeHttpClient([_envelope(session)])
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    normalized = await client.get_session("session-1")
+
+    assert normalized["cwd"] == "/tmp/native"
+    assert normalized["busy"] is False
+    assert normalized["metadata"]["cwd"] == "/tmp/native"
+
+
+async def test_update_profile_resolves_the_model_through_agent_inspection() -> None:
+    """2.7 profile responses may omit ``agent.model``; the edit still applies."""
+
+    session = {
+        "id": "session-1",
+        "title": "Goal session",
+        "workspace_id": "wd_workspace_0123456789ab",
+        "cwd": "/tmp/workspace",
+        "activity": "idle",
+    }
+    agent = {
+        "status": "idle",
+        "compacting": False,
+        "plan_mode": False,
+        "swarm_mode": False,
+        "tower_mode": False,
+    }
+
+    class InspectSocket(FakeWebSocket):
+        def _agent_burst_frames(self, session_id, agent_id="main"):
+            frames = super()._agent_burst_frames(session_id, agent_id)
+            for frame in frames:
+                if frame.get("type") == "agent":
+                    frame.update(model="kimi-code/k3")
+            return frames
+
+    http = FakeHttpClient([_envelope({"session": session, "agent": agent})])
+    async with KimiServerClient(
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([InspectSocket()]),
+    ) as client:
+        profile = await client.update_profile("session-1", goal_objective="Finish")
+
+    assert profile.session_id == "session-1"
+    assert profile.model == "kimi-code/k3"
+
+
+async def test_malformed_session_payloads_fail_with_protocol_errors() -> None:
+    """Unhashable activity and malformed agent_config raise protocol errors."""
+
+    http = FakeHttpClient(
+        [
+            _envelope({"id": "session-1", "cwd": "/tmp", "activity": []}),
+            _envelope(
+                {"id": "session-1", "cwd": "/tmp", "busy": False, "agent_config": []}
+            ),
+        ]
+    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    with pytest.raises(KimiServerProtocolError):
+        await client.get_session("session-1")
+    with pytest.raises(KimiServerProtocolError):
+        await client.get_session_status("session-1")
+
+
+async def test_list_sessions_merges_partitions_newest_first_and_caps_pages() -> None:
+    """Partitions merge by recency across formats, dedupe keeps the newest."""
+
+    older = {"id": "s-old", "updated_at": "2026-11-19T10:00:00Z"}
+    newer = {"id": "s-new", "updated_at": "2026-11-20T08:00:00+08:00"}
+    stale_copy = dict(newer, updated_at="2026-11-19T00:00:00Z")
+    epoch_newest = {"id": "s-epoch", "updated_at": 1795219200}
+    http = FakeHttpClient(
+        [
+            _envelope({"items": [older]}),
+            _envelope({"items": [newer]}),
+            _envelope({"items": [stale_copy]}),
+            _envelope({"items": [epoch_newest, older]}),
+        ]
+    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    sessions = await client.list_sessions(busy=None)
+
+    assert [session["id"] for session in sessions] == [
+        "s-epoch",
+        "s-new",
+        "s-old",
+    ]
+    assert sessions[1]["updated_at"] == "2026-11-20T08:00:00+08:00"
+
+    capped_http = FakeHttpClient(
+        [
+            _envelope({"items": [older]}),
+            _envelope({"items": [newer]}),
+            _envelope({"items": [stale_copy]}),
+            _envelope({"items": [epoch_newest, older]}),
+        ]
+    )
+    capped_client = KimiServerClient(
+        "http://127.0.0.1:43123", "token-1", http_client=capped_http
+    )
+    capped = await capped_client.list_sessions(busy=None, page_size=2)
+
+    assert [session["id"] for session in capped] == ["s-epoch", "s-new"]
+
+
 async def test_session_status_reads_the_stored_session_object() -> None:
     status = {
         "id": "session-1",
@@ -877,6 +1047,7 @@ async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> 
             _envelope({"aborted": True}),
             _envelope({"aborted": True}),
             _envelope({"aborted": True}),
+            _envelope({"active": None, "queued": []}),
         ]
     )
     client = KimiServerClient(
@@ -903,10 +1074,18 @@ async def test_abort_session_clears_prompt_queue_before_stopping_main_turn() -> 
         ),
         (
             "POST",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1:abort",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
         ),
     ]
-    assert http.requests[-1][2]["json"] == {}
+    assert http.requests[-2][0:2] == (
+        "POST",
+        "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
+    )
+    assert http.requests[-2][2]["json"] == {"agent_id": "main"}
 
 
 async def test_abort_session_stops_promptless_main_turn() -> None:
@@ -914,6 +1093,7 @@ async def test_abort_session_stops_promptless_main_turn() -> None:
         [
             _envelope({"active": None, "queued": []}),
             _envelope({"aborted": True}),
+            _envelope({"active": None, "queued": []}),
         ]
     )
     client = KimiServerClient(
@@ -928,7 +1108,11 @@ async def test_abort_session_stops_promptless_main_turn() -> None:
         ),
         (
             "POST",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1:abort",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1:cancel",
+        ),
+        (
+            "GET",
+            "http://127.0.0.1:43123/api/v1/sessions/session-1/prompts",
         ),
     ]
 
@@ -972,17 +1156,46 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
         "source": "mcp",
         "mcp_server_id": "search-server",
     }
-    updated = _profile_payload(
-        title="Renamed",
-        model="kimi-code/k3",
-        thinking="max",
-        plan_mode=True,
-    )
+    updated = {
+        "session": {
+            "id": "session-1",
+            "title": "Renamed",
+            "busy": False,
+            "pending_interaction": "none",
+            "metadata": {"cwd": "/tmp/workspace"},
+            "agent_config": {
+                "model": "kimi-code/k3",
+                "thinking": "max",
+                "permission_mode": "manual",
+                "plan_mode": True,
+            },
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_tokens": 3,
+                "cache_creation_tokens": 4,
+                "total_cost_usd": 0.0125,
+                "context_tokens": 30,
+                "context_limit": 100,
+                "turn_count": 2,
+            },
+        },
+        "agent": {
+            "status": "idle",
+            "compacting": False,
+            "model": "kimi-code/k3",
+            "thinking": "max",
+            "permission_mode": "manual",
+            "plan_mode": True,
+            "swarm_mode": False,
+        },
+    }
+    profile_session = _profile_payload()
     http = FakeHttpClient(
         [
             _envelope({"server_version": "2.6.1"}),
             _envelope({"items": [model]}),
-            _envelope(_profile_payload()),
+            _envelope(profile_session),
             _envelope(status),
             _envelope(status),
             _envelope(updated),
@@ -1113,7 +1326,7 @@ async def test_control_and_inspection_methods_use_public_v1_shapes() -> None:
     assert [request[0:2] for request in http.requests] == [
         ("GET", "http://127.0.0.1:43123/api/v1/meta"),
         ("GET", "http://127.0.0.1:43123/api/v1/models"),
-        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
+        ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1"),
         ("GET", "http://127.0.0.1:43123/api/v1/sessions/session-1"),
         ("POST", "http://127.0.0.1:43123/api/v1/sessions/session-1/profile"),
@@ -1337,7 +1550,7 @@ async def test_reload_session_uses_native_action_and_preserves_usage(rejected: b
     assert http.requests[0][:2] == (
         "POST", "http://127.0.0.1:43123/api/v1/sessions/session%20%2F1:reload"
     )
-    assert http.requests[0][2]["json"] == {}
+    assert "json" not in http.requests[0][2]
     assert client._agent_frames == {"session /1": {"status": "idle"}}
 
 
@@ -1504,6 +1717,7 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
         },
         "terminalReason": "Waiting for review",
     }
+    socket = FakeWebSocket()
     http = FakeHttpClient(
         [
             _envelope({}),
@@ -1517,8 +1731,6 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
                 }
             ),
             _envelope({"removed_turn_ids": ["turn-1"]}),
-            _envelope(None),
-            _envelope(goal),
             _envelope(_profile_payload()),
             _envelope(_profile_payload()),
             _envelope(_profile_payload()),
@@ -1526,12 +1738,21 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
         ]
     )
     client = KimiServerClient(
-        "http://127.0.0.1:43123", "token-1", http_client=http
+        "http://127.0.0.1:43123",
+        "token-1",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([socket]),
     )
 
+    socket._agent_burst_frames = lambda session_id, agent_id="main": [
+        {"type": "goal", "session_id": session_id, "agent_id": agent_id}
+    ]
     await client.compact_session("session-1")
     await client.undo_session("session-1", count=2)
-    assert await client.get_goal("session-1") is None
+    socket._agent_burst_frames = lambda session_id, agent_id="main": [
+        {"type": "goal", "session_id": session_id, "agent_id": agent_id,
+         "goal": goal}
+    ]
     assert await client.get_goal("session-1") == GoalInfo(
         id="goal-1",
         objective="Ship the bridge",
@@ -1575,14 +1796,6 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
             "http://127.0.0.1:43123/api/v1/sessions/session-1:undo",
         ),
         (
-            "GET",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/goal",
-        ),
-        (
-            "GET",
-            "http://127.0.0.1:43123/api/v1/sessions/session-1/goal",
-        ),
-        (
             "POST",
             "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
         ),
@@ -1599,18 +1812,18 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
             "http://127.0.0.1:43123/api/v1/sessions/session-1/profile",
         ),
     ]
-    assert http.requests[0][2]["json"] == {}
+    assert "json" not in http.requests[0][2]
     assert http.requests[2][2]["json"] == {"turn_id": "turn-1"}
-    assert http.requests[5][2]["json"] == {
+    assert http.requests[3][2]["json"] == {
         "agent_config": {"goal_objective": "Ship the bridge"}
     }
-    assert http.requests[6][2]["json"] == {
+    assert http.requests[4][2]["json"] == {
         "agent_config": {"goal_control": "pause"}
     }
-    assert http.requests[7][2]["json"] == {
+    assert http.requests[5][2]["json"] == {
         "agent_config": {"goal_control": "resume"}
     }
-    assert http.requests[8][2]["json"] == {
+    assert http.requests[6][2]["json"] == {
         "agent_config": {"goal_control": "cancel"}
     }
 
@@ -1618,9 +1831,9 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
 @pytest.mark.parametrize(
     ("instruction", "body"),
     [
-        (None, {}),
-        ("", {}),
-        (" \t\n ", {}),
+        (None, None),
+        ("", None),
+        (" \t\n ", None),
         (
             'Preserve "API Decisions".\n保留待办事项。',
             {"instruction": 'Preserve "API Decisions".\n保留待办事项。'},
@@ -1628,7 +1841,7 @@ async def test_stateful_session_methods_use_public_v1_shapes() -> None:
     ],
 )
 async def test_compact_passes_optional_instruction(
-    instruction: str | None, body: dict[str, str],
+    instruction: str | None, body: dict[str, str] | None,
 ) -> None:
     http = FakeHttpClient([_envelope({})])
     client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
@@ -1638,7 +1851,7 @@ async def test_compact_passes_optional_instruction(
     method, url, kwargs = http.requests[0]
     assert method == "POST"
     assert url == "http://127.0.0.1:43123/api/v1/sessions/session-1:compact"
-    assert kwargs["json"] == body
+    assert kwargs.get("json") == body
 
 
 async def test_undo_validates_count_and_surfaces_upstream_error() -> None:
@@ -2757,7 +2970,7 @@ async def test_archive_session_calls_native_action_with_escaped_id() -> None:
     assert (method, url) == (
         "POST", "http://127.0.0.1:43123/api/v1/sessions/session%20%2F1:archive"
     )
-    assert options["json"] == {}
+    assert "json" not in options
 
 
 @pytest.mark.parametrize("data", [{}, {"archived": False}, {"archived": "true"}])

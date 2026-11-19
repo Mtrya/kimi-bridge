@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from kimi_bridge.kimi_server import (
+    GoalBudget,
+    GoalInfo,
     KimiServerAPIError,
     KimiServerClient,
     PromptDelivery,
@@ -36,36 +38,60 @@ async def test_native_goal_edit_decodes_existing_identity_progress_and_budget(
     status: str,
 ) -> None:
     before = {
-        "goalId": "native-goal",
         "objective": "Original",
         "status": status,
-        "turnsUsed": 4,
-        "tokensUsed": 1234,
-        "wallClockMs": 9000,
-        "budget": {
-            "tokenBudget": 5000,
-            "turnBudget": None,
-            "wallClockBudgetMs": None,
-            "remainingTokens": 3766,
-            "remainingTurns": None,
-            "remainingWallClockMs": None,
-            "tokenBudgetReached": False,
-            "turnBudgetReached": False,
-            "wallClockBudgetReached": False,
-            "overBudget": False,
-        },
+        "turns_used": 4,
+        "tokens_used": 1234,
+        "wall_clock_ms": 9000,
+        "completion_criterion": "All checks pass",
     }
     after = {**before, "objective": "Revised"}
-    http = FakeHttpClient([_envelope(before), _envelope(after)])
+    socket = FakeWebSocket()
+    http = FakeHttpClient([_envelope(_profile_payload())])
     async with KimiServerClient(
-        "http://127.0.0.1:43123", "token", http_client=http
+        "http://127.0.0.1:43123",
+        "token",
+        http_client=http,
+        ws_connect=FakeWebSocketConnect([socket, socket]),
     ) as client:
+        socket._agent_burst_frames = lambda session_id, agent_id="main": [
+            {"type": "goal", "session_id": session_id, "agent_id": agent_id,
+             "goal": before},
+        ]
         original = await client.get_goal("session-1")
+        socket._agent_burst_frames = lambda session_id, agent_id="main": [
+            {"type": "goal", "session_id": session_id, "agent_id": agent_id,
+             "goal": after},
+        ]
         revised = await client.edit_goal("session-1", "Revised")
+    assert original == GoalInfo(
+        id="",
+        objective="Original",
+        completion_criterion="All checks pass",
+        status=status,
+        turns_used=4,
+        tokens_used=1234,
+        wall_clock_ms=9000,
+        budget=GoalBudget(
+            token_budget=None,
+            turn_budget=None,
+            wall_clock_budget_ms=None,
+            remaining_tokens=None,
+            remaining_turns=None,
+            remaining_wall_clock_ms=None,
+            token_budget_reached=False,
+            turn_budget_reached=False,
+            wall_clock_budget_reached=False,
+            over_budget=False,
+        ),
+        terminal_reason=None,
+    )
     assert revised == replace(original, objective="Revised")
-    assert http.requests[1][0] == "PATCH"
-    assert http.requests[1][1].endswith("/sessions/session-1/goal")
-    assert http.requests[1][2]["json"] == {"objective": "Revised"}
+    assert http.requests[0][0] == "POST"
+    assert http.requests[0][1].endswith("/sessions/session-1/profile")
+    assert http.requests[0][2]["json"] == {
+        "agent_config": {"goal_objective": "Revised"}
+    }
 
 
 @pytest.mark.parametrize("code", [40401, 40914, 40915, 40917, 40918])
@@ -331,13 +357,14 @@ async def test_session_abort_continues_when_a_snapshot_prompt_has_left_queue(exp
         _envelope(None, code=40402) if expired == "queued" else _envelope({"aborted": True}),
         _envelope(None, code=40402) if expired == "active" else _envelope({"aborted": True}),
         _envelope({"aborted": True}),
+        _envelope({"active": None, "queued": []}),
     ])
     async with KimiServerClient(
         "http://127.0.0.1:43123", "token", http_client=http
     ) as client:
         assert await client.abort_session("session-1")
     assert [request[1].rsplit("/", 1)[-1] for request in http.requests] == [
-        "prompts", "queued:abort", "active:abort", "session-1:abort",
+        "prompts", "queued:abort", "active:abort", "session-1:cancel", "prompts",
     ]
 
 

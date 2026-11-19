@@ -82,12 +82,14 @@ from .wire import (
     _question_answer_to_wire,
     _queued_prompt_from_wire,
     _secondary_model_config_from_wire,
+    _session_from_wire,
     _session_profile_from_wire,
     _session_status_from_wire,
     _session_usage_from_wire,
     _skill_info_from_wire,
     _task_info_from_wire,
     _tool_info_from_wire,
+    session_recency_key as _session_recency_key,
 )
 
 
@@ -287,9 +289,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         """Reload Kimi configuration and rebuild an idle session in place."""
 
         await self._request_operation(
-            "reload_session",
-            path_parameters={"session_id": session_id},
-            json_body={},
+            "reload_session", path_parameters={"session_id": session_id}
         )
 
     async def restart_server(self) -> ServerConnection:
@@ -352,15 +352,20 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
             self.get_session_status(session_id),
             self.list_models(),
         )
-        if status.model is None:
+        model_alias = status.model
+        if model_alias is None:
+            # 2.7 session objects carry no agent_config, so the bound model
+            # is only visible in the main agent's state; inspect it directly.
+            model_alias = (await self._inspect_main_agent(session_id)).get("model")
+        if model_alias is None:
             raise KimiServerProtocolError(
                 f"kimi session {session_id} has no configured model"
             )
         for model in models:
-            if model.alias == status.model:
+            if model.alias == model_alias:
                 return model
         raise KimiServerProtocolError(
-            f"kimi session {session_id} uses unavailable model {status.model!r}"
+            f"kimi session {session_id} uses unavailable model {model_alias!r}"
         )
 
     async def create_session(
@@ -396,20 +401,21 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
 
     async def fork_session(self, session_id: str) -> str:
         data = await self._request_operation(
-            "fork_session", path_parameters={"session_id": session_id}, json_body={}
+            "fork_session", path_parameters={"session_id": session_id}
         )
         return str(data["id"])
 
     async def restore_session(self, session_id: str) -> str:
         data = await self._request_operation(
-            "restore_session", path_parameters={"session_id": session_id}, json_body={}
+            "restore_session", path_parameters={"session_id": session_id}
         )
         return str(data["id"])
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
-        return await self._request_operation(
+        data = await self._request_operation(
             "get_session", path_parameters={"session_id": session_id}
         )
+        return _session_from_wire(data)
 
     async def find_session(self, session_id: str) -> dict[str, Any] | None:
         """Look up a session without exposing the server's missing-ID code."""
@@ -422,19 +428,22 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
             raise
 
     async def get_session_profile(self, session_id: str) -> SessionProfile:
-        data = await self._request_operation(
-            "get_profile", path_parameters={"session_id": session_id}
+        data = await self.get_session(session_id)
+        agent: dict[str, Any] | None = None
+        if not data.get("agent_config"):
+            agent = await self._inspect_main_agent(session_id)
+        return _session_profile_from_wire(
+            data,
+            agent=agent,
+            usage=self._usage_frames.get(session_id),
         )
-        return _session_profile_from_wire(data)
 
     async def archive_session(self, session_id: str) -> None:
         """Archive one session and require confirmation before detaching it."""
 
         try:
             data = await self._request_operation(
-                "archive_session",
-                path_parameters={"session_id": session_id},
-                json_body={},
+                "archive_session", path_parameters={"session_id": session_id}
             )
         except KimiServerTransportError as archive_error:
             # An archive can commit before its acknowledgement is lost. Read
@@ -472,22 +481,29 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         )
 
     async def get_session_usage(self, session_id: str) -> SessionUsage:
-        """Read cumulative native counters, with live context-window values."""
+        """Read session usage, preferring live context-window values.
+
+        Kimi Code 2.7 session objects no longer carry cumulative token
+        counters, so those fields report ``None`` on a 2.7 server; the
+        live context values come from the usage frames of the bound
+        subscription.
+        """
 
         data = await self.get_session(session_id)
         return _session_usage_from_wire(
-            data["usage"], live=self._usage_frames.get(session_id)
+            data.get("usage") or {}, live=self._usage_frames.get(session_id)
         )
 
-    async def inspect_session(self, session_id: str) -> SessionStatus:
-        """Read effective settings before a long-lived subscription exists."""
-
-        data = await self.get_session(session_id)
+    async def _inspect_main_frames(self, session_id: str) -> list[dict[str, Any]]:
         async with self._task_socket() as ws:
             async with asyncio.timeout(self._timeout):
                 _, frames = await self._subscribe(
                     ws, session_id, [_MAIN_AGENT_ID]
                 )
+        return frames
+
+    async def _inspect_main_agent(self, session_id: str) -> dict[str, Any]:
+        frames = await self._inspect_main_frames(session_id)
         agent = next(
             (frame for frame in frames
              if frame.get("type") == "agent"
@@ -497,7 +513,17 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         )
         if agent is None:
             raise KimiServerProtocolError("session inspection delivered no main-agent state")
-        return _session_status_from_wire(data, agent=agent)
+        return agent
+
+    async def inspect_session(self, session_id: str) -> SessionStatus:
+        """Read effective settings before a long-lived subscription exists."""
+
+        data, agent = await asyncio.gather(
+            self.get_session(session_id), self._inspect_main_agent(session_id)
+        )
+        return _session_status_from_wire(
+            data, agent=agent, usage=self._usage_frames.get(session_id)
+        )
 
     async def compact_session(
         self,
@@ -515,7 +541,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                 json_body=(
                     {"instruction": instruction}
                     if instruction and instruction.strip()
-                    else {}
+                    else None
                 ),
             )
         except KimiServerAPIError:
@@ -554,19 +580,32 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
     async def get_goal(self, session_id: str) -> GoalInfo | None:
         """Return the session's current goal, if any."""
 
-        data = await self._request_operation(
-            "goal", path_parameters={"session_id": session_id}
+        frames = await self._inspect_main_frames(session_id)
+        frame = next(
+            (
+                frame
+                for frame in frames
+                if frame.get("type") == "goal"
+                and frame.get("session_id") == session_id
+                and frame.get("agent_id") == _MAIN_AGENT_ID
+            ),
+            None,
         )
-        if data is None:
+        if frame is None:
+            raise KimiServerProtocolError("session inspection delivered no goal state")
+        goal = frame.get("goal")
+        if goal is None:
             return None
-        return _goal_info_from_wire(data)
+        if not isinstance(goal, dict):
+            raise KimiServerProtocolError("session goal state is not an object")
+        return _goal_info_from_wire(goal)
 
     async def edit_goal(self, session_id: str, objective: str) -> GoalInfo:
-        data = await self._request_operation(
-            "edit_goal", path_parameters={"session_id": session_id},
-            json_body={"objective": objective},
-        )
-        return _goal_info_from_wire(data)
+        await self.update_profile(session_id, goal_objective=objective)
+        goal = await self.get_goal(session_id)
+        if goal is None or goal.objective != objective:
+            raise KimiServerProtocolError("kimi server did not apply the goal objective")
+        return goal
 
     async def get_prompt_queue(self, session_id: str) -> PromptQueue:
         data = await self._request_operation(
@@ -601,13 +640,68 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         after_id: str | None = None,
         workspace_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """List sessions matching the filters, newest first.
+
+        Kimi Code 2.7 requires the ``busy`` and ``has_prompt`` query
+        flags, and neither accepts an "all" value, so an unset filter is
+        enumerated across both values and the pages are merged by session
+        ID. This keeps the "all matching sessions" semantics on servers
+        that enforce the flags without changing behavior on servers that
+        default them.
+        """
+        busy_values = (False, True) if busy is None else (busy,)
+        pages = await asyncio.gather(
+            *(
+                self._list_sessions_page(
+                    busy=busy_value,
+                    has_prompt=has_prompt_value,
+                    include_archive=include_archive,
+                    exclude_empty=exclude_empty,
+                    archived_only=archived_only,
+                    page_size=page_size,
+                    before_id=before_id,
+                    after_id=after_id,
+                    workspace_id=workspace_id,
+                )
+                for busy_value in busy_values
+                for has_prompt_value in (False, True)
+            )
+        )
+        merged: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            for session in page:
+                key = str(session["id"])
+                existing = merged.get(key)
+                if (
+                    existing is None
+                    or _session_recency_key(session) > _session_recency_key(existing)
+                ):
+                    merged[key] = session
+        sessions = sorted(merged.values(), key=_session_recency_key, reverse=True)
+        if page_size is not None:
+            sessions = sessions[:page_size]
+        return sessions
+
+    async def _list_sessions_page(
+        self,
+        *,
+        busy: bool,
+        has_prompt: bool,
+        include_archive: bool,
+        exclude_empty: bool,
+        archived_only: bool,
+        page_size: int | None,
+        before_id: str | None,
+        after_id: str | None,
+        workspace_id: str | None,
+    ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {
+            "busy": busy,
+            "has_prompt": has_prompt,
             "include_archive": include_archive,
             "exclude_empty": exclude_empty,
             "archived_only": archived_only,
         }
-        if busy is not None:
-            params["busy"] = busy
         if page_size is not None:
             params["page_size"] = page_size
         if before_id is not None:
@@ -617,7 +711,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         if workspace_id is not None:
             params["workspace_id"] = workspace_id
         data = await self._request_operation("list_sessions", params=params)
-        return list(data["items"])
+        return [_session_from_wire(item) for item in data["items"]]
 
     async def list_all_sessions(
         self,
@@ -632,17 +726,60 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
 
         The server returns sessions newest-first and treats ``after_id``
         as "newer than the cursor", so full pagination must advance with
-        ``before_id`` (older than the cursor).
+        ``before_id`` (older than the cursor). The required ``busy`` and
+        ``has_prompt`` flags are enumerated, and each combination keeps
+        its own cursor; results are merged by session ID because a
+        session can flip state between requests.
         """
+        busy_values = (False, True) if busy is None else (busy,)
+        streams = await asyncio.gather(
+            *(
+                self._paginate_sessions(
+                    busy=busy_value,
+                    has_prompt=has_prompt_value,
+                    include_archive=include_archive,
+                    exclude_empty=exclude_empty,
+                    page_size=page_size,
+                    workspace_id=workspace_id,
+                )
+                for busy_value in busy_values
+                for has_prompt_value in (False, True)
+            )
+        )
+        merged: dict[str, dict[str, Any]] = {}
+        for stream in streams:
+            for session in stream:
+                key = str(session["id"])
+                existing = merged.get(key)
+                if (
+                    existing is None
+                    or _session_recency_key(session) > _session_recency_key(existing)
+                ):
+                    merged[key] = session
+        return sorted(merged.values(), key=_session_recency_key, reverse=True)
+
+    async def _paginate_sessions(
+        self,
+        *,
+        busy: bool,
+        has_prompt: bool,
+        include_archive: bool,
+        exclude_empty: bool,
+        page_size: int,
+        workspace_id: str | None,
+    ) -> list[dict[str, Any]]:
         sessions: list[dict[str, Any]] = []
         before_id: str | None = None
         while True:
-            page = await self.list_sessions(
+            page = await self._list_sessions_page(
                 busy=busy,
+                has_prompt=has_prompt,
                 include_archive=include_archive,
                 exclude_empty=exclude_empty,
+                archived_only=False,
                 page_size=page_size,
                 before_id=before_id,
+                after_id=None,
                 workspace_id=workspace_id,
             )
             if not page:
@@ -698,7 +835,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         """Ask the native read-only side agent once, observing its own conversation."""
 
         data = await self._request_operation(
-            "side_question", path_parameters={"session_id": session_id}, json_body={}
+            "side_question", path_parameters={"session_id": session_id}
         )
         agent_id = data["agent_id"]
         if not isinstance(agent_id, str) or not agent_id:
@@ -839,7 +976,30 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
             path_parameters={"session_id": session_id},
             json_body=payload,
         )
-        return _session_profile_from_wire(data)
+        session = data.get("session")
+        agent = data.get("agent")
+        if isinstance(session, dict) and isinstance(agent, dict):
+            wire_session, wire_agent = session, agent
+        else:
+            wire_session, wire_agent = data, None
+        effective_config = wire_session.get("agent_config") or wire_agent
+        if not (
+            isinstance(effective_config, dict) and effective_config.get("model")
+        ):
+            # 2.7 profile responses may omit the bound model even though the
+            # contract allows it; the model stays visible in the main
+            # agent's state, so resolve it there before decoding.
+            wire_agent = await self._inspect_main_agent(session_id)
+        if isinstance(wire_agent, dict):
+            # The response carries the post-update agent state; cache it so
+            # status reads never lag behind an applied settings change.
+            self._agent_frames[session_id] = {
+                "type": "agent",
+                "session_id": session_id,
+                "agent_id": _MAIN_AGENT_ID,
+                **wire_agent,
+            }
+        return _session_profile_from_wire(wire_session, agent=wire_agent)
 
     async def list_tasks(
         self, session_id: str, *, status: TaskStatus | None = None
@@ -1053,8 +1213,24 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
         )
 
     async def abort_session(self, session_id: str) -> bool:
-        """Abort the main turn after discarding prompt work queued behind it."""
+        """Abort the main turn after discarding prompt work queued behind it.
 
+        An error while confirming the drain propagates as a failure: the
+        caller should retry rather than assume the queue was discarded.
+        """
+
+        await self._drain_prompt_queue(session_id)
+        await self._request_operation(
+            "abort_session",
+            path_parameters={"session_id": session_id},
+            json_body={"agent_id": _MAIN_AGENT_ID},
+        )
+        # Prompts submitted while the queue was being drained survive the
+        # main-agent cancel; drain whatever remains.
+        await self._drain_prompt_queue(session_id)
+        return True
+
+    async def _drain_prompt_queue(self, session_id: str) -> None:
         prompts = await self._request_operation(
             "list_prompts", path_parameters={"session_id": session_id}
         )
@@ -1069,12 +1245,6 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                 # A prompt can leave the queue after the snapshot; session work still needs stopping.
                 if exc.code != 40402:
                     raise
-        await self._request_operation(
-            "abort_session",
-            path_parameters={"session_id": session_id},
-            json_body={},
-        )
-        return True
 
     async def _abort_prompt_by_id(
         self, session_id: str, prompt_id: str
@@ -1185,8 +1355,10 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                         ws, session_id, [_MAIN_AGENT_ID]
                     )
                     frame_types = {frame.get("type") for frame in frames}
-                    burst = {"task.list", "agent", "usage", "goal", "todo", "turns"}
-                    if not burst.issubset(frame_types):
+                    burst = {"task.list", "agent", "goal", "todo", "turns"}
+                    if not burst.issubset(frame_types) or not frame_types.intersection(
+                        {"usage", "context"}
+                    ):
                         raise KimiServerProtocolError(
                             "subscription response was not followed by the agent "
                             "state burst and authoritative turns page"
@@ -1252,7 +1424,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                             ):
                                 if frame.get("type") == "agent":
                                     self._agent_frames[session_id] = dict(frame)
-                                elif frame.get("type") == "usage":
+                                elif frame.get("type") in {"usage", "context"}:
                                     self._usage_frames[session_id] = dict(frame)
                         ready.set()
                         subscribed_once = True
@@ -1328,7 +1500,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                                     ):
                                         yield event
                                 continue
-                            if frame_type == "usage":
+                            if frame_type in {"usage", "context"}:
                                 if frame.get("session_id") == session_id and (
                                     frame.get("agent_id") == _MAIN_AGENT_ID
                                 ):
@@ -1671,7 +1843,7 @@ class KimiServerClient(WorkspaceOperations, FileHistoryOperations, IntegrationOp
                             "turns.failed",
                             "task.list",
                             "agent",
-                            "usage",
+                            "context",
                             "goal",
                             "todo",
                         }

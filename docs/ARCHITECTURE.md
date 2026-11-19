@@ -107,7 +107,7 @@ Always complete an allowlisted `/status` and normal-prompt message round trip in
 
 ## Compatibility policy
 
-`src/kimi_bridge/compatibility-map.json` records Kimi Code versions associated with bridge releases. This release uses the Kimi Code 2.6 turns/items API; use a bridge release listed by `kimi-bridge compat` for an older Kimi Code version. `kimi-bridge compat` reports whether the installed or requested version is supported by the current bridge, another recorded bridge release, or not established by the map. Startup and `doctor` distinguish official Kimi Code from the incompatible legacy Python `kimi-cli`; an executable/server version mismatch is fatal, while an unlisted official version is warned about and subjected to a live contract attempt.
+`src/kimi_bridge/compatibility-map.json` records Kimi Code versions associated with bridge releases. This release uses the Kimi Code 2.7 turns/items API; use a bridge release listed by `kimi-bridge compat` for an older Kimi Code version. `kimi-bridge compat` reports whether the installed or requested version is supported by the current bridge, another recorded bridge release, or not established by the map. Startup and `doctor` distinguish official Kimi Code from the incompatible legacy Python `kimi-cli`; an executable/server version mismatch is fatal, while an unlisted official version is warned about and subjected to a live contract attempt.
 
 The Kimi canary checks consumed REST/WebSocket schemas and the native turn/item lifecycle, then exercises nonempty event replay using frames accepted by the native schema. It also verifies fresh-page subscription recovery, model binding, direct task command responses, and prompt cancellation followed by native undo without inference.
 

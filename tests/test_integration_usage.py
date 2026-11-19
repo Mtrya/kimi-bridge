@@ -129,7 +129,19 @@ async def test_mcp_inspection_keeps_runtime_auth_and_bound_tools_scopes_separate
                     ]
                 }
             ),
-            _envelope([{"name": "server", "authStatus": "oauth-required"}]),
+            _envelope(
+                [
+                    {
+                        "server_id": "server",
+                        "runtime_name": "server",
+                        "locator": {"source": "global", "name": "server"},
+                        "config": {"transport": "http", "url": "https://example.invalid"},
+                        "enabled": True,
+                        "editable": True,
+                        "auth_status": "oauth-required",
+                    }
+                ]
+            ),
             _envelope(
                 {
                     "tools": [
@@ -154,26 +166,82 @@ async def test_mcp_inspection_keeps_runtime_auth_and_bound_tools_scopes_separate
     assert result.tools[0].name == "bound_tool"
     assert "PRIVATE_TOKEN_SENTINEL" not in repr(result)
     assert http.requests[1][1].endswith("/api/v1/mcp/servers")
-    assert http.requests[2][1].endswith("/api/v2/mcp/auth-statuses")
-    assert http.requests[2][2]["params"] == {"cwd": "/bound", "verify": "false"}
+    assert http.requests[2][1].endswith("/api/v1/mcp/servers:inspect")
+    assert http.requests[2][2]["json"] == {"cwd": "/bound"}
     assert http.requests[3][2]["params"] == {"session_id": "bound-session"}
-    assert all(request[0] == "GET" for request in http.requests)
+    assert [request[0] for request in http.requests] == ["GET", "GET", "POST", "GET"]
+
+
+async def test_mcp_inspection_reports_runtime_errors_and_camel_case_auth():
+    http = FakeHttpClient(
+        [
+            _envelope({"metadata": {"cwd": "/bound"}}),
+            _envelope(
+                {
+                    "servers": [
+                        {
+                            "id": "server",
+                            "name": "server",
+                            "transport": "http",
+                            "status": "connected",
+                            "tool_count": 0,
+                        }
+                    ]
+                }
+            ),
+            _envelope(
+                [
+                    {
+                        "server_id": "server",
+                        "runtime_name": "server",
+                        "locator": {"source": "global", "name": "server"},
+                        "config": {
+                            "transport": "http",
+                            "url": "https://example.invalid",
+                            "status": "connected",
+                        },
+                        "enabled": True,
+                        "editable": True,
+                        "authStatus": "unavailable",
+                        "error": "handshake failed",
+                    }
+                ]
+            ),
+            _envelope({"tools": []}),
+        ]
+    )
+    async with KimiServerClient(
+        "http://127.0.0.1:43123", "token", http_client=http
+    ) as client:
+        result = await client.inspect_mcp("bound-session")
+    assert result.servers[0].status == "error"
+    assert result.auth_statuses == (("server", "unavailable"),)
 
 
 @pytest.mark.parametrize("selector", [
     "plugin-weather:calendar", "plugin-weather_calendar", "unknown",
 ])
 async def test_mcp_inspection_matches_native_server_names_and_tool_namespaces(selector):
+    def runtime():
+        return [
+            {
+                "server_id": name,
+                "runtime_name": name,
+                "locator": {"source": "global", "name": name},
+                "config": {"transport": "stdio", "command": "fixture"},
+                "enabled": True,
+                "editable": True,
+                "auth_status": "not-applicable",
+            }
+            for name in ("plugin-weather:calendar", "other-server")
+        ]
     http = FakeHttpClient([
         _envelope({"metadata": {"cwd": "/bound"}}),
         _envelope({"servers": [
             {"id": name, "name": name, "transport": "stdio", "status": "connected", "tool_count": 1}
             for name in ("plugin-weather:calendar", "other-server")
         ]}),
-        _envelope([
-            {"name": name, "authStatus": "not-applicable"}
-            for name in ("plugin-weather:calendar", "other-server")
-        ]),
+        _envelope(runtime()),
         _envelope({"tools": [
             {"name": name, "description": "", "source": "mcp", "mcp_server_id": namespace, "active": True}
             for name, namespace in (("forecast", "plugin-weather_calendar"), ("unrelated", "other-server"))
@@ -189,7 +257,7 @@ async def test_mcp_inspection_matches_native_server_names_and_tool_namespaces(se
         assert [server.id for server in result.servers] == ["plugin-weather:calendar"]
         assert result.auth_statuses == (("plugin-weather:calendar", "not-applicable"),)
         assert [tool.name for tool in result.tools] == ["forecast"]
-    assert all(request[0] == "GET" for request in http.requests)
+    assert [request[0] for request in http.requests] == ["GET", "GET", "POST", "GET"]
 
 
 @pytest.mark.parametrize("status", ["connected", "connecting", "disconnected", "error"])
@@ -199,19 +267,30 @@ async def test_mcp_restart_only_targets_selected_server_and_does_not_claim_healt
     http = FakeHttpClient(
         [
             _envelope(
-                {
-                    "servers": [
-                        {
-                            "id": "selected/server",
-                            "name": "Selected",
-                            "transport": "stdio",
-                            "status": status,
-                            "tool_count": 2,
-                        }
-                    ]
-                }
+                [
+                    {
+                        "id": "selected/server",
+                        "name": "Selected",
+                        "transport": "stdio",
+                        "config": {"transport": "stdio", "command": "fixture"},
+                        "status": status,
+                        "tool_count": 2,
+                    }
+                ]
             ),
-            _envelope({"restarting": True}),
+            _envelope([{"server_id": "selected/server", "runtime_name": "Selected", "locator": {"source": "global", "name": "selected/server"}, "config": {"transport": "stdio", "command": "fixture", "status": status}, "editable": True, "auth_status": "not-applicable"}]),
+            _envelope(
+                [
+                    {
+                        "id": "selected/server",
+                        "name": "Selected",
+                        "transport": "stdio",
+                        "config": {"transport": "stdio", "command": "fixture"},
+                        "status": status,
+                        "tool_count": 2,
+                    }
+                ]
+            ),
         ]
     )
     async with KimiServerClient(
@@ -219,10 +298,15 @@ async def test_mcp_restart_only_targets_selected_server_and_does_not_claim_healt
     ) as client:
         server = await client.restart_mcp_server("Selected")
     assert server.status == status
-    assert http.requests[1][0] == "POST" and http.requests[1][1].endswith(
-        "/mcp/servers/selected%2Fserver:restart"
+    assert http.requests[2][0] == "PUT" and http.requests[2][1].endswith(
+        "/mcp/servers/selected%2Fserver"
     )
-    assert len(http.requests) == 2
+    assert http.requests[2][2]["json"] == {
+        "transport": "stdio",
+        "command": "fixture",
+        "status": status,
+    }
+    assert len(http.requests) == 3
 
 
 async def test_native_integration_error_does_not_forward_raw_diagnostics():

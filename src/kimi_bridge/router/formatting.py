@@ -480,11 +480,6 @@ def _format_mcp_tools(tools: list[ToolInfo]) -> str:
     return "MCP servers:\n" + "\n\n".join(sections)
 
 
-def _session_recency_key(session: dict[str, Any]) -> str:
-    updated_at = session.get("updated_at")
-    return str(updated_at) if updated_at is not None else ""
-
-
 def _in_flight_assistant_text(
     snapshot: dict[str, Any], *, turn_id: int | None = None
 ) -> str | None:

@@ -23,8 +23,8 @@ def evaluate_kimi_semantic_contract(
     """Project full upstream specs onto only the bridge's consumed contract."""
 
     checks: list[KimiContractCheck] = []
-    checks.extend(_evaluate_openapi_contract(openapi))
-    checks.extend(_evaluate_asyncapi_contract(asyncapi))
+    checks.extend(_evaluate_openapi_contract(_dereference_document(openapi)))
+    checks.extend(_evaluate_asyncapi_contract(_dereference_document(asyncapi)))
     if expected_version is not None:
         checks.append(
             _document_version_check(
@@ -181,19 +181,21 @@ def _check_request_contract(
 ) -> KimiContractCheck:
     request_body = operation.get("requestBody")
     body_schema = _content_schema(request_body, contract.request_media_type)
-    if contract.request_examples:
+    if contract.request_examples or contract.request_fields:
         ok = body_schema is not None and all(
             _schema_accepts_instance(body_schema, example)
             for example in contract.request_examples
         )
     else:
+        # A bodyless client call stays valid when a documented body is
+        # optional; only a required body breaks it.
         ok = not (
             isinstance(request_body, dict)
             and request_body.get("required") is True
         )
     if body_schema is not None:
         ok = ok and all(
-            _field_matches(body_schema, requirement)
+            _field_matches(body_schema, requirement, outbound=True)
             for requirement in contract.request_fields
         )
     elif contract.request_fields:
@@ -300,18 +302,21 @@ def _evaluate_asyncapi_contract(
     message_map = messages if isinstance(messages, dict) else {}
     message_contracts = semantic_contract.KIMI_WEBSOCKET_MESSAGES
     for contract in message_contracts:
-        message = message_map.get(contract.name)
-        payload = message.get("payload") if isinstance(message, dict) else None
+        spec_names = contract.spec_names or (contract.name,)
+        payloads = []
+        for spec_name in spec_names:
+            message = message_map.get(spec_name)
+            if isinstance(message, dict):
+                payloads.append(message.get("payload"))
         name = contract.name
-        variants = [payload] if isinstance(payload, dict) else []
+        variants = [payload for payload in payloads if isinstance(payload, dict)]
         if contract.discriminator is not None:
             field, value = contract.discriminator
             name = f"{name}.{value}"
             variants = [
                 variant
-                for variant in (
-                    _schema_alternatives(payload) if isinstance(payload, dict) else []
-                )
+                for payload in variants
+                for variant in _schema_alternatives(payload)
                 if _field_matches(
                     variant, SchemaFieldContract((field,), ("string",), values=(value,))
                 )
@@ -333,9 +338,40 @@ def _evaluate_asyncapi_contract(
                     "websocket.message."
                     f"{name}.{'.'.join(requirement.path)}",
                     "websocket",
-                    all(_field_matches(variant, requirement) for variant in variants),
+                    all(
+                        _field_matches(
+                            variant, requirement, outbound=bool(contract.examples)
+                        )
+                        for variant in variants
+                    ),
                     "message field "
                     f"{'.'.join(requirement.path)} keeps a compatible shape",
+                    contract.source,
+                )
+            )
+        if contract.frame_types:
+            # The client dispatches each frame on its ``type`` value; a
+            # renamed or retyped frame would be silently ignored, so every
+            # provided variant must keep one of the dispatched aliases.
+            checks.append(
+                _contract_check(
+                    f"websocket.message.{name}.frame_type",
+                    "websocket",
+                    all(
+                        any(
+                            _schema_accepts_instance(type_schema, value)
+                            for value in contract.frame_types
+                        )
+                        for variant in variants
+                        for type_schema in (
+                            state
+                            for state, _required in _field_states(
+                                variant, ("type",)
+                            )
+                        )
+                    ),
+                    "message frame type matches a dispatched alias "
+                    f"({', '.join(contract.frame_types)})",
                     contract.source,
                 )
             )
@@ -346,6 +382,7 @@ def _evaluate_asyncapi_contract(
                     "websocket",
                     all(
                         _schema_accepts_instance(payload, example)
+                        for payload in variants
                         for example in contract.examples
                     ),
                     "outbound message shapes remain accepted",
@@ -370,6 +407,123 @@ def _evaluate_asyncapi_contract(
             )
         )
     return checks
+
+
+def _dereference_document(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Resolve JSON-pointer references so field shapes can be verified.
+
+    Unresolvable or cyclic references keep their ``$ref`` keyword, which
+    lets the field checks reject shapes that cannot be established.
+    """
+    if not isinstance(document, Mapping):
+        return document
+    return _dereference_node(document, document, frozenset())
+
+
+def _dereference_node(
+    node: Any, root: Mapping[str, Any], active: frozenset[str]
+) -> Any:
+    if isinstance(node, list):
+        return [_dereference_node(item, root, active) for item in node]
+    if not isinstance(node, dict):
+        return node
+    ref = node.get("$ref")
+    if isinstance(ref, str):
+        target = _lookup_pointer(root, ref)
+        if target is None or ref in active:
+            # Unresolvable or cyclic: keep the reference so the field
+            # checks treat the shape as unverifiable.
+            return {
+                key: _dereference_node(value, root, active)
+                for key, value in node.items()
+            }
+        resolved = _dereference_node(target, root, active | {ref})
+        siblings = {
+            key: _dereference_node(value, root, active)
+            for key, value in node.items()
+            if key != "$ref"
+        }
+        return _compose_reference_siblings(resolved, siblings)
+    return {
+        key: _dereference_node(value, root, active)
+        for key, value in node.items()
+    }
+
+
+def _compose_reference_siblings(
+    resolved: dict[str, Any], siblings: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply keywords adjacent to a ``$ref`` alongside the resolved schema.
+
+    JSON Schema treats ``$ref`` as a peer assertion, so adjacent
+    constraints narrow the referenced schema instead of replacing it:
+    required-name lists combine, property schemas merge recursively, and
+    irreconcilable constraints compose as ``allOf`` so the referenced
+    schema's restrictions survive composition.
+    """
+    if not siblings:
+        return resolved
+    composed = dict(resolved)
+    merged_required: list[str] = []
+    for source in (resolved, siblings):
+        required = source.get("required")
+        if isinstance(required, list):
+            for name in required:
+                if name not in merged_required:
+                    merged_required.append(name)
+    if merged_required:
+        composed["required"] = merged_required
+    resolved_properties = resolved.get("properties")
+    sibling_properties = siblings.get("properties")
+    if isinstance(resolved_properties, dict) and isinstance(
+        sibling_properties, dict
+    ):
+        composed["properties"] = _merge_sibling_properties(
+            resolved_properties, sibling_properties
+        )
+    for key, value in siblings.items():
+        if key not in ("required", "properties"):
+            composed[key] = value
+    return composed
+
+
+def _merge_sibling_properties(
+    resolved: Mapping[str, Any], sibling: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge adjacent property schemas without dropping constraints.
+
+    Overlapping property schemas compose recursively; irreconcilable
+    constraints combine as ``allOf`` so the referenced schema's
+    restrictions (an ``enum``, for example) survive composition.
+    """
+    merged = dict(resolved)
+    for name, sibling_schema in sibling.items():
+        resolved_schema = merged.get(name)
+        if resolved_schema is None or resolved_schema == sibling_schema:
+            merged[name] = sibling_schema
+        elif isinstance(resolved_schema, dict) and isinstance(
+            sibling_schema, dict
+        ):
+            merged[name] = _compose_reference_siblings(
+                resolved_schema, sibling_schema
+            )
+        else:
+            merged[name] = {"allOf": [resolved_schema, sibling_schema]}
+    return merged
+
+
+def _lookup_pointer(
+    root: Mapping[str, Any], ref: str
+) -> Mapping[str, Any] | None:
+    if not ref.startswith("#/"):
+        return None
+    node: Any = root
+    for token in ref[2:].split("/"):
+        token = token.replace("~1", "/").replace("~0", "~")
+        if not isinstance(node, Mapping) or token not in node:
+            return None
+        node = node[token]
+    return node if isinstance(node, Mapping) else None
 
 
 def _contract_check(
@@ -449,7 +603,10 @@ def _schema_alternatives(schema: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _field_matches(
-    schema: Mapping[str, Any], requirement: SchemaFieldContract
+    schema: Mapping[str, Any],
+    requirement: SchemaFieldContract,
+    *,
+    outbound: bool = False,
 ) -> bool:
     states = _field_states(schema, requirement.path)
     if not states:
@@ -459,6 +616,22 @@ def _field_matches(
     if requirement.required_if_parent_present and not _field_required_in_parent(
         schema, requirement.path
     ):
+        return False
+    if any(
+        _contains_unresolved_ref(field_schema) for field_schema, _ in states
+    ):
+        # An unresolved reference leaves the consumed shape unverifiable,
+        # whether the field is required or optional.
+        return False
+    if (
+        outbound
+        and not requirement.required
+        and not requirement.required_if_parent_present
+        and all(required for _schema, required in states)
+    ):
+        # An outbound field the bridge may omit must stay omittable in at
+        # least one accepted request shape; alternatives that require it
+        # are covered by the instance checks for the sent examples.
         return False
     if (
         "any" in requirement.types
@@ -488,8 +661,10 @@ def _field_matches(
 def _field_required_in_parent(
     schema: Mapping[str, Any], path: tuple[str, ...]
 ) -> bool:
-    if len(path) < 2 or path[-1] in ("[]", "{}"):
+    if path[-1] in ("[]", "{}"):
         return False
+    if len(path) == 1:
+        return _schema_requires_field(schema, path[-1])
     parents = _field_states(schema, path[:-1])
     return any(
         _schema_requires_field(parent, path[-1])
@@ -582,6 +757,19 @@ def _field_states(
         rest,
         ancestors_required=ancestors_required and is_required,
     )
+
+
+def _contains_unresolved_ref(schema: Mapping[str, Any]) -> bool:
+    if "$ref" in schema:
+        return True
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        choices = schema.get(keyword)
+        if isinstance(choices, list) and any(
+            isinstance(choice, dict) and _contains_unresolved_ref(choice)
+            for choice in choices
+        ):
+            return True
+    return False
 
 
 def _schema_types(schema: Mapping[str, Any]) -> tuple[str, ...]:
