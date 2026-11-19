@@ -457,7 +457,9 @@ def _compose_reference_siblings(
 
     JSON Schema treats ``$ref`` as a peer assertion, so adjacent
     constraints narrow the referenced schema instead of replacing it:
-    required-name lists combine and property schemas merge per key.
+    required-name lists combine, property schemas merge recursively, and
+    irreconcilable constraints compose as ``allOf`` so the referenced
+    schema's restrictions survive composition.
     """
     if not siblings:
         return resolved
@@ -476,11 +478,38 @@ def _compose_reference_siblings(
     if isinstance(resolved_properties, dict) and isinstance(
         sibling_properties, dict
     ):
-        composed["properties"] = {**resolved_properties, **sibling_properties}
+        composed["properties"] = _merge_sibling_properties(
+            resolved_properties, sibling_properties
+        )
     for key, value in siblings.items():
         if key not in ("required", "properties"):
             composed[key] = value
     return composed
+
+
+def _merge_sibling_properties(
+    resolved: Mapping[str, Any], sibling: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Merge adjacent property schemas without dropping constraints.
+
+    Overlapping property schemas compose recursively; irreconcilable
+    constraints combine as ``allOf`` so the referenced schema's
+    restrictions (an ``enum``, for example) survive composition.
+    """
+    merged = dict(resolved)
+    for name, sibling_schema in sibling.items():
+        resolved_schema = merged.get(name)
+        if resolved_schema is None or resolved_schema == sibling_schema:
+            merged[name] = sibling_schema
+        elif isinstance(resolved_schema, dict) and isinstance(
+            sibling_schema, dict
+        ):
+            merged[name] = _compose_reference_siblings(
+                resolved_schema, sibling_schema
+            )
+        else:
+            merged[name] = {"allOf": [resolved_schema, sibling_schema]}
+    return merged
 
 
 def _lookup_pointer(

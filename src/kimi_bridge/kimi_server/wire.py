@@ -151,7 +151,10 @@ def _session_from_wire(value: dict[str, Any]) -> dict[str, Any]:
         }
     if "busy" not in normalized and "activity" in value:
         activity = value["activity"]
-        if activity not in {"idle", "turn", "background"}:
+        if (
+            not isinstance(activity, str)
+            or activity not in {"idle", "turn", "background"}
+        ):
             raise KimiServerProtocolError(f"unknown session activity: {activity!r}")
         normalized["busy"] = activity != "idle"
     return normalized
@@ -250,7 +253,9 @@ def _session_status_from_wire(
     agent: dict[str, Any] | None = None,
     usage: dict[str, Any] | None = None,
 ) -> SessionStatus:
-    agent_config = value.get("agent_config") or {}
+    agent_config = value.get("agent_config")
+    if agent_config is None:
+        agent_config = {}
     if not isinstance(agent_config, dict):
         raise KimiServerProtocolError("session agent_config is not an object")
     if agent is not None:

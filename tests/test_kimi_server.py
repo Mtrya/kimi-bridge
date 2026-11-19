@@ -839,6 +839,25 @@ async def test_update_profile_resolves_the_model_through_agent_inspection() -> N
     assert profile.model == "kimi-code/k3"
 
 
+async def test_malformed_session_payloads_fail_with_protocol_errors() -> None:
+    """Unhashable activity and malformed agent_config raise protocol errors."""
+
+    http = FakeHttpClient(
+        [
+            _envelope({"id": "session-1", "cwd": "/tmp", "activity": []}),
+            _envelope(
+                {"id": "session-1", "cwd": "/tmp", "busy": False, "agent_config": []}
+            ),
+        ]
+    )
+    client = KimiServerClient("http://127.0.0.1:43123", "token-1", http_client=http)
+
+    with pytest.raises(KimiServerProtocolError):
+        await client.get_session("session-1")
+    with pytest.raises(KimiServerProtocolError):
+        await client.get_session_status("session-1")
+
+
 async def test_list_sessions_merges_partitions_newest_first_and_caps_pages() -> None:
     """Partitions merge by recency across formats, dedupe keeps the newest."""
 
